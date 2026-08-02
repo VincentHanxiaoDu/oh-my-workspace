@@ -12,6 +12,7 @@
 #   CHANGES   #12  <title>                       a reviewer asked for changes
 #   READY     #12  <title>                       green and mergeable
 #   MERGED    #12  <title>                       it landed
+#   ISSUE-MOVED #12 <title>                     the Issue changed after this head was written
 #   NEEDS-REVIEW #12 <title>                    somebody else built it and it is waiting on a verdict
 #   LOOKUP FAILED: <reason>                      the poll could not be answered
 #
@@ -58,7 +59,7 @@ self_test() {
   # documentation exists.
   local s code
   code=$(grep -v '^[[:space:]]*#' "${BASH_SOURCE[0]}")
-  for s in FAILING CHANGES READY MERGED NEEDS-REVIEW; do
+  for s in FAILING CHANGES READY MERGED NEEDS-REVIEW ISSUE-MOVED; do
     printf '%s' "$code" | grep -q "emit $s " \
       || { echo "SELF-TEST FAIL: state '$s' is never emitted — an agent would not learn about it" >&2; rc=1; }
   done
@@ -131,6 +132,23 @@ while true; do
     fi
     failing=$(printf '%s' "$runs" | jq -r '[.check_runs[]? | select(.conclusion=="failure" or .conclusion=="timed_out" or .conclusion=="cancelled") | .name] | join(", ")' 2>/dev/null || echo "")
     pending=$(printf '%s' "$runs" | jq -r '[.check_runs[]? | select(.status!="completed")] | length' 2>/dev/null || echo 0)
+
+    # THE ISSUE MOVED UNDER AN OPEN PULL REQUEST. A ruling changes what an Issue asks for, and
+    # nothing told the work already in flight: one pull request was cut three minutes before a
+    # ruling landed and another fourteen minutes after it, and BOTH were built to the old reading.
+    # The queue already knows a ruling makes a built Issue unbuilt — that only governs what is
+    # picked up NEXT, and says nothing to a branch that is already open.
+    #
+    # A stale build and a wrong build look identical in a diff. This is the one thing that tells
+    # them apart, and it has to arrive before the review does.
+    iss=$(gh api "repos/$REPO/pulls/$num" --jq '.body' 2>/dev/null | grep -oE '(Refs|refs) #[0-9]+' | head -1 | grep -oE '[0-9]+' || true)
+    if [ -n "$iss" ]; then
+      iupd=$(gh api "repos/$REPO/issues/$iss" --jq .updated_at 2>/dev/null || echo "")
+      cupd=$(gh api "repos/$REPO/commits/$sha" --jq .commit.committer.date 2>/dev/null || echo "")
+      if [ -n "$iupd" ] && [ -n "$cupd" ] && [ "$iupd" \> "$cupd" ]; then
+        emit ISSUE-MOVED "$num" "$title" "Issue #$iss changed at $iupd, after this head was written at $cupd — re-read it before anyone reviews this"
+      fi
+    fi
 
     if [ -n "$failing" ]; then
       # THE GATE'S OWN MESSAGE, NOT JUST ITS NAME. Measured by handing a dev agent nothing but the
