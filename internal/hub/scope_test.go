@@ -2,12 +2,41 @@ package hub
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
-// A colleague's own scopes: everything a person can hold, which is NOT ScopeReadAll.
-func colleagueScopes() []Scope {
-	return []Scope{ScopeReadOwn, ScopeReadVisible, ScopePublish, ScopeSetVisibility}
+// colleagueScopes is what an ordinary colleague holds: everything in the ruled vocabulary.
+//
+// A person who has signed in holds all three; the question criterion 10 asks is whether they can
+// DELEGATE more than they hold, so the narrower holders below are the interesting ones.
+func colleagueScopes() []Scope { return []Scope{ScopeRead, ScopeWrite, ScopePublish} }
+
+// readOnlyColleague holds `read` and `write` but has never been granted `publish` — PRD §3.10's
+// "a token that can do the second was asked for on purpose", from the person's side.
+func readOnlyColleague(p PersonID) Holder {
+	return Holder{Person: p, Scopes: []Scope{ScopeRead, ScopeWrite}}
+}
+
+// THE VOCABULARY IS THE RULED ONE. Issue #12's `## Ruled` section fixes it at read / write /
+// publish, and #19 owns it. This asserts the literal three, deliberately and unlike every other
+// test in this file: the rest read Vocabulary() dynamically because what they are about is
+// cross-surface CONSISTENCY, which must not be pinned to particular words. This one is about the
+// words, because an earlier revision of this branch invented six of its own and nothing caught it.
+func TestVocabularyIsTheRuledThree(t *testing.T) {
+	got := map[string]bool{}
+	for _, s := range Vocabulary() {
+		got[string(s)] = true
+	}
+	want := []string{"read", "write", "publish"}
+	if len(got) != len(want) {
+		t.Errorf("the vocabulary has %d scopes (%v), want exactly the ruled three %v", len(got), Vocabulary(), want)
+	}
+	for _, w := range want {
+		if !got[w] {
+			t.Errorf("the ruled scope %q is missing from the vocabulary %v", w, Vocabulary())
+		}
+	}
 }
 
 // CRITERION 10 and CRITERION 11.
@@ -16,7 +45,7 @@ func TestGrantWiderThanItsHolderIsRefusedAndIssuesNothing(t *testing.T) {
 	h := Holder{Person: "alice", Scopes: colleagueScopes()}
 
 	// A legitimate grant first, so "unchanged" means something other than "empty".
-	if _, err := l.Request(h, []Scope{ScopeReadVisible}); err != nil {
+	if _, err := l.Request(h, []Scope{ScopeRead}); err != nil {
 		t.Fatalf("a grant within the holder's own scopes was refused: %v", err)
 	}
 	before := l.Grants("alice")
@@ -24,7 +53,15 @@ func TestGrantWiderThanItsHolderIsRefusedAndIssuesNothing(t *testing.T) {
 		t.Fatalf("ledger has %d grants, want 1", len(before))
 	}
 
-	g, err := l.Request(h, []Scope{ScopeReadVisible, ScopeReadAll})
+	// alice herself was never granted `publish`, so a token asking for it asks for more than she
+	// holds — PRD §4.5, refused when requested rather than narrowed at the edge.
+	narrow := readOnlyColleague("alice")
+	if _, err := l.Request(narrow, []Scope{ScopeRead}); err != nil {
+		t.Fatalf("a second legitimate grant was refused: %v", err)
+	}
+	before = l.Grants("alice")
+
+	g, err := l.Request(narrow, []Scope{ScopeRead, ScopePublish})
 	if err == nil {
 		t.Fatalf("a grant wider than its holder was issued: %v", g)
 	}
@@ -42,8 +79,8 @@ func TestGrantWiderThanItsHolderIsRefusedAndIssuesNothing(t *testing.T) {
 			len(after), len(before))
 	}
 	for _, got := range after {
-		if Permits(got.Scopes, ScopeReadAll) {
-			t.Errorf("grant %s carries the operator scope", got.ID)
+		if Permits(got.Scopes, ScopePublish) {
+			t.Errorf("grant %s carries the publish scope its holder was never granted", got.ID)
 		}
 	}
 }
@@ -51,8 +88,8 @@ func TestGrantWiderThanItsHolderIsRefusedAndIssuesNothing(t *testing.T) {
 // The refusal is TOTAL, not an intersection. Refusing by dropping the offending scope would issue a
 // token the caller believes carries what it asked for.
 func TestRefusedGrantIsNotNarrowedInstead(t *testing.T) {
-	h := Holder{Person: "alice", Scopes: colleagueScopes()}
-	scopes, err := EvaluateGrantRequest(h, []Scope{ScopePublish, ScopeManageGroups})
+	h := readOnlyColleague("alice")
+	scopes, err := EvaluateGrantRequest(h, []Scope{ScopeRead, ScopePublish})
 	if err == nil {
 		t.Fatalf("wider grant permitted, scopes = %v", scopes)
 	}
@@ -69,7 +106,7 @@ func TestGrantRequestRejectsUnknownAndEmptyScopes(t *testing.T) {
 	if _, err := EvaluateGrantRequest(h, nil); Code(err) != ErrUnknownScope.Code {
 		t.Errorf("an empty request = %v, want %q", err, ErrUnknownScope.Code)
 	}
-	if _, err := EvaluateGrantRequest(h, []Scope{"notes:read:everything"}); Code(err) != ErrUnknownScope.Code {
+	if _, err := EvaluateGrantRequest(h, []Scope{"notes:read:all"}); Code(err) != ErrUnknownScope.Code {
 		t.Errorf("an unknown scope = %v, want %q", err, ErrUnknownScope.Code)
 	}
 }
@@ -103,8 +140,12 @@ func TestOneScopeVocabularyAcrossSurfaces(t *testing.T) {
 	if !Permits([]Scope{ScopePublish}, ScopePublish) {
 		t.Error("ScopePublish does not permit publishing")
 	}
-	if Permits([]Scope{ScopeReadVisible}, ScopePublish) {
-		t.Error("a read scope permits publishing — scopes must not imply one another")
+	// CRITERION 13, in its own words: "`publish` permits publishing a company-wide note identically
+	// on all three, and `read` and `write` permit it on none."
+	for _, s := range []Scope{ScopeRead, ScopeWrite} {
+		if Permits([]Scope{s}, ScopePublish) {
+			t.Errorf("%q permits publishing — scopes must not imply one another", s)
+		}
 	}
 }
 
@@ -118,11 +159,11 @@ func TestGrantReadsExactlyWhatItsPersonCan(t *testing.T) {
 	}
 	l := NewLedger()
 
-	carolGrant, err := l.Request(Holder{Person: "carol", Scopes: colleagueScopes()}, []Scope{ScopeReadVisible})
+	carolGrant, err := l.Request(Holder{Person: "carol", Scopes: colleagueScopes()}, []Scope{ScopeRead})
 	if err != nil {
 		t.Fatalf("carol's grant: %v", err)
 	}
-	danGrant, err := l.Request(Holder{Person: "dan", Scopes: colleagueScopes()}, []Scope{ScopeReadVisible})
+	danGrant, err := l.Request(Holder{Person: "dan", Scopes: colleagueScopes()}, []Scope{ScopeRead})
 	if err != nil {
 		t.Fatalf("dan's grant: %v", err)
 	}
@@ -143,19 +184,162 @@ func TestGrantReadsExactlyWhatItsPersonCan(t *testing.T) {
 	}
 }
 
-// The narrower read scope really is narrower.
-func TestReadOwnGrantCannotReadOthersNotes(t *testing.T) {
+// A grant with no read scope cannot read, and says so with its own code rather than looking like a
+// visibility refusal — the two are fixed by different things.
+func TestGrantWithoutReadScopeCannotRead(t *testing.T) {
 	s := testStore(t)
-	n, _ := s.Publish(Publication{Author: "alice", Title: "t", Body: "b"}) // company-wide
-	g, err := NewLedger().Request(Holder{Person: "carol", Scopes: colleagueScopes()}, []Scope{ScopeReadOwn})
+	n, _ := s.Publish(Publication{Author: "carol", Title: "t", Body: "b"}) // company-wide
+	g, err := NewLedger().Request(Holder{Person: "carol", Scopes: colleagueScopes()}, []Scope{ScopeWrite})
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
-	if _, err := ReadThrough(s, g, n.ID); !errors.Is(err, ErrRefused) {
-		t.Errorf("a 'read my own notes' grant read somebody else's note: %v", err)
+	_, err = ReadThrough(s, g, n.ID)
+	if Code(err) != ErrReadScopeRequired.Code {
+		t.Errorf("a write-only grant reading a note = %v (code %q), want %q", err, Code(err), ErrReadScopeRequired.Code)
 	}
-	own, _ := s.Publish(Publication{Author: "carol", Title: "t", Body: "b"})
-	if _, err := ReadThrough(s, g, own.ID); err != nil {
-		t.Errorf("a 'read my own notes' grant cannot read its holder's own note: %v", err)
+	if Code(err) == ErrRefused.Code {
+		t.Error("'your grant may not do this' is indistinguishable from 'this note is not visible to you'")
 	}
+}
+
+// ==============================================================================================
+// CRITERION 10a — the write path. Setting a note's visibility is part of publishing it.
+// ==============================================================================================
+
+// All three of 10a's clauses, on both write entry points: refused, distinguishably, and the note's
+// visibility is UNCHANGED afterwards.
+//
+// The third clause is the one a naive fix drops. A refusal that has already written passes "was
+// refused" and "looks different from success" while having done the thing, so this reads the stored
+// visibility back rather than trusting the returned error.
+func TestOnlyThePublishScopeCanSetVisibility(t *testing.T) {
+	for _, held := range [][]Scope{{ScopeRead}, {ScopeWrite}, {ScopeRead, ScopeWrite}} {
+		t.Run(scopeList(held), func(t *testing.T) {
+			s := testStore(t)
+			n, err := s.Publish(Publication{Author: "alice", Title: "t", Body: "b", Visibility: SelfOnly()})
+			if err != nil {
+				t.Fatalf("Publish: %v", err)
+			}
+			before, err := s.VisibilityOf(n.ID)
+			if err != nil {
+				t.Fatalf("VisibilityOf: %v", err)
+			}
+
+			g, err := NewLedger().Request(Holder{Person: "alice", Scopes: colleagueScopes()}, held)
+			if err != nil {
+				t.Fatalf("grant: %v", err)
+			}
+
+			// Clause 1: refused.
+			got, err := SetVisibilityThrough(s, g, n.ID, CompanyWide())
+			if err == nil {
+				t.Fatalf("a grant holding %s changed who can see a note", scopeList(held))
+			}
+			if got != nil {
+				t.Error("a note came back alongside the refusal")
+			}
+			// Clause 2: distinguishably from success, without parsing prose.
+			if Code(err) != ErrPublishScopeRequired.Code {
+				t.Errorf("code = %q, want %q", Code(err), ErrPublishScopeRequired.Code)
+			}
+			// Clause 3: unchanged afterwards.
+			after, err := s.VisibilityOf(n.ID)
+			if err != nil {
+				t.Fatalf("VisibilityOf after the refusal: %v", err)
+			}
+			if !after.Equal(before) {
+				t.Errorf("the note's visibility changed from %q to %q despite the refusal — criterion 10a's third clause",
+					before.Token(), after.Token())
+			}
+			if after.Token() != "self" {
+				t.Errorf("visibility is now %q, want %q", after.Token(), "self")
+			}
+		})
+	}
+}
+
+// The same rule on the way in: a grant that cannot publish cannot create a note either, and the hub
+// holds nothing afterwards.
+func TestOnlyThePublishScopeCanPublish(t *testing.T) {
+	s := testStore(t)
+	before := s.Count()
+	g, err := NewLedger().Request(Holder{Person: "alice", Scopes: colleagueScopes()}, []Scope{ScopeRead, ScopeWrite})
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+
+	n, err := PublishThrough(s, g, Publication{Title: "t", Body: "b"})
+	if err == nil {
+		t.Fatalf("a read/write grant published note %v", n.ID)
+	}
+	if Code(err) != ErrPublishScopeRequired.Code {
+		t.Errorf("code = %q, want %q", Code(err), ErrPublishScopeRequired.Code)
+	}
+	if s.Count() != before {
+		t.Errorf("the hub holds %d notes after a refused publication, was %d", s.Count(), before)
+	}
+}
+
+// And the publish scope does work, so the tests above are not passing because everything is refused.
+func TestThePublishScopeCanPublishAndSetVisibility(t *testing.T) {
+	s := testStore(t)
+	g, err := NewLedger().Request(Holder{Person: "alice", Scopes: colleagueScopes()}, []Scope{ScopeRead, ScopePublish})
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	n, err := PublishThrough(s, g, Publication{Title: "t", Body: "b"})
+	if err != nil {
+		t.Fatalf("a publish grant could not publish: %v", err)
+	}
+	if n.Author != "alice" {
+		t.Errorf("the note was published as %q, want the grant's holder", n.Author)
+	}
+	if _, err := SetVisibilityThrough(s, g, n.ID, SelfOnly()); err != nil {
+		t.Fatalf("a publish grant could not change visibility: %v", err)
+	}
+	v, _ := s.VisibilityOf(n.ID)
+	if v.Token() != "self" {
+		t.Errorf("visibility is %q, want %q", v.Token(), "self")
+	}
+}
+
+// A grant acts as its holder and cannot publish words as somebody else.
+func TestAGrantCannotPublishAsSomebodyElse(t *testing.T) {
+	s := testStore(t)
+	g, err := NewLedger().Request(Holder{Person: "alice", Scopes: colleagueScopes()}, []Scope{ScopePublish})
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	if _, err := PublishThrough(s, g, Publication{Author: "bo", Title: "t", Body: "b"}); !errors.Is(err, ErrRefused) {
+		t.Errorf("alice's grant published as bo: %v", err)
+	}
+	if s.Count() != 0 {
+		t.Error("a note was stored despite the refusal")
+	}
+}
+
+// A grant that may publish still cannot change a note it does not own — the scope check does not
+// replace the authorship check, it precedes it.
+func TestPublishScopeDoesNotOverrideAuthorship(t *testing.T) {
+	s := testStore(t)
+	n, _ := s.Publish(Publication{Author: "alice", Title: "t", Body: "b", Visibility: SelfOnly()})
+	g, err := NewLedger().Request(Holder{Person: "bo", Scopes: colleagueScopes()}, []Scope{ScopePublish})
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	if _, err := SetVisibilityThrough(s, g, n.ID, CompanyWide()); !errors.Is(err, ErrRefused) {
+		t.Errorf("bo's publish grant changed alice's note: %v", err)
+	}
+	v, _ := s.VisibilityOf(n.ID)
+	if v.Token() != "self" {
+		t.Errorf("visibility is now %q — a refusal must leave the note as it was", v.Token())
+	}
+}
+
+func scopeList(ss []Scope) string {
+	parts := make([]string, 0, len(ss))
+	for _, s := range ss {
+		parts = append(parts, string(s))
+	}
+	return strings.Join(parts, "+")
 }

@@ -55,6 +55,14 @@
 - [x] With no hub configured, no visibility surface can reach `net` (import-graph test, toolchain probed not assumed)
 - [x] The daemon probe reads the socket it is told about and never starts anything
 
+## Review round: criterion 10a and the ruled vocabulary
+
+- [x] Gate the write path: `PublishThrough` and `SetVisibilityThrough`, symmetric with `ReadThrough`
+- [x] Refuse with `ErrPublishScopeRequired`, its own machine-readable code, so a caller need not parse prose
+- [x] Assert the note's visibility is UNCHANGED after a refusal — criterion 10a's third clause
+- [x] Adopt the ruled scope vocabulary `read` / `write` / `publish` (Issue #12 `## Ruled`, ruled on #19)
+- [x] Watch the clause-3 assertion fail against a refusal that mutates first, then revert
+
 ## Verification
 
 - [x] `make ci` green

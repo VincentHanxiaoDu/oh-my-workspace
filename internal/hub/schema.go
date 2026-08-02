@@ -72,13 +72,18 @@ func PublishTool() ToolSchema {
 // also a point of choice, so it also carries the statement, via the same field.
 func SetVisibilityTool() ToolSchema {
 	return ToolSchema{
-		Tool:        "notes.set_visibility",
-		Description: "Change who can see a note you wrote. This applies to the whole note, including every earlier version on its timeline.",
+		Tool: "notes.set_visibility",
+		Description: "Change who can see a note you wrote. This applies to the whole note, including every earlier version on its timeline. " +
+			"Changing who can see a note is part of publishing it, so it requires the " + string(ScopePublish) +
+			" scope; a grant carrying only " + string(ScopeRead) + " or " + string(ScopeWrite) +
+			" is refused with code " + ErrPublishScopeRequired.Code + " and the note is left as it was.",
 		Fields: []FieldSchema{
 			{Name: "note_id", Type: "string", Required: true, Description: "The note to change."},
 			VisibilityField(),
 		},
-		Scopes: scopeStrings(ScopeSetVisibility),
+		// CRITERION 10a: changing who can see a note is part of publishing it, so it is the
+		// SAME scope, not a separate one.
+		Scopes: scopeStrings(ScopePublish),
 	}
 }
 
@@ -96,7 +101,7 @@ func ReadTool() ToolSchema {
 			{Name: "note_id", Type: "string", Required: true, Description: "The note to read."},
 			{Name: "version", Type: "integer", Required: false, Description: "A point on the note's timeline. The note's current visibility governs every version of it."},
 		},
-		Scopes: scopeStrings(ScopeReadVisible),
+		Scopes: scopeStrings(ScopeRead),
 	}
 }
 

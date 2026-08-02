@@ -71,6 +71,18 @@ var (
 	// ErrUnknownScope — a grant request named a scope that is not in the one vocabulary.
 	ErrUnknownScope = &Error{Code: "unknown-scope", Msg: "refused: that scope is not in the scope vocabulary"}
 
+	// ErrPublishScopeRequired — criterion 10a. Publishing a note, or changing who can see one, needs
+	// the `publish` scope. A grant carrying only `read` or `write` is refused, and refused BEFORE
+	// anything is written, so the note's visibility is unchanged afterwards.
+	//
+	// It is its own code rather than a flavour of ErrRefused because a caller must be able to tell
+	// "your token may not do this" from "this note is not visible to you" — the first is fixed by
+	// asking for a different grant, the second is not fixable at all.
+	ErrPublishScopeRequired = &Error{Code: "publish-scope-required", Msg: "refused: publishing a note, or changing who can see one, requires the publish scope"}
+
+	// ErrReadScopeRequired — a grant with no read scope tried to read.
+	ErrReadScopeRequired = &Error{Code: "read-scope-required", Msg: "refused: reading notes requires the read scope"}
+
 	// ErrEmptyAudience — a narrowing to named people named nobody. Refused rather than published to
 	// an audience of zero, which criterion 15 forbids as an outcome of a refused narrowing and
 	// which is nonsense as a choice in its own right.
@@ -90,6 +102,7 @@ var (
 var allErrors = []*Error{
 	ErrNoSuchNote, ErrRefused, ErrUnknownGroup, ErrUndetermined, ErrHubUnreachable,
 	ErrNoHubConfigured, ErrDaemonNotRunning, ErrGrantWiderThanHolder, ErrUnknownScope,
+	ErrPublishScopeRequired, ErrReadScopeRequired,
 	ErrEmptyAudience, ErrUnknownVisibility, ErrNoAuthor,
 }
 

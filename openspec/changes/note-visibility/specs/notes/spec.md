@@ -140,3 +140,23 @@ success.
 #### Scenario: No daemon is running
 - **WHEN** a visibility surface needs the daemon and none is running
 - **THEN** the command says the daemon is not running and does not start it
+
+### Requirement: Changing who can see a note requires the publish scope
+Setting a note's visibility, or narrowing it later, is part of publishing that note, and the system
+SHALL refuse it to a grant that does not carry the publish scope, leaving the note's visibility
+unchanged.
+
+#### Scenario: a read-only grant tries to narrow a note
+- **WHEN** a grant carrying only the read scope calls the visibility-setting entry point
+- **THEN** the call is refused with a distinct machine-readable code
+- **AND** the note's visibility afterwards is the visibility it had before the attempt
+
+#### Scenario: a read-only grant tries to publish
+- **WHEN** a grant carrying only the read scope calls the publishing entry point
+- **THEN** the call is refused with the same code, distinguishably from success
+- **AND** no note is published
+
+#### Scenario: a grant carrying the publish scope succeeds
+- **WHEN** a grant carrying the publish scope sets a note's visibility
+- **THEN** the visibility is changed, so the refusal above is shown to be the scope check and not a
+  blanket refusal
