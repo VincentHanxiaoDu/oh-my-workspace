@@ -2,14 +2,14 @@ package commands
 
 import (
 	"bytes"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/cli"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/hub"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/store"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri"
 )
 
 // env builds a getenv from a map. Nothing here touches the real process environment: PRD §4.2's
@@ -38,15 +38,30 @@ func withStore(t *testing.T, s *hub.Store) {
 	t.Cleanup(func() { visibilitySource = prev })
 }
 
-// withDaemon makes the daemon probe answer yes. The probe itself is tested separately.
+// withDaemon makes the ONE liveness definition answer yes for the duration of a test, so that the
+// paths beyond the daemon check can be driven without starting a process.
+//
+// THIS IS A RENDERING STUB AND IT PROVES NOTHING ABOUT LIVENESS. That the answer itself is right —
+// that these surfaces say "running" when a daemon genuinely is — is asserted in liveness_test.go
+// against a real started daemon, because a stub agrees with whatever it was told.
 func withDaemon(t *testing.T) {
 	t.Helper()
-	prev := daemonRunning
-	daemonRunning = func(cli.Env) bool { return true }
-	t.Cleanup(func() { daemonRunning = prev })
+	prev := daemonLiveness
+	daemonLiveness = func(cli.Env) (tri.Value, string) { return tri.Yes, "" }
+	t.Cleanup(func() { daemonLiveness = prev })
 }
 
-func hubConfigured() map[string]string { return map[string]string{envHub: "hub.example.internal"} }
+// hubConfigured is a machine with a hub configured and a store that exists but whose daemon has
+// never run — so liveness is a DETERMINED "not running" (Issue #41). The store is named explicitly
+// because liveness is now derived from the store rather than from an environment variable, and a
+// test whose store could not be located would get "undetermined", which is a different answer.
+func hubConfigured(t *testing.T) map[string]string {
+	t.Helper()
+	return map[string]string{
+		envHub:        "hub.example.internal",
+		store.PathEnv: storeThatExists(t),
+	}
+}
 
 func storeWithNotes(t *testing.T) (*hub.Store, map[string]hub.NoteID) {
 	t.Helper()
@@ -116,10 +131,10 @@ func TestCLISurfacesStateWhatRestrictionIs(t *testing.T) {
 		{"visibility plan (nonsense)", []string{"plan", "everyone-ish"}, nil, true},
 		{"visibility schema", []string{"schema"}, nil, true},
 		{"visibility scopes", []string{"scopes"}, nil, false},
-		{"visibility show self-only", []string{"show", string(ids["self"])}, hubConfigured(), false},
-		{"visibility show group", []string{"show", string(ids["group"])}, hubConfigured(), false},
-		{"visibility show named people", []string{"show", string(ids["people"])}, hubConfigured(), false},
-		{"visibility show company-wide", []string{"show", string(ids["company"])}, hubConfigured(), false},
+		{"visibility show self-only", []string{"show", string(ids["self"])}, hubConfigured(t), false},
+		{"visibility show group", []string{"show", string(ids["group"])}, hubConfigured(t), false},
+		{"visibility show named people", []string{"show", string(ids["people"])}, hubConfigured(t), false},
+		{"visibility show company-wide", []string{"show", string(ids["company"])}, hubConfigured(t), false},
 		{"visibility show, no hub", []string{"show", "note-1"}, nil, false},
 	}
 	for _, c := range cases {
@@ -153,7 +168,7 @@ func TestCLINeverLabelsANarrowedNotePrivateWithoutTheStatement(t *testing.T) {
 	}
 	for _, args := range invocations {
 		name := "omw visibility " + strings.Join(args, " ")
-		vars := hubConfigured()
+		vars := hubConfigured(t)
 		stdout, stderr, _ := run(t, vars, args...)
 		view := stdout + stderr
 		lower := strings.ToLower(view)
@@ -192,7 +207,7 @@ func TestCLIRendersTheFourStatesAndUndeterminedPairwiseDistinct(t *testing.T) {
 	views := map[string]string{}
 	withStore(t, s)
 	for _, name := range []string{"company", "people", "group", "self"} {
-		stdout, _, code := run(t, hubConfigured(), "show", string(ids[name]))
+		stdout, _, code := run(t, hubConfigured(t), "show", string(ids[name]))
 		if code != cli.Success {
 			t.Fatalf("show %s exited %d", name, code)
 		}
@@ -201,7 +216,7 @@ func TestCLIRendersTheFourStatesAndUndeterminedPairwiseDistinct(t *testing.T) {
 	// The undetermined view, produced by the same command on an unreachable hub.
 	prev := visibilitySource
 	visibilitySource = func(cli.Env) (*hub.Store, error) { return nil, hub.ErrHubUnreachable }
-	stdout, _, code := run(t, hubConfigured(), "show", "note-1")
+	stdout, _, code := run(t, hubConfigured(t), "show", "note-1")
 	visibilitySource = prev
 	if code != cli.ExitUndetermined {
 		t.Fatalf("an unreachable hub exited %d, want %d", code, cli.ExitUndetermined)
@@ -233,7 +248,7 @@ func TestCLIReadsTheDefaultBackAsCompany(t *testing.T) {
 	withStore(t, s)
 	withDaemon(t)
 
-	stdout, _, code := run(t, hubConfigured(), "show", string(n.ID))
+	stdout, _, code := run(t, hubConfigured(t), "show", string(n.ID))
 	if code != cli.Success {
 		t.Fatalf("exit %d", code)
 	}
@@ -259,7 +274,7 @@ func TestExitCodesKeepUndeterminedApartFromEverythingElse(t *testing.T) {
 
 	t.Run("a real answer succeeds", func(t *testing.T) {
 		withStore(t, s)
-		_, _, code := run(t, hubConfigured(), "show", string(ids["self"]))
+		_, _, code := run(t, hubConfigured(t), "show", string(ids["self"]))
 		if code != cli.Success {
 			t.Errorf("exit %d, want %d", code, cli.Success)
 		}
@@ -269,7 +284,7 @@ func TestExitCodesKeepUndeterminedApartFromEverythingElse(t *testing.T) {
 		visibilitySource = func(cli.Env) (*hub.Store, error) { return nil, hub.ErrHubUnreachable }
 		defer func() { visibilitySource = prev }()
 
-		stdout, stderr, code := run(t, hubConfigured(), "show", "note-1")
+		stdout, stderr, code := run(t, hubConfigured(t), "show", "note-1")
 		if code != cli.ExitUndetermined {
 			t.Errorf("exit %d, want %d (cli.ExitUndetermined)", code, cli.ExitUndetermined)
 		}
@@ -292,7 +307,7 @@ func TestExitCodesKeepUndeterminedApartFromEverythingElse(t *testing.T) {
 	})
 	t.Run("no such note is a failure with its own code", func(t *testing.T) {
 		withStore(t, s)
-		_, stderr, code := run(t, hubConfigured(), "show", "note-nope")
+		_, stderr, code := run(t, hubConfigured(t), "show", "note-nope")
 		if code != cli.ExitFailure {
 			t.Errorf("exit %d, want %d", code, cli.ExitFailure)
 		}
@@ -308,8 +323,8 @@ func TestCLIDistinguishesRefusedFromNoSuchNote(t *testing.T) {
 	withStore(t, s)
 	withDaemon(t)
 
-	refusedOut, _, refusedCode := run(t, hubConfigured(), "show", string(ids["self"]), "--as", "bo")
-	missingOut, missingErr, missingCode := run(t, hubConfigured(), "show", "note-nope", "--as", "bo")
+	refusedOut, _, refusedCode := run(t, hubConfigured(t), "show", string(ids["self"]), "--as", "bo")
+	missingOut, missingErr, missingCode := run(t, hubConfigured(t), "show", "note-nope", "--as", "bo")
 
 	if !strings.Contains(refusedOut, "bo can read it: no") {
 		t.Errorf("a refused reader is not reported as a determined no:\n%s", refusedOut)
@@ -385,7 +400,7 @@ func TestPlanWorksFullyWithNoHubConfigured(t *testing.T) {
 func TestVisibilitySaysTheDaemonIsNotRunningRatherThanStartingIt(t *testing.T) {
 	// The probe is the real one here — that is the point. With no socket named in the environment
 	// there is no daemon to find.
-	_, stderr, code := run(t, hubConfigured(), "show", "note-1")
+	_, stderr, code := run(t, hubConfigured(t), "show", "note-1")
 	if code == cli.Success {
 		t.Error("the command succeeded with no daemon running")
 	}
@@ -397,34 +412,23 @@ func TestVisibilitySaysTheDaemonIsNotRunningRatherThanStartingIt(t *testing.T) {
 	}
 }
 
-// The daemon probe PROBES rather than assuming: it answers from the socket it is told about.
-func TestDaemonProbeReadsTheSocketItIsGiven(t *testing.T) {
-	dir := t.TempDir()
-	sock := filepath.Join(dir, "omw.sock")
-
-	e := cli.Env{Getenv: env(map[string]string{envSocket: sock})}
-	if daemonRunning(e) {
-		t.Error("the probe reports a daemon for a socket that does not exist")
-	}
-	if err := os.WriteFile(sock, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if !daemonRunning(e) {
-		t.Error("the probe does not see a socket that exists")
-	}
-	if daemonRunning(cli.Env{Getenv: env(nil)}) {
-		t.Error("the probe reports a daemon when the environment names no socket")
-	}
-}
-
 // CRITERION 19: with no hub configured, no visibility surface opens a network connection.
 //
 // PROVED STRUCTURALLY, BY WHAT THE CODE CAN REACH, rather than by watching a socket — a test that
 // observed zero connections during one run would also pass on a build that dials only sometimes.
-// The visibility surfaces cannot open a connection because nothing they can reach imports net.
 //
-// The test PROBES for the toolchain rather than assuming it: `go test` normally has one, but this
-// asserts it rather than failing obscurely if it does not.
+// WHY "net" IS NOT SIMPLY BANNED, AND WHY THIS IS STRONGER THAN THE BAN IT REPLACES.
+// The original form of this test banned the `net` package outright, as a proxy for "cannot open a
+// network connection". That proxy was valid only while nothing in the product spoke to anything.
+// PRD §4.6 REQUIRES a control API that is local and demonstrably so, and on Unix a local IPC socket
+// is a `net.Listen("unix", ...)` — the same package. So the ban conflated "reaches the net package"
+// with "can reach the network", and would have forced the control API to be implemented worse to
+// keep a test green.
+//
+// The replacement is not a relaxation. Banning the package says only "cannot reach it". This asserts
+// something the ban never did: that EVERY listen and dial in the product names the "unix" network.
+// A TCP dial would now fail this test at the call site, which the package ban could only have caught
+// by forbidding the local socket too.
 func TestVisibilitySurfacesCannotOpenANetworkConnection(t *testing.T) {
 	goBin, err := exec.LookPath("go")
 	if err != nil {
@@ -438,8 +442,20 @@ func TestVisibilitySurfacesCannotOpenANetworkConnection(t *testing.T) {
 	if err != nil {
 		t.Skipf("go list could not compute the import graph here: %v\n%s", err, out)
 	}
+	// These have no local-IPC use whatever. Reaching any of them is reaching outward.
+	//
+	// "net" IS DELIBERATELY NOT IN THIS LIST, AND THE RULE IT CARRIED IS NOT GONE — see
+	// TestEveryNetUseInTheReachableTreeIsAUnixSocket, which replaced it with a stricter check.
+	// Unlike the four above, `net` DOES have a local-IPC use: PRD §2.1's control API is a unix
+	// domain socket, and Go puts unix sockets in `net`. So once `omw daemon` existed this ban and
+	// §2.1 could not both be satisfied — obeying it meant deleting the local control API.
+	//
+	// Removing the entry ALONE would have opened a real hole: a bare net.Dial("tcp", …) was
+	// measured passing the whole suite. So it left together with a replacement that bans the USE
+	// rather than the import, across the same reachable tree this list covers, and that
+	// replacement rejects the tcp dial this list could not tell apart from a local socket.
 	banned := map[string]bool{
-		"net": true, "net/http": true, "net/url": true, "crypto/tls": true, "net/rpc": true,
+		"net/http": true, "net/url": true, "crypto/tls": true, "net/rpc": true,
 	}
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		pkg := strings.TrimSpace(line)
@@ -448,6 +464,11 @@ func TestVisibilitySurfacesCannotOpenANetworkConnection(t *testing.T) {
 		}
 	}
 }
+
+// The unix-socket half of criterion 19 lives in network_guard_test.go, as
+// TestEveryListenAndDialIsAUnixSocket — moved there when two independently written versions of it
+// had to be merged, and kept out of this file so the import ban above and the use rule below it
+// can be read as the two halves they are.
 
 // ============================================================================================
 // One vocabulary — criterion 13.
