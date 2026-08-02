@@ -79,7 +79,7 @@ func (w *searchWorld) out() string    { return w.stdout.String() }
 func (w *searchWorld) errOut() string { return w.stderr.String() }
 func (w *searchWorld) all() string    { return w.stdout.String() + w.stderr.String() }
 
-func searchCorpus(t *testing.T) (*hub.Store, *hub.Record) {
+func searchCorpus(t *testing.T) (*hub.Store, *hub.Record, hub.NoteID) {
 	t.Helper()
 	r := hub.NewRecord()
 	s := hub.NewStore(r)
@@ -88,16 +88,17 @@ func searchCorpus(t *testing.T) (*hub.Store, *hub.Record) {
 	r.AddPerson("searcher")
 	r.AddPerson("ada")
 	r.AddPerson("dana")
-	if _, err := s.Publish(hub.Publication{Author: "ada", Title: "why sessions drop", Body: "the staging cluster sessiondrop"}); err != nil {
+	note, err := s.Publish(hub.Publication{Author: "ada", Title: "why sessions drop", Body: "the staging cluster sessiondrop"})
+	if err != nil {
 		t.Fatalf("publish: %v", err)
 	}
-	return s, r
+	return s, r, note.ID
 }
 
 // --- criterion 14: found nothing is an answer --------------------------------------------------
 
 func TestSearchFoundNothingSucceeds(t *testing.T) {
-	s, _ := searchCorpus(t)
+	s, _, _ := searchCorpus(t)
 	w := newSearchWorld(t).withHub().as("searcher").scopes("read")
 	w.withDaemon(t).run(t, s, nil, "nosuchterm")
 
@@ -155,7 +156,7 @@ var searchFailureModes = []searchFailureMode{
 		world: func(t *testing.T) *searchWorld {
 			return newSearchWorld(t).withHub().withDaemon(t).as("searcher").scopes("write")
 		},
-		store:    func(t *testing.T) *hub.Store { s, _ := searchCorpus(t); return s },
+		store:    func(t *testing.T) *hub.Store { s, _, _ := searchCorpus(t); return s },
 		wantCode: cli.ExitFailure,
 		wantHint: hub.ErrReadScopeRequired.Code,
 	},
@@ -164,7 +165,7 @@ var searchFailureModes = []searchFailureMode{
 		world: func(t *testing.T) *searchWorld {
 			return newSearchWorld(t).withHub().withDaemon(t).as("searcher").scopes("publish")
 		},
-		store:    func(t *testing.T) *hub.Store { s, _ := searchCorpus(t); return s },
+		store:    func(t *testing.T) *hub.Store { s, _, _ := searchCorpus(t); return s },
 		wantCode: cli.ExitFailure,
 		wantHint: hub.ErrReadScopeRequired.Code,
 	},
@@ -183,7 +184,7 @@ var searchFailureModes = []searchFailureMode{
 		world: func(t *testing.T) *searchWorld {
 			return newSearchWorld(t).withHub().withDaemon(t).as("searcher").scopes("read")
 		},
-		store:    func(t *testing.T) *hub.Store { s, _ := searchCorpus(t); return s },
+		store:    func(t *testing.T) *hub.Store { s, _, _ := searchCorpus(t); return s },
 		wantCode: cli.ExitFailure,
 		wantHint: hub.ErrUnknownSearchScope.Code,
 	},
@@ -194,7 +195,7 @@ var searchFailureModes = []searchFailureMode{
 		world: func(t *testing.T) *searchWorld {
 			return newSearchWorld(t).withHub().withDaemon(t).as("searcher").scopes("read")
 		},
-		store:    func(t *testing.T) *hub.Store { s, _ := searchCorpus(t); return s },
+		store:    func(t *testing.T) *hub.Store { s, _, _ := searchCorpus(t); return s },
 		wantCode: cli.ExitFailure,
 		wantHint: hub.ErrGrantWiderThanHolder.Code,
 	},
@@ -251,7 +252,7 @@ func TestEveryFailureModeIsDistinguishableFromEveryOtherAndFromFoundNothing(t *t
 	}
 	var seen []observed
 
-	s, _ := searchCorpus(t)
+	s, _, _ := searchCorpus(t)
 	empty := newSearchWorld(t).withHub().withDaemon(t).as("searcher").scopes("read").run(t, s, nil, "nosuchterm")
 	seen = append(seen, observed{"found-nothing (criterion 14)", empty.code, empty.all()})
 
@@ -371,13 +372,13 @@ func TestAnIncompleteSearchIsNotPresentedAsAnAnswer(t *testing.T) {
 // --- criterion 23 and the scoping criteria, through the real CLI --------------------------------
 
 func TestSearchFindsAPermittedNoteUnderEveryScope(t *testing.T) {
-	s, _ := searchCorpus(t)
+	s, _, id := searchCorpus(t)
 	for _, scope := range []string{"company", "person:ada"} {
 		w := newSearchWorld(t).withHub().withDaemon(t).as("searcher").scopes("read").run(t, s, nil, "sessiondrop", "--scope="+scope)
 		if w.code != cli.Success {
 			t.Fatalf("scope %q: exit %d\n%s", scope, w.code, w.all())
 		}
-		if !strings.Contains(w.out(), "note-1") {
+		if !strings.Contains(w.out(), string(id)) {
 			t.Fatalf("scope %q did not return the note:\n%s", scope, w.out())
 		}
 	}

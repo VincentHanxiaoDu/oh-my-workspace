@@ -15,8 +15,34 @@ import (
 
 // newTestHub builds a store with a deterministic clock, so that publication order — which is the
 // tie-break in ranking — is a fact about the test and not about how fast the machine is.
+// deterministicIDs makes id minting reproducible FOR THE DURATION OF ONE TEST.
+//
+// Note ids are unguessable and random (see noteid.go), which is right and which would otherwise
+// make the leak tests impossible: a control corpus and a test corpus are two separate stores, so
+// the same note would carry a different random id in each and the byte-for-byte comparison would
+// differ for a reason that is not a leak. Seeding both stores identically means the same
+// publications mint the same ids, and any remaining difference between the two renders is a real
+// one.
+//
+// UNGUESSABILITY ITSELF IS NEVER ASSERTED AGAINST THIS. noteid_test.go uses the real crypto/rand
+// generator, precisely so that a test double cannot make the property appear to hold.
+func deterministicIDs(t *testing.T) {
+	t.Helper()
+	orig := randRead
+	var seq byte
+	randRead = func(b []byte) (int, error) {
+		seq++
+		for i := range b {
+			b[i] = seq
+		}
+		return len(b), nil
+	}
+	t.Cleanup(func() { randRead = orig })
+}
+
 func newTestHub(t *testing.T) (*Store, *Record) {
 	t.Helper()
+	deterministicIDs(t)
 	r := NewRecord()
 	s := NewStore(r)
 	n := time.Unix(0, 0).UTC()
@@ -74,15 +100,15 @@ func TestPersonScopeReturnsOnlyThatAuthor(t *testing.T) {
 	r.AddPerson("ada")
 	r.AddPerson("bo")
 	r.AddPerson("cai")
-	mustPublish(t, s, Publication{Author: "ada", Title: "ada's write-up", Body: "the sessiondrop cause"})
+	adas := mustPublish(t, s, Publication{Author: "ada", Title: "ada's write-up", Body: "the sessiondrop cause"})
 	mustPublish(t, s, Publication{Author: "bo", Title: "bo's write-up", Body: "another sessiondrop cause"})
 
 	out, err := SearchThrough(s, readGrant("cai"), "", Query{Terms: "sessiondrop", Scope: mustScope(t, "person:ada")})
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
-	if got := ids(out); !eq(got, []string{"note-1"}) {
-		t.Fatalf("person-scoped search returned %v, want exactly ada's note-1; a person scope that\n"+
+	if got := ids(out); !eq(got, []string{string(adas.ID)}) {
+		t.Fatalf("person-scoped search returned %v, want exactly ada's note; a person scope that\n"+
 			"returns another author's note is not a person scope", got)
 	}
 	if out.Total != 1 {
@@ -98,15 +124,15 @@ func TestGroupScopeReturnsOnlyThatGroup(t *testing.T) {
 	r.DefineGroup("billing", "bo", "searcher")
 	toA, _ := ToGroup("platform")
 	toB, _ := ToGroup("billing")
-	mustPublish(t, s, Publication{Author: "ada", Title: "A", Body: "the sessiondrop cause", Visibility: toA})
+	inA := mustPublish(t, s, Publication{Author: "ada", Title: "A", Body: "the sessiondrop cause", Visibility: toA})
 	mustPublish(t, s, Publication{Author: "bo", Title: "B", Body: "the sessiondrop cause", Visibility: toB})
 
 	out, err := SearchThrough(s, readGrant("searcher"), "", Query{Terms: "sessiondrop", Scope: mustScope(t, "group:platform")})
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
-	if got := ids(out); !eq(got, []string{"note-1"}) {
-		t.Fatalf("group-scoped search returned %v, want exactly the platform note-1", got)
+	if got := ids(out); !eq(got, []string{string(inA.ID)}) {
+		t.Fatalf("group-scoped search returned %v, want exactly the platform note %s", got, inA.ID)
 	}
 }
 
@@ -188,7 +214,7 @@ func TestSearchReflectsTheLatestVersion(t *testing.T) {
 // not read. Every observable must be byte-identical between the two.
 type leakCase struct {
 	name   string
-	hidden func(t *testing.T, s *Store, r *Record) // publishes the unreadable note into the test corpus
+	hidden func(t *testing.T, s *Store, r *Record) *Note // publishes the unreadable note into the test corpus
 }
 
 // buildControl publishes the notes the searcher can fully read. It is deliberately the SAME
@@ -200,91 +226,104 @@ type leakCase struct {
 // scores were computed alpha would be the commoner term and NOTE-2 WOULD SORT FIRST. That flip is
 // what distinguishes filtering-before-ranking from filtering-after, and asserting the order is
 // therefore an assertion about the ORDER OF WORK, not merely about absence.
-func buildControl(t *testing.T, s *Store, r *Record) {
+func buildControl(t *testing.T, s *Store, r *Record) (first, second *Note) {
 	t.Helper()
 	r.AddPerson("searcher")
 	r.AddPerson("ada")
 	r.AddPerson("bo")
 	r.AddPerson("dana")
 	r.DefineGroup("platform", "ada", "bo", "dana")
-	mustPublish(t, s, Publication{Author: "ada", Title: "first", Body: "alpha alpha gamma"})
-	mustPublish(t, s, Publication{Author: "bo", Title: "second", Body: "beta gamma"})
+	first = mustPublish(t, s, Publication{Author: "ada", Title: "first", Body: "alpha alpha gamma"})
+	second = mustPublish(t, s, Publication{Author: "bo", Title: "second", Body: "beta gamma"})
+	return first, second
 }
 
 var leakCases = []leakCase{
 	{
 		// Criterion 11: restricted to its author alone.
 		name: "self-only",
-		hidden: func(t *testing.T, s *Store, r *Record) {
-			mustPublish(t, s, Publication{Author: "dana", Title: "hidden", Body: "alpha zzarquin", Visibility: SelfOnly()})
+		hidden: func(t *testing.T, s *Store, r *Record) *Note {
+			return mustPublish(t, s, Publication{Author: "dana", Title: "hidden", Body: "alpha zzarquin", Visibility: SelfOnly()})
 		},
 	},
 	{
 		// Criterion 11: restricted to a named group the searcher is not in.
 		name: "group-the-searcher-is-not-in",
-		hidden: func(t *testing.T, s *Store, r *Record) {
+		hidden: func(t *testing.T, s *Store, r *Record) *Note {
 			v, err := ToGroup("platform")
 			if err != nil {
 				t.Fatalf("to group: %v", err)
 			}
-			mustPublish(t, s, Publication{Author: "dana", Title: "hidden", Body: "alpha zzarquin", Visibility: v})
+			return mustPublish(t, s, Publication{Author: "dana", Title: "hidden", Body: "alpha zzarquin", Visibility: v})
 		},
 	},
 	{
 		// Criterion 11: restricted to named people not including the searcher.
 		name: "named-people-excluding-the-searcher",
-		hidden: func(t *testing.T, s *Store, r *Record) {
+		hidden: func(t *testing.T, s *Store, r *Record) *Note {
 			v, err := ToPeople("ada", "bo")
 			if err != nil {
 				t.Fatalf("to people: %v", err)
 			}
-			mustPublish(t, s, Publication{Author: "dana", Title: "hidden", Body: "alpha zzarquin", Visibility: v})
+			return mustPublish(t, s, Publication{Author: "dana", Title: "hidden", Body: "alpha zzarquin", Visibility: v})
 		},
 	},
 	{
 		// Criterion 13: the hidden note's author has been deactivated. Archived, not deleted; the
 		// note is still in the store and still unreadable, and none of criteria 6-10 change.
 		name: "deactivated-author",
-		hidden: func(t *testing.T, s *Store, r *Record) {
-			mustPublish(t, s, Publication{Author: "dana", Title: "hidden", Body: "alpha zzarquin", Visibility: SelfOnly()})
+		hidden: func(t *testing.T, s *Store, r *Record) *Note {
+			n := mustPublish(t, s, Publication{Author: "dana", Title: "hidden", Body: "alpha zzarquin", Visibility: SelfOnly()})
 			if err := r.Leave("platform", "dana"); err != nil {
 				t.Fatalf("leave: %v", err)
 			}
+			return n
 		},
 	},
 }
 
 // runPair runs the same query against the control corpus and the test corpus and returns both
 // rendered outcomes.
-func runPair(t *testing.T, lc leakCase, q Query) (control, test Outcome) {
+func runPair(t *testing.T, lc leakCase, q Query) (control, test Outcome, want []string) {
 	t.Helper()
 	cs, cr := newTestHub(t)
-	buildControl(t, cs, cr)
+	c1, c2 := buildControl(t, cs, cr)
 	c, err := SearchThrough(cs, readGrant("searcher"), "", q)
 	if err != nil {
 		t.Fatalf("control search: %v", err)
 	}
 
 	ts, trr := newTestHub(t)
-	buildControl(t, ts, trr)
-	lc.hidden(t, ts, trr)
+	t1, t2 := buildControl(t, ts, trr)
+	hidden := lc.hidden(t, ts, trr)
+	// THE TWO STORES MUST MINT THE SAME IDS FOR THE SAME NOTES, or the byte comparison below would
+	// differ for a reason that is not a leak. deterministicIDs makes that so; this asserts it,
+	// because a silent divergence here would turn every leak test into a guaranteed failure or,
+	// worse after somebody "fixes" it by loosening the comparison, into no test at all.
+	if c1.ID != t1.ID || c2.ID != t2.ID {
+		t.Fatalf("the control and test corpora minted different ids for the same notes (%s/%s vs %s/%s)",
+			c1.ID, c2.ID, t1.ID, t2.ID)
+	}
 	// The hidden note must genuinely be in the store and genuinely unreadable, or this whole test
 	// is asserting nothing. Both halves are checked.
 	if ts.Count() != cs.Count()+1 {
 		t.Fatalf("%s: the test corpus does not hold one extra note (%d vs %d) — the fixture is broken\n"+
 			"and the comparison below would pass vacuously", lc.name, ts.Count(), cs.Count())
 	}
-	if got := ts.IDs()[len(ts.IDs())-1]; got != "note-3" {
-		t.Fatalf("%s: expected the hidden note to be note-3, got %q", lc.name, got)
+	if hidden == nil || hidden.ID == "" {
+		t.Fatalf("%s: the leak case published no hidden note", lc.name)
 	}
-	if _, rerr := ts.Read("note-3", "searcher"); Code(rerr) != ErrRefused.Code {
+	if hidden.ID == c1.ID || hidden.ID == c2.ID {
+		t.Fatalf("%s: the hidden note reused a control note's id (%s)", lc.name, hidden.ID)
+	}
+	if _, rerr := ts.Read(hidden.ID, "searcher"); Code(rerr) != ErrRefused.Code {
 		t.Fatalf("%s: the 'hidden' note is readable by the searcher (err %v) — the fixture proves nothing", lc.name, rerr)
 	}
 	tt, err := SearchThrough(ts, readGrant("searcher"), "", q)
 	if err != nil {
 		t.Fatalf("test search: %v", err)
 	}
-	return c, tt
+	return c, tt, []string{string(c1.ID), string(c2.ID)}
 }
 
 func TestNothingAboutAHiddenNoteIsObservable(t *testing.T) {
@@ -292,7 +331,7 @@ func TestNothingAboutAHiddenNoteIsObservable(t *testing.T) {
 	// A per-field assertion would let a field added later leak unwatched.
 	for _, lc := range leakCases {
 		t.Run(lc.name, func(t *testing.T) {
-			c, tt := runPair(t, lc, Query{Terms: "alpha beta", Scope: CompanyScope()})
+			c, tt, _ := runPair(t, lc, Query{Terms: "alpha beta", Scope: CompanyScope()})
 			if c.Render() != tt.Render() {
 				t.Fatalf("the output differs when an unreadable note exists — this leaks its existence.\n"+
 					"control:\n%s\ntest:\n%s", c.Render(), tt.Render())
@@ -312,8 +351,7 @@ func TestOrderingDoesNotLeak(t *testing.T) {
 	q := Query{Terms: "alpha beta", Scope: CompanyScope()}
 	for _, lc := range leakCases {
 		t.Run(lc.name, func(t *testing.T) {
-			c, tt := runPair(t, lc, q)
-			want := []string{"note-1", "note-2"}
+			c, tt, want := runPair(t, lc, q)
 			if !eq(ids(c), want) {
 				t.Fatalf("control order is %v, want %v — the fixture no longer makes ordering\n"+
 					"corpus-sensitive, so this test cannot detect the leak it exists for", ids(c), want)
@@ -341,15 +379,15 @@ func TestOrderingIsGenuinelyCorpusSensitive(t *testing.T) {
 	// COMPANY-WIDE, so the searcher can read it — and the order must flip. If it does not, ranking
 	// is not corpus-relative and the leak test above is asserting nothing.
 	s, r := newTestHub(t)
-	buildControl(t, s, r)
+	_, second := buildControl(t, s, r)
 	mustPublish(t, s, Publication{Author: "dana", Title: "visible", Body: "alpha zzarquin"})
 
 	out, err := SearchThrough(s, readGrant("searcher"), "", Query{Terms: "alpha beta", Scope: CompanyScope()})
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
-	if len(out.Results) < 2 || out.Results[0].ID != "note-2" {
-		t.Fatalf("with a READABLE third note containing alpha, order is %v; expected note-2 first.\n"+
+	if len(out.Results) < 2 || out.Results[0].ID != second.ID {
+		t.Fatalf("with a READABLE third note containing alpha, order is %v; expected the beta note first.\n"+
 			"Ranking is not sensitive to corpus composition, so TestOrderingDoesNotLeak cannot fail\n"+
 			"for the reason it claims to.", ids(out))
 	}
@@ -360,7 +398,7 @@ func TestSuggestionsDoNotLeak(t *testing.T) {
 	q := Query{Terms: "zzarquim", Scope: CompanyScope()}
 	for _, lc := range leakCases {
 		t.Run(lc.name, func(t *testing.T) {
-			c, tt := runPair(t, lc, q)
+			c, tt, _ := runPair(t, lc, q)
 			if len(tt.Suggestions) != 0 {
 				t.Fatalf("suggested %v — a term that appears only in an unreadable note was offered\n"+
 					"as a correction, which discloses that note", tt.Suggestions)
@@ -396,7 +434,7 @@ func TestEmptyResultMessageDoesNotDependOnAHiddenMatch(t *testing.T) {
 	q := Query{Terms: "zzarquin", Scope: CompanyScope()}
 	for _, lc := range leakCases {
 		t.Run(lc.name, func(t *testing.T) {
-			c, tt := runPair(t, lc, q)
+			c, tt, _ := runPair(t, lc, q)
 			if c.Total != 0 || tt.Total != 0 {
 				t.Fatalf("expected zero results on both runs, got %d and %d", c.Total, tt.Total)
 			}
@@ -466,7 +504,7 @@ func TestRosterIsThreeValued(t *testing.T) {
 //
 // Anything asserting "excludes the unreadable AND the undetermined" needs all three present, or it
 // cannot tell which of the two exclusions it is actually checking.
-func mixedCorpus(t *testing.T) (Corpus, *Store) {
+func mixedCorpus(t *testing.T) (c Corpus, store *Store, unevaluableID NoteID) {
 	t.Helper()
 	s, r := newTestHub(t)
 	r.AddPerson("searcher")
@@ -476,20 +514,20 @@ func mixedCorpus(t *testing.T) (Corpus, *Store) {
 	if err != nil {
 		t.Fatalf("to group: %v", err)
 	}
-	mustPublish(t, s, Publication{Author: "ada", Title: "readable", Body: "alpha"})                            // note-1: readable
-	mustPublish(t, s, Publication{Author: "dana", Title: "unreadable", Body: "alpha", Visibility: SelfOnly()}) // note-2: determined No
-	mustPublish(t, s, Publication{Author: "ada", Title: "unevaluable", Body: "alpha", Visibility: toGroup})    // note-3: undetermined
+	readable := mustPublish(t, s, Publication{Author: "ada", Title: "readable", Body: "alpha"})
+	unreadable := mustPublish(t, s, Publication{Author: "dana", Title: "unreadable", Body: "alpha", Visibility: SelfOnly()})
+	unevaluable := mustPublish(t, s, Publication{Author: "ada", Title: "unevaluable", Body: "alpha", Visibility: toGroup})
 	r.Dissolve("platform")
 
 	// The fixture is checked against CanReadNote directly, so that a change which quietly turns one
 	// of the three into another kind fails HERE rather than making the assertions below vacuous.
-	for id, want := range map[NoteID]tri.Value{"note-1": tri.Yes, "note-2": tri.No, "note-3": tri.Undetermined} {
+	for id, want := range map[NoteID]tri.Value{readable.ID: tri.Yes, unreadable.ID: tri.No, unevaluable.ID: tri.Undetermined} {
 		if got := CanReadNote(s.notes[id], "searcher", r); got != want {
 			t.Fatalf("fixture: CanReadNote(%s) = %v, want %v — the corpus no longer holds one of each\n"+
 				"kind, so the exclusion assertions below would prove nothing", id, got, want)
 		}
 	}
-	return Settle(s, "searcher"), s
+	return Settle(s, "searcher"), s, unevaluable.ID
 }
 
 func TestCorpusSizeCountsOnlyWhatTheSearcherMayRead(t *testing.T) {
@@ -499,7 +537,7 @@ func TestCorpusSizeCountsOnlyWhatTheSearcherMayRead(t *testing.T) {
 	// this number: a count that included a note the searcher cannot read would tell an agent that
 	// something exists which it may not see, which is PRD §3.5's leak arriving through the
 	// statistics door rather than the results door.
-	c, s := mixedCorpus(t)
+	c, s, _ := mixedCorpus(t)
 
 	if s.Count() != 3 {
 		t.Fatalf("the store holds %d notes, want 3", s.Count())
@@ -523,22 +561,22 @@ func TestCorpusUndeterminedIDsAreReportedAndAreACopy(t *testing.T) {
 	// Two claims in one doc comment, both pinned. The IDs are RETURNED (not dropped), and the
 	// accessor hands out a copy — a caller that sorts or truncates the result must not be editing
 	// the corpus's own record of what it could not evaluate.
-	c, _ := mixedCorpus(t)
+	c, _, unevaluableID := mixedCorpus(t)
 
 	got := c.UndeterminedIDs()
-	if len(got) != 1 || got[0] != "note-3" {
+	if len(got) != 1 || got[0] != unevaluableID {
 		t.Fatalf("UndeterminedIDs() = %v, want [note-3] — a note whose readability could not be\n"+
 			"worked out must be reported, never silently dropped", got)
 	}
 	got[0] = "clobbered"
-	if again := c.UndeterminedIDs(); again[0] != "note-3" {
+	if again := c.UndeterminedIDs(); again[0] != unevaluableID {
 		t.Fatalf("UndeterminedIDs() = %v after a caller wrote to the previous result; the accessor\n"+
 			"handed out the corpus's own slice, so any caller can edit what search could not evaluate", again)
 	}
 	// And the undetermined id is not also in the readable set — the two lists are disjoint.
 	for _, n := range c.notes {
-		if n.ID == "note-3" {
-			t.Fatalf("note-3 is both readable and undetermined; undetermined must never be treated as readable")
+		if n.ID == unevaluableID {
+			t.Fatalf("%s is both readable and undetermined; undetermined must never be treated as readable", unevaluableID)
 		}
 	}
 }
@@ -546,7 +584,7 @@ func TestCorpusUndeterminedIDsAreReportedAndAreACopy(t *testing.T) {
 func TestCorpusReaderIsWhoItWasSettledFor(t *testing.T) {
 	// Small, but it is the value every exclusion above was computed against. A Corpus that
 	// misreports its reader is a Corpus whose safety claims are about somebody else.
-	c, _ := mixedCorpus(t)
+	c, _, _ := mixedCorpus(t)
 	if got := c.Reader(); got != "searcher" {
 		t.Fatalf("Corpus.Reader() = %q, want %q", got, "searcher")
 	}
@@ -588,20 +626,20 @@ func TestSearchingAsSomebodyElseIsRefusedNotNarrowed(t *testing.T) {
 func TestReadScopeDoesNotWidenVisibility(t *testing.T) {
 	// CRITERION 12a. Holding `read` is permission to ask, never permission to see.
 	s, r := newTestHub(t)
-	buildControl(t, s, r)
-	mustPublish(t, s, Publication{Author: "dana", Title: "hidden", Body: "alpha zzarquin", Visibility: SelfOnly()})
+	first, _ := buildControl(t, s, r)
+	hidden := mustPublish(t, s, Publication{Author: "dana", Title: "hidden", Body: "alpha zzarquin", Visibility: SelfOnly()})
 
 	out, err := SearchThrough(s, readGrant("searcher"), "", Query{Terms: "alpha zzarquin", Scope: CompanyScope()})
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
 	for _, id := range ids(out) {
-		if id == "note-3" {
+		if id == string(hidden.ID) {
 			t.Fatalf("a read-scoped grant returned a note its holder may not read (%v)", ids(out))
 		}
 	}
-	if out.Total != 1 || out.Results[0].ID != "note-1" {
-		t.Fatalf("results = %v, want only note-1", ids(out))
+	if out.Total != 1 || out.Results[0].ID != first.ID {
+		t.Fatalf("results = %v, want only %s", ids(out), first.ID)
 	}
 }
 
@@ -664,10 +702,10 @@ func TestAnUndeterminedNoteIsNeitherIncludedNorSilent(t *testing.T) {
 		t.Fatalf("to group: %v", err)
 	}
 	mustPublish(t, s, Publication{Author: "ada", Title: "first", Body: "alpha alpha gamma"})
-	mustPublish(t, s, Publication{Author: "dana", Title: "hidden", Body: "alpha zzarquin", Visibility: v})
+	unevaluable := mustPublish(t, s, Publication{Author: "dana", Title: "hidden", Body: "alpha zzarquin", Visibility: v})
 	r.Dissolve("platform")
 
-	if got := CanReadNote(s.notes["note-2"], "searcher", r); got != tri.Undetermined {
+	if got := CanReadNote(s.notes[unevaluable.ID], "searcher", r); got != tri.Undetermined {
 		t.Fatalf("the fixture does not produce an undetermined note: CanReadNote = %v", got)
 	}
 
@@ -685,7 +723,7 @@ func TestAnUndeterminedNoteIsNeitherIncludedNorSilent(t *testing.T) {
 		t.Fatalf("Coverage = %v, want Undetermined — an unevaluable note makes the answer incomplete", out.Coverage)
 	}
 	for _, id := range ids(out) {
-		if id == "note-2" {
+		if id == string(unevaluable.ID) {
 			t.Fatalf("the unevaluable note was RETURNED (%v) — undetermined must never be treated as readable", ids(out))
 		}
 	}
