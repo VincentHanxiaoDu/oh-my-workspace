@@ -70,3 +70,12 @@
 - [x] Criterion 19: references derive no identifier — structural check over this Issue's source
 - [x] Criterion 19: rendering depends on no other note's identifier, publication order or count
 - [x] Criterion 19: control/test differential over a corpus differing by one unreadable target
+
+## Taking #46's unguessable identifiers
+
+- [x] Merge `origin/main`, which now carries `internal/hub/noteid.go`; change no reference code
+- [x] Rework the criterion-19 differential for random ids: the hidden note sits BETWEEN two
+      readable ones, and the comparison abstracts identifiers only where that is licensed
+- [x] Assert the identifiers bo sees carry no ordinal content
+- [x] Assert the identifier difference is unattributable to the hidden note, by showing two
+      identically-built corpora differ the same way — the clause that licenses the abstraction

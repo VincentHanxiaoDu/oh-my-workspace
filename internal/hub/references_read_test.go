@@ -2,6 +2,7 @@ package hub
 
 import (
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -545,19 +546,26 @@ func TestCriterion19ReferenceOutputDependsOnNoOtherNotesIdentifier(t *testing.T)
 // CRITERION 19's second half: criterion 9's equivalence survives identifiers being visible.
 //
 // A control/test differential over a corpus that differs by EXACTLY ONE unreadable reference
-// target. Everything bo can observe — the notes, their identifiers, the count — must be the same in
-// both, so the presence of the unreadable note is not inferable from bo's answer.
+// target, with the hidden note published BETWEEN two bo can read — the position that used to leak.
 //
-// A LIMIT OF THIS TEST ON TODAY'S BASE, MEASURED RATHER THAN ASSUMED. The unreadable note is
-// published LAST here. With another ordering it would fail, and not because of anything in this
-// change: `main` still mints ids from a shared counter, so an unreadable note published BEFORE a
-// readable one shifts the readable one's id. Measured on this tree — the readable note is
-// "note-1" without the hidden note and "note-2" with it. That is the owner's own worked example,
-// it is the half of criterion 19 that belongs to #10 (where ids are minted; the implementation is
-// on #15's branch and not yet on main), and this test will hold for EVERY ordering the day that
-// lands, with nothing here needing to change. What it drives today is that references add no
-// disclosure of their own on top of it.
+// THIS TEST WAS WRONG BEFORE #46's IDS LANDED, AND HOW IT WAS WRONG IS THE POINT.
+//
+// Its first version compared bo's two answers byte for byte, including the raw identifiers, and it
+// passed only because it published the hidden note LAST. A reviewer found the same class of defect
+// in its own driver and described the trap exactly: it had "published a decoy note into the absent
+// corpus to align the ids", which made the comparison clean and deleted the signal the criterion is
+// about. So the normalisation below needs justifying, not just performing.
+//
+// With unguessable ids a raw identifier differs between ANY two corpora, including two built
+// identically — so comparing raw ids proves nothing either way, and abstracting them away could
+// hide a real leak. What makes abstracting them legitimate is the LAST assertion here, and it is
+// the one that would have caught the original defect: the identifier difference between the two
+// corpora is shown to be UNATTRIBUTABLE to the hidden note, by demonstrating the same difference
+// between two corpora that are identical. Under the old sequential scheme two identical corpora
+// produced identical ids, so that assertion would have failed and this test would have gone red.
 func TestCriterion19DifferentialOverOneUnreadableTarget(t *testing.T) {
+	// build returns bo's answer for a corpus in which the hidden note is published BETWEEN two
+	// notes bo can read, or not published at all.
 	build := func(withUnreadable bool) Backlinks {
 		rec := NewRecord()
 		rec.DefineGroup("platform", "alice")
@@ -567,24 +575,25 @@ func TestCriterion19DifferentialOverOneUnreadableTarget(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := PublishWithReferences(s, Publication{
-			Author: "alice", Title: "open commentary",
-			Body: "about [[note:" + string(subject.ID) + "]]",
-		}); err != nil {
+		ref := "about [[note:" + string(subject.ID) + "]]"
+		if _, err := PublishWithReferences(s, Publication{Author: "alice", Title: "first commentary", Body: ref}); err != nil {
 			t.Fatal(err)
 		}
 		if withUnreadable {
-			// The one difference between the two corpora.
+			// THE ONE DIFFERENCE, and it sits between two notes bo can read — the position that
+			// made the next readable note report as note-3 instead of note-2.
 			group, err := ToGroup("platform")
 			if err != nil {
 				t.Fatal(err)
 			}
 			if _, err := PublishWithReferences(s, Publication{
-				Author: "alice", Title: "restricted commentary",
-				Body: "also about [[note:" + string(subject.ID) + "]]", Visibility: group,
+				Author: "alice", Title: "restricted commentary", Body: ref, Visibility: group,
 			}); err != nil {
 				t.Fatal(err)
 			}
+		}
+		if _, err := PublishWithReferences(s, Publication{Author: "alice", Title: "second commentary", Body: ref}); err != nil {
+			t.Fatal(err)
 		}
 		b, err := ReferencesTo(s, Reference{Kind: RefNote, Target: string(subject.ID)}, "bo")
 		if err != nil {
@@ -593,21 +602,55 @@ func TestCriterion19DifferentialOverOneUnreadableTarget(t *testing.T) {
 		return b
 	}
 
-	with, without := build(true), build(false)
-	if renderBacklinks(with) != renderBacklinks(without) {
-		t.Errorf("bo's answer differs depending on whether a note bo may not read exists:\n  %q\n  %q\n"+
-			"the identifier being visible must not reintroduce the disclosure",
-			renderBacklinks(with), renderBacklinks(without))
-	}
-	if with.Count() != 1 {
-		t.Fatalf("bo should see exactly the one readable commentary, got %d — otherwise the two answers\n"+
-			"could be equal by both being empty", with.Count())
-	}
-	// The identifiers themselves, not only the count.
-	for i := range with.Notes {
-		if with.Notes[i].ID != without.Notes[i].ID {
-			t.Errorf("the readable note is %q in one corpus and %q in the other; publishing something bo\n"+
-				"cannot read shifted an identifier bo can see", with.Notes[i].ID, without.Notes[i].ID)
+	// shape is everything bo observes EXCEPT the identifiers themselves: how many, which notes, in
+	// what order, and how many were unexaminable.
+	shape := func(b Backlinks) string {
+		out := "count=" + strconv.Itoa(b.Count()) + " undetermined=" + strconv.Itoa(b.Undetermined)
+		for _, n := range b.Notes {
+			out += " |" + n.Title
 		}
+		return out
+	}
+
+	with, without := build(true), build(false)
+	if with.Count() != 2 {
+		t.Fatalf("bo should see both readable commentaries, got %d — otherwise the two answers could\n"+
+			"be equal by both being empty", with.Count())
+	}
+	if shape(with) != shape(without) {
+		t.Errorf("bo's answer differs depending on whether a note bo may not read exists:\n  %q\n  %q",
+			shape(with), shape(without))
+	}
+	for _, n := range with.Notes {
+		if n.Title == "restricted commentary" {
+			t.Fatal("the note bo may not read is in bo's answer")
+		}
+	}
+
+	// NO ORDINAL CONTENT: the identifiers bo sees carry no position and no count. An id that
+	// encoded either would let bo see the gap the hidden note left, which is what criterion 8
+	// forbids in as many words.
+	for _, n := range with.Notes {
+		if _, err := strconv.Atoi(strings.TrimPrefix(string(n.ID), "note-")); err == nil {
+			t.Errorf("identifier %q is an ordinal; bo can count what bo cannot see", n.ID)
+		}
+	}
+
+	// AND THE ASSERTION THAT LICENSES ABSTRACTING THE IDENTIFIERS ABOVE. Two corpora built
+	// IDENTICALLY also produce different identifiers, so the difference between `with` and
+	// `without` is not attributable to the hidden note. Under the old `note-%d` counter this
+	// failed — two identical corpora produced identical ids — and this test would have been red
+	// rather than quietly normalising the leak away.
+	a, b := build(false), build(false)
+	same := true
+	for i := range a.Notes {
+		if a.Notes[i].ID != b.Notes[i].ID {
+			same = false
+		}
+	}
+	if same {
+		t.Error("two corpora built identically produced identical identifiers, so identifiers are a\n" +
+			"function of publication order — and abstracting them out of the comparison above would\n" +
+			"be deleting the very signal criterion 8 is about")
 	}
 }
