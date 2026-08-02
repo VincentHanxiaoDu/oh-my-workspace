@@ -61,3 +61,12 @@
 - [x] Adopt #11's `VersionRef` so a listing says which version it means in the shared spelling
 - [x] Drive criterion 13 against #11's real `Archive` instead of structurally
 - [x] Widen the `Store.Publish` caller sweep to every package under `internal`, discovered not listed
+
+## After PR #43 (one daemon liveness answer) and the owner's identifier ruling
+
+- [x] Merge `origin/main` and verify the merged result, not just this branch
+- [x] Route liveness through the shared three-valued `daemonLiveness`; hold no socket-path knowledge
+- [x] Render all three liveness answers distinguishably, with distinct exit codes
+- [x] Criterion 19: references derive no identifier — structural check over this Issue's source
+- [x] Criterion 19: rendering depends on no other note's identifier, publication order or count
+- [x] Criterion 19: control/test differential over a corpus differing by one unreadable target

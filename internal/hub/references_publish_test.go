@@ -277,3 +277,33 @@ func referenceGoFilesIn(t *testing.T, dir string) []string {
 	}
 	return out
 }
+
+// CRITERION 19, STRUCTURALLY: references never derive an identifier.
+//
+// The behavioural half is in references_read_test.go. This is the guarantee underneath it — a
+// reference target is either parsed from a body verbatim or handed back by the store, and nothing
+// in this Issue's code computes, increments, formats or parses one. Code that cannot construct an
+// identifier cannot construct a guessable one, and cannot start depending on ids being dense once
+// #10 makes them random.
+func TestReferenceCodeDerivesNoIdentifier(t *testing.T) {
+	// strconv is how a sequential id gets built or read back; a Sprintf whose verb list mentions a
+	// note is the other way. Neither belongs in this Issue's source.
+	forbidden := []string{`"strconv"`, "strconv.Itoa", "strconv.Atoi", `Sprintf("note`, `"note-%`}
+	checked := 0
+	for _, name := range append(append([]string{}, referenceSourceFiles...), "../commands/references_cmd.go") {
+		src, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("cannot read %s: %v — a renamed file makes this check silently stop checking", name, err)
+		}
+		checked++
+		for _, bad := range forbidden {
+			if strings.Contains(string(src), bad) {
+				t.Errorf("%s contains %q; references must not derive an identifier from anything —\n"+
+					"not from another note's, not from publication order, not from a count", name, bad)
+			}
+		}
+	}
+	if checked < 4 {
+		t.Fatalf("only %d files were read; this assertion would be nearly vacuous", checked)
+	}
+}

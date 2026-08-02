@@ -476,3 +476,138 @@ func TestAnUnidentifiedReaderDeterminesNothing(t *testing.T) {
 			err, Code(err))
 	}
 }
+
+// ---------------------------------------------------------------------------
+// CRITERION 19 (owner ruling, added to the Issue at 14:07:17Z after this branch's head)
+//
+// "The identifier a reference renders is not derivable from any other note's identifier, nor from
+// publication order or count; and a reference to a target the reader may not see remains
+// indistinguishable from a reference to a target that does not exist — criterion 9's equivalence
+// must survive the identifier being visible in the output."
+//
+// WHAT IS MINE AND WHAT IS NOT, stated here because the ruling binds four Issues. MINTING an
+// unguessable identifier is #10's, at the one place ids are created (store.go's `note-%d`); the
+// implementation is on #15's branch and is NOT on main as this is written. What is mine is that
+// REFERENCES never derive an identifier and never leak one, and that they hold up whatever the
+// identifier scheme is. These tests drive that half and are written so that they keep passing —
+// and keep meaning the same thing — once ids become random.
+// ---------------------------------------------------------------------------
+
+// The rendered output for a reference is a function of ITS OWN target's identifier and nothing
+// else: not another note's identifier, not publication order, not how many notes exist.
+//
+// Two corpora are built in which the very same note is minted with DIFFERENT identifiers, by
+// publishing a different number of notes before it. If anything in reference rendering depended on
+// order or count, the two outputs would differ by more than the identifier itself.
+func TestCriterion19ReferenceOutputDependsOnNoOtherNotesIdentifier(t *testing.T) {
+	build := func(fillers int) (rendered string, targetID NoteID) {
+		rec := NewRecord()
+		rec.AddPerson("bo")
+		s := NewStore(rec)
+		for i := 0; i < fillers; i++ {
+			if _, err := PublishWithReferences(s, Publication{Author: "alice", Title: "filler", Body: "filler"}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		target, err := PublishWithReferences(s, Publication{Author: "alice", Title: "the target", Body: "the target"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		n, err := PublishWithReferences(s, Publication{
+			Author: "alice", Title: "references it",
+			Body: "the background is in [[note:" + string(target.ID) + "]] and in the wiki.",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		l, err := OutboundReferences(s, n.ID, 0, "bo")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return l.Body, target.ID
+	}
+
+	few, fewID := build(0)
+	many, manyID := build(7)
+	if fewID == manyID {
+		t.Fatalf("both corpora minted the same identifier %q, so this comparison proves nothing about\n"+
+			"order or count", fewID)
+	}
+	// Substitute each corpus's own target identifier out. What remains must be identical: the
+	// identifier is the ONLY thing about the target that reaches the output.
+	normalise := func(s string, id NoteID) string { return strings.ReplaceAll(s, string(id), "<target>") }
+	if normalise(few, fewID) != normalise(many, manyID) {
+		t.Errorf("the same reference renders differently depending on how many notes were published\n"+
+			"before its target:\n  %q\n  %q", normalise(few, fewID), normalise(many, manyID))
+	}
+}
+
+// CRITERION 19's second half: criterion 9's equivalence survives identifiers being visible.
+//
+// A control/test differential over a corpus that differs by EXACTLY ONE unreadable reference
+// target. Everything bo can observe — the notes, their identifiers, the count — must be the same in
+// both, so the presence of the unreadable note is not inferable from bo's answer.
+//
+// A LIMIT OF THIS TEST ON TODAY'S BASE, MEASURED RATHER THAN ASSUMED. The unreadable note is
+// published LAST here. With another ordering it would fail, and not because of anything in this
+// change: `main` still mints ids from a shared counter, so an unreadable note published BEFORE a
+// readable one shifts the readable one's id. Measured on this tree — the readable note is
+// "note-1" without the hidden note and "note-2" with it. That is the owner's own worked example,
+// it is the half of criterion 19 that belongs to #10 (where ids are minted; the implementation is
+// on #15's branch and not yet on main), and this test will hold for EVERY ordering the day that
+// lands, with nothing here needing to change. What it drives today is that references add no
+// disclosure of their own on top of it.
+func TestCriterion19DifferentialOverOneUnreadableTarget(t *testing.T) {
+	build := func(withUnreadable bool) Backlinks {
+		rec := NewRecord()
+		rec.DefineGroup("platform", "alice")
+		rec.AddPerson("bo")
+		s := NewStore(rec)
+		subject, err := PublishWithReferences(s, Publication{Author: "alice", Title: "the subject", Body: "the original"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := PublishWithReferences(s, Publication{
+			Author: "alice", Title: "open commentary",
+			Body: "about [[note:" + string(subject.ID) + "]]",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if withUnreadable {
+			// The one difference between the two corpora.
+			group, err := ToGroup("platform")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := PublishWithReferences(s, Publication{
+				Author: "alice", Title: "restricted commentary",
+				Body: "also about [[note:" + string(subject.ID) + "]]", Visibility: group,
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		b, err := ReferencesTo(s, Reference{Kind: RefNote, Target: string(subject.ID)}, "bo")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+
+	with, without := build(true), build(false)
+	if renderBacklinks(with) != renderBacklinks(without) {
+		t.Errorf("bo's answer differs depending on whether a note bo may not read exists:\n  %q\n  %q\n"+
+			"the identifier being visible must not reintroduce the disclosure",
+			renderBacklinks(with), renderBacklinks(without))
+	}
+	if with.Count() != 1 {
+		t.Fatalf("bo should see exactly the one readable commentary, got %d — otherwise the two answers\n"+
+			"could be equal by both being empty", with.Count())
+	}
+	// The identifiers themselves, not only the count.
+	for i := range with.Notes {
+		if with.Notes[i].ID != without.Notes[i].ID {
+			t.Errorf("the readable note is %q in one corpus and %q in the other; publishing something bo\n"+
+				"cannot read shifted an identifier bo can see", with.Notes[i].ID, without.Notes[i].ID)
+		}
+	}
+}

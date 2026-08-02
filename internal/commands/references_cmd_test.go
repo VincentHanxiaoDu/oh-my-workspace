@@ -9,6 +9,7 @@ import (
 
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/cli"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/hub"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri"
 )
 
 // runRefs drives the real command through the real registry and returns what a person would see.
@@ -29,9 +30,25 @@ func withRefStore(t *testing.T, s *hub.Store) {
 
 func withRefDaemon(t *testing.T) {
 	t.Helper()
-	prev := daemonRunning
-	daemonRunning = func(cli.Env) bool { return true }
-	t.Cleanup(func() { daemonRunning = prev })
+	prev := daemonLiveness
+	daemonLiveness = func(cli.Env) (tri.Value, string) { return tri.Yes, "" }
+	t.Cleanup(func() { daemonLiveness = prev })
+}
+
+// withRefDaemonUndetermined drives the third answer: liveness that could not be established.
+func withRefDaemonUndetermined(t *testing.T, why string) {
+	t.Helper()
+	prev := daemonLiveness
+	daemonLiveness = func(cli.Env) (tri.Value, string) { return tri.Undetermined, why }
+	t.Cleanup(func() { daemonLiveness = prev })
+}
+
+// withRefDaemonStopped drives the determined negative.
+func withRefDaemonStopped(t *testing.T) {
+	t.Helper()
+	prev := daemonLiveness
+	daemonLiveness = func(cli.Env) (tri.Value, string) { return tri.No, "" }
+	t.Cleanup(func() { daemonLiveness = prev })
 }
 
 func refHubConfigured() map[string]string { return map[string]string{envHub: "hub.example.internal"} }
@@ -186,7 +203,7 @@ func TestCLIUnreachableHubIsUndetermined(t *testing.T) {
 func TestCLISaysTheDaemonIsNotRunningAndDoesNotStartIt(t *testing.T) {
 	c := newRefCorpus(t)
 	withRefStore(t, c.store)
-	// daemonRunning is NOT replaced. It PROBES the socket path the environment names — here, none.
+	withRefDaemonStopped(t)
 	_, errOut, code := runRefs(t, refHubConfigured(), "of", "note-1", "--as", "bo")
 	if code != cli.ExitFailure {
 		t.Errorf("exit %d, want %d", code, cli.ExitFailure)
@@ -196,25 +213,41 @@ func TestCLISaysTheDaemonIsNotRunningAndDoesNotStartIt(t *testing.T) {
 	}
 }
 
-// The daemon probe PROBES rather than naming a platform's convention: a socket path that exists
-// answers yes and one that does not answers no, whatever this machine is.
-func TestTheDaemonProbeIsAProbe(t *testing.T) {
-	dir := t.TempDir()
-	sock := filepath.Join(dir, "omw.sock")
-	e := cli.Env{Getenv: func(k string) string {
-		if k == envSocket {
-			return sock
-		}
-		return ""
-	}}
-	if daemonRunning(e) {
-		t.Fatal("the probe answered yes for a path that does not exist")
+// ISSUE #41: liveness has THREE answers here too, and the third is not the second.
+//
+// The old test in this slot drove a socket-path probe of this package's own. That probe is gone —
+// PR #43 replaced every command's guess with one shared answer, and no package outside
+// internal/daemon may derive a control socket path. What is left to drive is that this command
+// renders all three answers distinguishably, which is the part that is mine.
+func TestCLILivenessHasThreeAnswersWithDistinctExitCodes(t *testing.T) {
+	c := newRefCorpus(t)
+	withRefStore(t, c.store)
+
+	withRefDaemonStopped(t)
+	_, stoppedErr, stoppedCode := runRefs(t, refHubConfigured(), "of", "note-1", "--as", "bo")
+
+	withRefDaemonUndetermined(t, "the lock file could not be read")
+	_, undetErr, undetCode := runRefs(t, refHubConfigured(), "of", "note-1", "--as", "bo")
+
+	if stoppedCode != cli.ExitFailure {
+		t.Errorf("a stopped daemon exited %d, want %d", stoppedCode, cli.ExitFailure)
 	}
-	if err := os.WriteFile(sock, nil, 0o600); err != nil {
-		t.Fatal(err)
+	if undetCode != cli.ExitUndetermined {
+		t.Errorf("undetermined liveness exited %d, want %d — could not determine and determined to be\n"+
+			"nothing must never share an exit code", undetCode, cli.ExitUndetermined)
 	}
-	if !daemonRunning(e) {
-		t.Error("the probe answered no for a path that exists; it is naming something rather than probing it")
+	if stoppedCode == undetCode {
+		t.Error("the two answers share an exit code")
+	}
+	if stoppedErr == undetErr {
+		t.Errorf("the two answers read identically: %q", stoppedErr)
+	}
+	// The undetermined answer must not be greppable as the determined one.
+	if strings.Contains(undetErr, hub.ErrDaemonNotRunning.Msg) {
+		t.Errorf("the undetermined answer contains the stopped-daemon sentence:\n%s", undetErr)
+	}
+	if !strings.Contains(undetErr, "the lock file could not be read") {
+		t.Errorf("the undetermined answer does not carry its reason:\n%s", undetErr)
 	}
 }
 

@@ -2,9 +2,10 @@
 // about something.
 //
 // This file is the ONLY file this Issue adds to package commands, and it edits none of the others.
-// It reuses `envHub`, `envSocket` and the `daemonRunning` probe declared by `omw visibility`
-// rather than declaring a second pair: "is the daemon running" is one product question, and two
-// probes are two answers waiting to disagree.
+// It reuses `envHub` from `omw visibility` and the shared three-valued `daemonLiveness` from
+// liveness.go rather than asking either question a second way: "is the daemon running" is one
+// product question, and two probes are two answers waiting to disagree — which is exactly what
+// Issue #41 was filed about, this file among the three that printed the same false negative.
 package commands
 
 import (
@@ -147,9 +148,13 @@ func reach(env cli.Env, verb string) (*hub.Store, int, bool) {
 		fmt.Fprintf(env.Stderr, "  a published note's references are the hub's answer, and there is no hub to ask.\n")
 		return nil, cli.ExitFailure, false
 	}
-	if !daemonRunning(env) {
-		fmt.Fprintf(env.Stderr, "omw references %s: %v (code: %s)\n", verb, hub.ErrDaemonNotRunning, hub.ErrDaemonNotRunning.Code)
-		return nil, cli.ExitFailure, false
+	// ONE DEFINITION OF LIVENESS, AND THREE ANSWERS (Issue #41 / PR #43). This branch used to stat
+	// a path named by OMW_CONTROL_SOCKET, which nothing in the product ever set, so it answered
+	// "not running" unconditionally. Routing through daemonLiveness means a liveness that could not
+	// be established is reported as undetermined with a reason and its own exit code, rather than
+	// as a stopped daemon — and this package derives no socket path of its own.
+	if live, why := daemonLiveness(env); live != tri.Yes {
+		return nil, reportDaemonNotLive(env, "omw references "+verb, live, why), false
 	}
 	store, err := referencesSource(env)
 	if err != nil || store == nil {
