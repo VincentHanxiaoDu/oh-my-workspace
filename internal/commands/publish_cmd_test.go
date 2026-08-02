@@ -287,9 +287,12 @@ func TestPublishSaysTheDaemonIsNotRunningAndStartsNothing(t *testing.T) {
 	pubHub(t, env)
 	pubDraft(t, env, "n", "body")
 
-	prev := pubDaemonRunning
-	pubDaemonRunning = func(string) tri.Value { return tri.No }
-	t.Cleanup(func() { pubDaemonRunning = prev })
+	// THE ONE LIVENESS ANSWER IS STUBBED, not a private probe of this command's own. Issue #41
+	// consolidated four guesses into daemonLiveness; a test that stubbed something else would be
+	// proving the rendering of a fifth.
+	prev := daemonLiveness
+	daemonLiveness = func(cli.Env) (tri.Value, string) { return tri.No, "" }
+	t.Cleanup(func() { daemonLiveness = prev })
 
 	got := runPublishCmd(t, env, "note", "n")
 	if !strings.Contains(got.stderr, "daemon: not running") {
@@ -300,7 +303,7 @@ func TestPublishSaysTheDaemonIsNotRunningAndStartsNothing(t *testing.T) {
 	}
 
 	// The three-valued answer reaches the surface intact.
-	pubDaemonRunning = func(string) tri.Value { return tri.Undetermined }
+	daemonLiveness = func(cli.Env) (tri.Value, string) { return tri.Undetermined, "the store's lock could not be read" }
 	pubDraft(t, env, "m", "body")
 	got = runPublishCmd(t, env, "state", "m")
 	if !strings.Contains(got.stderr, tri.Undetermined.String()) {

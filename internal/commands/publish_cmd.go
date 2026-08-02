@@ -20,7 +20,6 @@ import (
 	"strings"
 
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/cli"
-	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/daemon"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/drafts"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/hub"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/publish"
@@ -49,11 +48,6 @@ const (
 	pubEnvIdentity = "OMW_IDENTITY"
 	pubEnvScopes   = "OMW_TOKEN_SCOPES"
 )
-
-// pubDaemonRunning asks Issue #2's own answer. There is ONE liveness answer in this product and
-// this is not a second one: [daemon.Inspect] reads the store's lock and run record, starts nothing,
-// and answers in three values.
-var pubDaemonRunning = func(storeRoot string) tri.Value { return daemon.Inspect(storeRoot).Running }
 
 func runPublish(env cli.Env) int {
 	if len(env.Args) == 0 {
@@ -109,13 +103,22 @@ func publishOpen(env cli.Env, what string) (*publish.Ledger, *drafts.Outbox, int
 		fmt.Fprintf(env.Stderr, "  %v\n", err)
 		return nil, nil, cli.ExitUndetermined, false
 	}
-	switch pubDaemonRunning(path) {
+	// THE ONE LIVENESS ANSWER (Issue #41). [daemonLiveness] resolves the store the way `omw daemon
+	// status` does and asks the same function, so this command cannot become a fourth guess. It is
+	// REPORTED and never acted on: publishing is a local act plus a socket, and it does not need the
+	// daemon — but a person whose daemon is down should not have to infer it, and §4.2 says nothing
+	// here may start one.
+	switch live, why := daemonLiveness(env); live {
 	case tri.Yes:
 		fmt.Fprintf(env.Stderr, "daemon: running — this command did not start it.\n")
 	case tri.No:
 		fmt.Fprintf(env.Stderr, "daemon: not running — nothing has been started on your behalf.\n")
 	default:
-		fmt.Fprintf(env.Stderr, "daemon: whether it is running %s; nothing has been started on your behalf.\n", tri.Undetermined)
+		fmt.Fprintf(env.Stderr, "daemon: whether it is running %s; this is not a report that it is stopped, "+
+			"and nothing has been started on your behalf.\n", tri.Undetermined)
+		if why != "" {
+			fmt.Fprintf(env.Stderr, "  %s\n", why)
+		}
 	}
 	s, err := store.Open(path)
 	if err != nil {
