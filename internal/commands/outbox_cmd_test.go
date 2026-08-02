@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/cli"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/daemon"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/drafts"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/store"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri"
@@ -749,15 +750,19 @@ func everySubcommand() [][]string {
 // running afterwards.
 func TestNoCommandStartsTheDaemonAndEachSaysItIsNotRunning(t *testing.T) {
 	env := obWorld(t)
-	sock := filepath.Join(t.TempDir(), "control.sock")
-	env[outboxEnvSocket] = sock
+	root := obStorePath(t, env)
+	// ASKED THROUGH THE DAEMON'S OWN INSPECTION, not by looking for a socket path this package has
+	// no business deriving (Issue #41). Before, after, and for every subcommand in between.
+	if rep := daemon.Inspect(root); rep.Running != tri.No {
+		t.Fatalf("a freshly created store reports Running = %v; this test cannot tell whether a command started anything", rep.Running)
+	}
 	for _, args := range everySubcommand() {
 		got := runOutboxCmd(t, env, args...)
 		if !strings.Contains(got.stderr, "daemon: not running") {
 			t.Errorf("omw outbox %s does not say the daemon is not running:\n%s", strings.Join(args, " "), got.all())
 		}
-		if _, err := os.Stat(sock); err == nil {
-			t.Fatalf("omw outbox %s created the control socket — something was started", strings.Join(args, " "))
+		if rep := daemon.Inspect(root); rep.Running != tri.No {
+			t.Fatalf("after omw outbox %s the daemon reports Running = %v — something was started", strings.Join(args, " "), rep.Running)
 		}
 	}
 }
@@ -769,10 +774,10 @@ func TestTheDaemonsThreeStatesAreSaidDistinctly(t *testing.T) {
 	env := obWorld(t)
 	said := map[string]string{}
 	for name, v := range map[string]tri.Value{"running": tri.Yes, "not running": tri.No, "could not be determined": tri.Undetermined} {
-		prev := outboxDaemonRunning
-		outboxDaemonRunning = func(string) tri.Value { return v }
+		prev := daemonLiveness
+		daemonLiveness = func(cli.Env) (tri.Value, string) { return v, "the lock could not be opened" }
 		got := runOutboxCmd(t, env, "list")
-		outboxDaemonRunning = prev
+		daemonLiveness = prev
 		line := ""
 		for _, l := range strings.Split(got.stderr, "\n") {
 			if strings.HasPrefix(l, "daemon:") {
@@ -892,47 +897,76 @@ func TestWithNoHubTheLocalHalfWorksFullyAndDoesNotMentionAMissingHub(t *testing.
 	}
 }
 
-// CRITERION 23: where owner-only permissions on the control socket cannot be confirmed, the
-// commands say so and stop. The socket is a REAL one, probed, not a name.
-func TestCommandsRefuseBesideAControlSocketThatIsNotOwnerOnly(t *testing.T) {
-	dir, err := os.MkdirTemp("", "omw")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	p := filepath.Join(dir, "s")
-	l, err := net.Listen("unix", p)
-	if err != nil {
-		t.Skipf("this environment cannot create a unix socket to probe: %v", err)
-	}
-	t.Cleanup(func() { l.Close() })
-	if err := os.Chmod(p, 0o666); err != nil {
-		t.Skipf("this environment will not let the socket's permissions be set: %v", err)
-	}
-	info, err := os.Stat(p)
-	if err != nil || info.Mode().Perm()&0o077 == 0 {
-		t.Skipf("this environment did not keep the world-readable permissions the test needs (%v)", err)
+// CRITERION 23, §4.6: where the control API is not open on a socket only its owner can reach, or
+// where that could not be confirmed, the commands say so and stop.
+//
+// WHAT THIS TEST DOES AND DOES NOT PROVE, stated rather than glossed. The daemon is the thing that
+// proves its socket is owner-only and refuses to open otherwise, and `internal/daemon` owns the
+// tests for that. What this drives is what THIS capability does with each of the daemon's three
+// answers — which is the part Issue #9 is responsible for. Deriving the socket path out here to
+// look at it myself is exactly what Issue #41 forbids, and it would be wrong on the runtime-
+// directory fallback path.
+func TestCommandsStopWhenTheControlAPIIsNotOpenOrCannotBeConfirmed(t *testing.T) {
+	env := obWorld(t)
+	withDaemonSaying := func(state tri.Value, detail string) func() {
+		prevLive, prevCtl := daemonLiveness, outboxControlState
+		daemonLiveness = func(cli.Env) (tri.Value, string) { return tri.Yes, "" }
+		outboxControlState = func(cli.Env) (tri.Value, string) { return state, detail }
+		return func() { daemonLiveness, outboxControlState = prevLive, prevCtl }
 	}
 
-	env := obWorld(t)
-	env[outboxEnvSocket] = p
-	for _, args := range everySubcommand() {
-		got := runOutboxCmd(t, env, args...)
-		if got.code == cli.Success {
-			t.Errorf("omw outbox %s proceeded beside a socket that is not owner-only:\n%s", strings.Join(args, " "), got.all())
-		}
-		if !strings.Contains(got.stderr, "owner-only") {
-			t.Errorf("omw outbox %s does not say what is wrong:\n%s", strings.Join(args, " "), got.stderr)
-		}
+	cases := map[string]struct {
+		state tri.Value
+		want  int
+	}{
+		"the control API is not open": {tri.No, cli.ExitFailure},
+		"it could not be established": {tri.Undetermined, cli.ExitUndetermined},
 	}
-	// And with the permissions put right, the same commands work — otherwise this test would pass
-	// against a build that refuses everything always.
-	if err := os.Chmod(p, 0o600); err != nil {
-		t.Fatal(err)
+	said := map[string]string{}
+	for name, c := range cases {
+		restore := withDaemonSaying(c.state, "the socket's permissions could not be confirmed as owner-only")
+		for _, args := range everySubcommand() {
+			got := runOutboxCmd(t, env, args...)
+			if got.code == cli.Success {
+				t.Errorf("omw outbox %s proceeded when %s:\n%s", strings.Join(args, " "), name, got.all())
+			}
+			if got.code != c.want {
+				t.Errorf("omw outbox %s exits %d when %s, want %d", strings.Join(args, " "), got.code, name, c.want)
+			}
+			if !strings.Contains(got.stderr, "control API") {
+				t.Errorf("omw outbox %s does not say what is wrong when %s:\n%s", strings.Join(args, " "), name, got.stderr)
+			}
+			if args[0] == "list" {
+				said[name] = got.stderr
+			}
+		}
+		restore()
 	}
+	// A DETERMINED "not open" AND "could not be confirmed" ARE NOT THE SAME SENTENCE, and they do
+	// not share an exit code — asserted above by value and here by comparing the two renderings.
+	assertThreeDistinct(t, "the control API's state", said)
+
+	// AND THE CONTROL: with the daemon reporting an open control API, the same commands work.
+	// Without this, a build that refused everything always would pass the assertions above.
+	restore := withDaemonSaying(tri.Yes, "")
+	defer restore()
 	if got := runOutboxCmd(t, env, "list"); got.code != cli.Success {
-		t.Errorf("with an owner-only socket, list exits %d:\n%s", got.code, got.all())
+		t.Errorf("with the control API open, list exits %d:\n%s", got.code, got.all())
 	}
+}
+
+// A daemon that is NOT running has no control API, and there is nothing to confirm. Purely local
+// drafting must not be blocked by the absence of a thing it does not use.
+func TestWithNoDaemonRunningTheLocalHalfIsNotBlockedByTheControlAPI(t *testing.T) {
+	env := obWorld(t)
+	prev := outboxControlState
+	outboxControlState = func(cli.Env) (tri.Value, string) {
+		t.Error("the control API's state was consulted with no daemon running")
+		return tri.Undetermined, ""
+	}
+	t.Cleanup(func() { outboxControlState = prev })
+	mustRun(t, env, "draft", "note-a", "local work")
+	mustRun(t, env, "list")
 }
 
 // ---------------------------------------------------------------------------
@@ -963,7 +997,7 @@ func TestADraftSurvivesTheProcessThatWroteIt(t *testing.T) {
 		// real store at a t.TempDir() that is then deleted; both variables are set because the
 		// pointer resolves from XDG_DATA_HOME and falls back to HOME.
 		cmd.Env = append(os.Environ(),
-			store.PathEnv+"="+root, "OMW_HUB=", "OMW_MODEL=", "OMW_MODEL_KEY=", "OMW_CONTROL_SOCKET=",
+			store.PathEnv+"="+root, "OMW_HUB=", "OMW_MODEL=", "OMW_MODEL_KEY=",
 			"XDG_DATA_HOME="+sandbox, "HOME="+sandbox,
 		)
 		out, _ := cmd.CombinedOutput()

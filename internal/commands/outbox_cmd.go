@@ -9,17 +9,16 @@
 // exits non-zero, and leaves the draft in a state that reads differently from "you simply have not
 // published this yet" — see [outboxReviewGate].
 //
-// A NEW FILE, AND ONLY THIS FILE. Several Issues edit package commands at once; this one adds a
-// file and touches nothing that already exists. The two environment variable names below are
-// spelled out again rather than borrowed from a neighbour's constants for the same reason.
+// A NEW FILE, AND ALMOST ONLY THIS FILE. Several Issues edit package commands at once; this one
+// adds a file and touches nothing that already exists. The one thing it does NOT keep to itself is
+// the daemon's liveness: that has exactly one definition in this package (`liveness.go`, Issue
+// #41), and a private second answer here is the defect that Issue exists to have removed.
 package commands
 
 import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
-	"os"
 	"runtime"
 	"strings"
 
@@ -39,10 +38,7 @@ func init() {
 	})
 }
 
-const (
-	outboxEnvHub    = "OMW_HUB"
-	outboxEnvSocket = "OMW_CONTROL_SOCKET"
-)
+const outboxEnvHub = "OMW_HUB"
 
 // outboxReviewer is how this command reaches the person's model.
 //
@@ -60,14 +56,26 @@ func (outboxUnreachableReviewer) Review(rules, body string) (string, error) {
 	return "", errors.New("this build has no transport to a model (Issue #18)")
 }
 
-// outboxDaemonRunning asks Issue #2's own answer rather than inventing a second one.
+// outboxControlState is the control API's state, as the DAEMON reports it.
 //
-// [daemon.Inspect] reads the store's lock and run record and starts nothing, and its answer is
-// three-valued — which is the point: "the daemon is not running" and "I could not tell whether the
-// daemon is running" are different things to say to a person, and a private socket-stat here could
-// only ever say the first. It is a var so a test can drive the three branches without a daemon.
-var outboxDaemonRunning = func(storeRoot string) tri.Value {
-	return daemon.Inspect(storeRoot).Running
+// WHY NOT LOOK AT THE SOCKET FROM HERE. Criterion 23 is about owner-only permissions on the control
+// API, and the tempting implementation — stat the socket and check its mode — has to know where the
+// socket is. `internal/daemon` chooses between a path inside the store and a per-user runtime
+// directory depending on the kernel's sun_path limit, so a copy of that rule out here is not merely
+// duplicated: it is WRONG on the fallback path, and it would report on a file the daemon is not
+// listening on. Issue #41 made that a structural rule over the tree, and it is the right rule. The
+// daemon already refuses to open a control API it cannot prove is owner-only (PRD §4.6), so the
+// honest question from out here is "what did it say", and this asks exactly that.
+//
+// It is a var so a test can drive all three renderings without starting a daemon; whether the
+// daemon's own answer is right is `internal/daemon`'s to prove, and it does.
+var outboxControlState = func(env cli.Env) (tri.Value, string) {
+	root, err := store.Resolve(env.Getenv)
+	if err != nil {
+		return tri.Undetermined, err.Error()
+	}
+	rep := daemon.Inspect(root)
+	return rep.Control, rep.ControlDetail
 }
 
 func runOutbox(env cli.Env) int {
@@ -144,42 +152,47 @@ func outboxPreflight(env cli.Env, what string) (int, bool) {
 		fmt.Fprintf(env.Stderr, "omw outbox %s: this build ships for macOS and Linux; this is %s.\n", what, runtime.GOOS)
 		return cli.ExitFailure, false
 	}
-	// CRITERION 23, the socket. If the control API's socket is named and is NOT owner-only, the
-	// commands say so and stop; if its permissions cannot be confirmed at all, that is undetermined
-	// and also stops. Nothing here opens the socket — this is about refusing to proceed beside one
-	// whose permissions are wrong, which is §4.6 read literally.
-	if p := strings.TrimSpace(env.Getenv(outboxEnvSocket)); p != "" {
-		info, err := os.Stat(p)
-		switch {
-		case errors.Is(err, fs.ErrNotExist):
-			// Nothing is there, so there is no socket whose permissions could be wrong. The daemon
-			// note below is what a person needs here, not a refusal.
-		case err != nil:
-			fmt.Fprintf(env.Stderr, "omw outbox %s: whether the control socket is owner-only %s.\n", what, tri.Undetermined)
-			fmt.Fprintf(env.Stderr, "  %v\n", err)
-			fmt.Fprintf(env.Stderr, "  This is NOT 'the permissions are fine'. Nothing was done.\n")
-			return cli.ExitUndetermined, false
-		case info.Mode().Perm()&0o077 != 0:
-			fmt.Fprintf(env.Stderr, "omw outbox %s: refused — the control socket at %s is not owner-only (%04o).\n", what, p, info.Mode().Perm())
-			fmt.Fprintf(env.Stderr, "  Your outbox holds writing that has never left this machine.\n")
-			return cli.ExitFailure, false
-		}
-	}
 	// CRITERION 20: the daemon's state is REPORTED, on every command, and started by none of them.
 	// It goes to stderr because it is not the answer the person asked for; it is said anyway
 	// because a person whose daemon is down should never have to infer it.
 	//
-	// A store this command cannot even locate is not reported on: the subcommand is about to say
-	// so precisely, and "the daemon is not running" said about a store nobody found would be a
-	// determined answer nobody determined.
-	if root, rerr := store.Resolve(env.Getenv); rerr == nil {
-		switch outboxDaemonRunning(root) {
-		case tri.Yes:
-			fmt.Fprintf(env.Stderr, "daemon: running — this command did not start it.\n")
+	// ONE DEFINITION (Issue #41). This asks daemonLiveness, which is what `omw daemon status` asks,
+	// so the two cannot disagree about the same daemon — and it is three-valued, so "not running"
+	// and "nothing was established" stay different sentences here as well.
+	live, why := daemonLiveness(env)
+	switch live {
+	case tri.Yes:
+		fmt.Fprintf(env.Stderr, "daemon: running — this command did not start it.\n")
+	case tri.No:
+		fmt.Fprintf(env.Stderr, "daemon: not running — nothing has been started on your behalf.\n")
+	default:
+		fmt.Fprintf(env.Stderr, "daemon: whether it is running %s; nothing has been started on your behalf.\n", tri.Undetermined)
+		if why != "" {
+			fmt.Fprintf(env.Stderr, "  %s\n", why)
+		}
+	}
+
+	// CRITERION 23, §4.6. The control API refuses to open unless it can prove its socket is
+	// owner-only, so when a daemon IS running the question this capability can honestly ask is what
+	// the daemon concluded — asked through [outboxControlState], never by finding the socket and
+	// looking at it. A daemon that is not running has no control API, and there is nothing to
+	// confirm; local drafting is unaffected and proceeds.
+	if live == tri.Yes {
+		switch state, detail := outboxControlState(env); state {
 		case tri.No:
-			fmt.Fprintf(env.Stderr, "daemon: not running — nothing has been started on your behalf.\n")
-		default:
-			fmt.Fprintf(env.Stderr, "daemon: whether it is running %s; nothing has been started on your behalf.\n", tri.Undetermined)
+			fmt.Fprintf(env.Stderr, "omw outbox %s: refused — the daemon's control API is not open.\n", what)
+			if detail != "" {
+				fmt.Fprintf(env.Stderr, "  %s\n", detail)
+			}
+			fmt.Fprintf(env.Stderr, "  Your outbox holds writing that has never left this machine.\n")
+			return cli.ExitFailure, false
+		case tri.Undetermined:
+			fmt.Fprintf(env.Stderr, "omw outbox %s: whether the control API is open, on a socket only you can reach, %s.\n", what, tri.Undetermined)
+			if detail != "" {
+				fmt.Fprintf(env.Stderr, "  %s\n", detail)
+			}
+			fmt.Fprintf(env.Stderr, "  This is NOT 'the permissions are fine'. Nothing was done.\n")
+			return cli.ExitUndetermined, false
 		}
 	}
 	return cli.Success, true
