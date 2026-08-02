@@ -500,8 +500,18 @@ func treeSnapshot(t *testing.T, dir string) map[string]string {
 // location. It fails when the NEXT test to spawn the binary forgets, which is the case that
 // matters — the original was written by someone who did not think to look.
 func TestEveryProcessSpawnSandboxesTheDevicePointer(t *testing.T) {
+	// TEST FILES ONLY, AND THIS IS THE WHOLE POINT OF THE FILTER. The first version of this check
+	// walked every file in the package and flagged `daemon.go`, where `omw daemon start` spawns the
+	// real daemon — production code that MUST inherit the real environment, because the daemon has
+	// to find the person's actual store. Sandboxing HOME there would be the bug, not the fix.
+	//
+	// A gate that is red for a reason its author cannot act on is worse than no gate: it trains a
+	// reader to ignore a red. This one applies to test files, which are the only place a spawn has
+	// any business pointing somewhere other than the person's real environment.
 	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, ".", nil, parser.ParseComments)
+	pkgs, err := parser.ParseDir(fset, ".", func(fi os.FileInfo) bool {
+		return strings.HasSuffix(fi.Name(), "_test.go")
+	}, parser.ParseComments)
 	if err != nil {
 		t.Fatalf("parsing this package: %v", err)
 	}
