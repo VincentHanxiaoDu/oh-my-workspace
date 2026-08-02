@@ -2,11 +2,9 @@ package commands
 
 import (
 	"bytes"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 
@@ -450,6 +448,17 @@ func TestVisibilitySurfacesCannotOpenANetworkConnection(t *testing.T) {
 		t.Skipf("go list could not compute the import graph here: %v\n%s", err, out)
 	}
 	// These have no local-IPC use whatever. Reaching any of them is reaching outward.
+	//
+	// "net" IS DELIBERATELY NOT IN THIS LIST, AND THE RULE IT CARRIED IS NOT GONE — see
+	// TestEveryNetUseInTheReachableTreeIsAUnixSocket, which replaced it with a stricter check.
+	// Unlike the four above, `net` DOES have a local-IPC use: PRD §2.1's control API is a unix
+	// domain socket, and Go puts unix sockets in `net`. So once `omw daemon` existed this ban and
+	// §2.1 could not both be satisfied — obeying it meant deleting the local control API.
+	//
+	// Removing the entry ALONE would have opened a real hole: a bare net.Dial("tcp", …) was
+	// measured passing the whole suite. So it left together with a replacement that bans the USE
+	// rather than the import, across the same reachable tree this list covers, and that
+	// replacement rejects the tcp dial this list could not tell apart from a local socket.
 	banned := map[string]bool{
 		"net/http": true, "net/url": true, "crypto/tls": true, "net/rpc": true,
 	}
@@ -461,42 +470,10 @@ func TestVisibilitySurfacesCannotOpenANetworkConnection(t *testing.T) {
 	}
 }
 
-// CRITERION 19, the half the import graph cannot answer: every listen and dial in this product
-// names the "unix" network, so the only socket anything opens is a local one (PRD §4.2, §4.6).
-//
-// A CONTROL IS ASSERTED FIRST. If the scan finds no call sites at all it proves nothing, and would
-// go on proving nothing after somebody renamed the file it reads.
-func TestEveryListenAndDialIsAUnixSocket(t *testing.T) {
-	root := repoRoot(t)
-	callSite := regexp.MustCompile(`net\.(Listen|Dial|DialTimeout)\s*\(\s*("[^"]*")?`)
-	found := 0
-	err := filepath.WalkDir(filepath.Join(root, "internal"), func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return err
-		}
-		b, rerr := os.ReadFile(path)
-		if rerr != nil {
-			return rerr
-		}
-		for _, m := range callSite.FindAllStringSubmatch(string(b), -1) {
-			found++
-			if m[2] != `"unix"` {
-				rel, _ := filepath.Rel(root, path)
-				t.Errorf("%s: net.%s opens %s, not \"unix\" — with no hub configured nothing may reach out (PRD §4.2), and the control API must be local (§4.6)", rel, m[1], m[2])
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("walking internal/: %v", err)
-	}
-	// THE CONTROL. Zero call sites means the regex stopped matching, not that the product stopped
-	// dialling — and those two look identical in a green run.
-	if found == 0 {
-		t.Fatal("found no net.Listen/net.Dial call sites at all; the scan is not looking at anything, so its pass proves nothing")
-	}
-	t.Logf("checked %d listen/dial call sites, all \"unix\"", found)
-}
+// The unix-socket half of criterion 19 lives in network_guard_test.go, as
+// TestEveryListenAndDialIsAUnixSocket — moved there when two independently written versions of it
+// had to be merged, and kept out of this file so the import ban above and the use rule below it
+// can be read as the two halves they are.
 
 // ============================================================================================
 // One vocabulary — criterion 13.
