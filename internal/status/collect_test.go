@@ -686,3 +686,103 @@ type stubChecker struct {
 
 func (stubChecker) Mechanism() string                       { return "a probe this test supplied" }
 func (c stubChecker) Enabled(context.Context) (bool, error) { return c.on, c.err }
+
+// THE MEMBER-TO-SUBSYSTEM FOLD, PINNED IN BOTH DIRECTIONS.
+//
+// `worse` is written once, and one copy of a precedence still wants a test on every branch of it.
+// The branch that matters most is the one with the least to catch it: "undetermined beats
+// everything". A subsystem with three fine members and one nobody could check must not report a
+// confident state of its own — a person reading a green line above an unknowable member has been
+// told the wrong thing, and criterion 5's three outcomes are exactly what that collapses.
+//
+// The table pins the WHOLE ordering, not just its top, so a fold that ranked a known failure above
+// an unknown fails here rather than in whichever subsystem notices first.
+func TestTheMemberFoldRanksUndeterminedAboveEverything(t *testing.T) {
+	for _, c := range []struct {
+		current, member, want State
+	}{
+		// Undetermined beats every other state, from either side.
+		{Working, Undetermined, Undetermined},
+		{Undetermined, Working, Undetermined},
+		{NotWorking, Undetermined, Undetermined},
+		{Undetermined, NotWorking, Undetermined},
+		{NotConfigured, Undetermined, Undetermined},
+		{Undetermined, NotConfigured, Undetermined},
+		{Undetermined, Undetermined, Undetermined},
+		// Not-working beats the quiet ones, from either side.
+		{Working, NotWorking, NotWorking},
+		{NotWorking, Working, NotWorking},
+		{NotConfigured, NotWorking, NotWorking},
+		{NotWorking, NotConfigured, NotWorking},
+		// And the quiet ones keep their own answers.
+		{Working, NotConfigured, NotConfigured},
+		{NotConfigured, Working, NotConfigured},
+		{Working, Working, Working},
+		{NotConfigured, NotConfigured, NotConfigured},
+	} {
+		if got := worse(c.current, c.member); got != c.want {
+			t.Errorf("worse(%v, %v) = %v, want %v", c.current, c.member, got, c.want)
+		}
+	}
+}
+
+// THE SAME PRECEDENCE, DRIVEN THROUGH A REAL SUBSYSTEM RATHER THAN THROUGH the fold in isolation.
+//
+// A table on `worse` proves the function; only this proves that a subsystem calls it. Two channels,
+// one healthy, and the second one first unreachable and then merely expired: the line must be
+// UNDETERMINED in the first case and NOT WORKING in the second, and the two must differ.
+func TestOneUnknowableMemberStopsItsSubsystemReportingAConfidentState(t *testing.T) {
+	// A healthy channel plus one whose adapter could not be reached.
+	unknowable := newSandbox(t)
+	stU := unknowable.open(t)
+	connectChannel(t, stU, "healthy", time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC))
+	adapter := channels.Connection{
+		ID: "unreachable", Kind: channels.KindTeams, Account: "me@example.com",
+		Credential: "x", CredentialExpiresAt: time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+	if err := channels.Connect(stU, adapter); err != nil {
+		t.Fatal(err)
+	}
+	adapter.Last = channels.Ingestion{
+		State: tri.No, Outcome: channels.OutcomeUnreachable, OutcomeDetail: "the endpoint did not answer",
+	}
+	if err := channels.Save(stU, adapter); err != nil {
+		t.Fatal(err)
+	}
+
+	// A healthy channel plus one whose credential has demonstrably expired.
+	failing := newSandbox(t)
+	stF := failing.open(t)
+	connectChannel(t, stF, "healthy", time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC))
+	connectChannel(t, stF, "expired", time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))
+
+	withUnknowable := find(t, unknowable.collect(tri.No, ""), Channels)
+	withFailure := find(t, failing.collect(tri.No, ""), Channels)
+
+	// A CONTROL. Both lines must actually have two members, or the fold under test never ran.
+	if len(withUnknowable.Items) != 2 || len(withFailure.Items) != 2 {
+		t.Fatalf("the lines carry %d and %d members; this test needs two on each",
+			len(withUnknowable.Items), len(withFailure.Items))
+	}
+	if withUnknowable.State != Undetermined {
+		t.Errorf("a channels line with one healthy channel and one whose adapter could not be "+
+			"reached reports %v — a line containing something nobody could check does not get to "+
+			"report a confident state of its own", withUnknowable.State)
+	}
+	if withUnknowable.State == Working {
+		t.Error("the subsystem reported WORKING above a member nobody could check")
+	}
+	if withFailure.State != NotWorking {
+		t.Errorf("a channels line with one healthy channel and one confirmed failure reports %v, "+
+			"want NotWorking", withFailure.State)
+	}
+	// The two must be tellable apart at the line, which is criterion 5 for a folded state.
+	if withUnknowable.StateWord == withFailure.StateWord {
+		t.Errorf("a subsystem clouded by an unknowable member and one containing a confirmed "+
+			"failure both report %q", withUnknowable.StateWord)
+	}
+	// And the summary must not wave the unknowable one through (criterion 8, through the fold).
+	if s := Summarise([]Subsystem{withUnknowable}); s == SummaryAllWorking {
+		t.Error("a screen whose only oddity is an unknowable channel led with everything running")
+	}
+}
