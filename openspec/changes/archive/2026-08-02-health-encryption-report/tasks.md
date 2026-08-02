@@ -1,0 +1,24 @@
+# Tasks
+
+- [x] Add `internal/health` with the `Assumption` / `Report` / `Runner` shape, using `internal/tri` for the three-valued answer rather than a new type
+- [x] Render the third value as `could not be determined on this platform`, built on tri's fixed wording rather than replacing it
+- [x] Put the platform probe behind the `EncryptionChecker` interface so a test can force each of the three outcomes
+- [x] Implement the real macOS probe: FileVault via `fdesetup status`, with the answer read from the output and not from the exit code
+- [x] Implement the real Linux probe: LUKS via `lsblk -rno FSTYPE`, falling back to `/dev/mapper` plus `cryptsetup status`
+- [x] Select the probe by GOOS at runtime, not by build tag, so both probes are compiled and tested on every machine
+- [x] Return the undetermined value for a platform with no probe (Windows is out of scope for this slice)
+- [x] Add `internal/commands/health.go` registering `omw health`, as a new file that touches no existing one
+- [x] Map the three values to exit codes: 0 for `enabled`, 0 for `not enabled`, 3 (`ExitUndetermined`) for the third
+- [x] Write the report before deciding the exit code, so all three values are reported
+- [x] Test that all three values are emitted and that the three outputs are distinct
+- [x] Test that an error in the check is never reported as `not enabled`, for several error shapes
+- [x] Test that the undetermined line is present, non-empty, and states its reason
+- [x] Test the macOS output parser for On, Off, empty, whitespace and unrecognised wording
+- [x] Test the Linux probe for LUKS present, LUKS absent, lsblk missing, mapper unreadable and cryptsetup missing
+- [x] Add a real-platform probe test that PROBES the machine and skips with a stated reason rather than assuming an OS
+- [x] Test that a health run creates no file and starts no process
+- [x] Test structurally, by parsing this slice's source, that it imports no network-capable package
+- [x] Test that the only process-start site in this slice is the encryption probe
+- [x] Test the command end to end through the registry for exit codes, output and the no-hub case
+- [x] Mutate the implementation nine ways, confirm each goes red with a message naming the defect, and revert
+- [x] `make ci` green and `./.workflow/bin/run-gates.sh` green
