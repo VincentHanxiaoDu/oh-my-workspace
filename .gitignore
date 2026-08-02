@@ -3,3 +3,7 @@
 # Re-created by re-running the installer. CI reads neither.
 .claude/commands/
 .agent-dev-flow
+
+# Go build output.
+/bin/
+*.test
