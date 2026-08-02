@@ -60,6 +60,19 @@
 - [x] Allow location-named settings (`key_file`, `token-path`) — a first cut refused `key_file` by a
       message that told the person to record a path, and a test caught it
 
+## Review round 1 — the summary named the wrong subsystem
+
+- [x] Add the interface-neutral `extension.ErrFailedToLoad`, the twin `ErrLoadUndetermined` had been
+      shipped without, so a summary over a mixed set has a correct code to reach for
+- [x] Use it in `omw ext list`'s failure summary, which had been printing
+      `model-provider-extension-failed-to-load` for a broken CHANNEL adapter — the Issue's own
+      opening story reported as a model fault
+- [x] Keep the per-entry codes interface-specific: `model.ErrProviderFailedToLoad`'s own reasoning
+      about a caller with no English to inspect is right and is untouched
+- [x] Drive it from both ends — channel-only, model-only and one of each — and assert the three
+      summaries are the same sentence, so a build that swapped one interface's bias for the other's
+      cannot pass
+
 ## Driven red on purpose
 
 - [x] A failed-to-load adapter returning a working-looking empty adapter — red: "the broken channel
@@ -74,3 +87,8 @@
 - [x] Undetermined sharing an exit code with failed — red: "exit 1, want 3"
 - [x] An unreadable registration skipped rather than listed — red: "the damaged registration was
       DROPPED from the listing"
+- [x] The reviewer's exact defect reapplied — the summary hardcoding
+      `model.ErrProviderFailedToLoad.Code` — red in all three cases: "the summary over a mixed set
+      names one interface"
+- [x] The same defect with the bias SWAPPED to `channels.ErrAdapterFailedToLoad.Code` — red in all
+      three, so the repair is neutrality and not a change of side

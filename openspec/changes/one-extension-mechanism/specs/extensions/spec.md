@@ -112,6 +112,21 @@ distinguishable without parsing output.
 - **WHEN** a person lists extensions with a failed one, and separately with an undetermined one
 - **THEN** the two runs exit with statuses that differ from each other and from success
 
+### Requirement: A summary over several extensions names neither interface
+The product SHALL report a summary covering more than one extension using a code that belongs to
+neither interface, whichever interface the extensions in it implement. Codes attached to a single
+extension MAY remain specific to its interface.
+
+#### Scenario: Only a channel adapter has failed
+- **WHEN** a person lists extensions on a machine whose only failed extension is a channel adapter
+- **THEN** the failure summary carries an interface-neutral code, and it does not name the model
+  provider interface
+
+#### Scenario: Only a model provider has failed
+- **WHEN** a person lists extensions on a machine whose only failed extension is a model provider
+- **THEN** the failure summary carries the same interface-neutral code as it does when a channel
+  adapter has failed
+
 ### Requirement: Nothing about an extension is implicit
 The product SHALL NOT start the daemon, open a network connection, or contact a provider's endpoint
 as a side effect of registering, listing or configuring an extension, and SHALL treat an extension

@@ -137,8 +137,42 @@ var (
 		Code: "extension-record-unreadable",
 		Msg:  "an extension registration record is present and cannot be read",
 	}
+	// ErrFailedToLoad is the INTERFACE-NEUTRAL failed-to-load code: the one a surface reporting
+	// over a MIXED set of extensions uses.
+	//
+	// # WHY THIS EXISTS, AND WHAT ITS ABSENCE COST
+	//
+	// Each interface has its own failed-to-load code, and must: `channels.ErrAdapterFailedToLoad`
+	// and `model.ErrProviderFailedToLoad` tell a caller WHICH subsystem is broken, and
+	// `internal/model/extension.go` argues at length why they may not be collapsed — "sharing a
+	// code would make the two situations indistinguishable to exactly the caller that has no
+	// English to inspect".
+	//
+	// That is right for a code attached to ONE entry. It is wrong for a summary over several, and
+	// this package shipped [ErrLoadUndetermined] — neutral — with no neutral twin beside it. So
+	// `omw ext list`'s failure summary had no correct code to reach for and reached into `model`
+	// for one, and a machine whose only broken extension was a CHANNEL ADAPTER printed
+	// `code: model-provider-extension-failed-to-load`. A reviewer drove it and refused the pull
+	// request.
+	//
+	// That is the Issue's own opening story — the Slack adapter that will not load — reported to
+	// every machine reader as a model fault, which is worse than criterion 9's "no traffic on this
+	// channel" because it sends the reader to the wrong subsystem entirely. It also breaks §2.5's
+	// symmetry in the one place a script looks: the two interfaces share a state vocabulary, and
+	// the summary line was picking a side.
+	//
+	// BOTH FACTS ARE TRUE AT ONCE, which is how the gap opened: per-ENTRY codes stay
+	// interface-specific, and a summary over a MIXED set is neutral. This is the neutral one.
+	ErrFailedToLoad = &refusal.Error{
+		Code: "extension-failed-to-load",
+		Msg:  "at least one registered extension failed to load",
+	}
+
 	// ErrLoadUndetermined is what an extension's Load returns when it could not establish whether
 	// it loaded — as opposed to establishing that it did not.
+	//
+	// It is the neutral twin of [ErrFailedToLoad], and it was here first — see that comment for
+	// what having only one of the pair cost.
 	//
 	// IT IS THE WHOLE OF CRITERION 13. Without a distinct value here, [Registry.load] would have a
 	// (bool, error) whose error becomes a negative, and the fourth rendering would be unreachable.
@@ -152,7 +186,7 @@ var (
 // distinguishable by code and by message.
 var allErrors = []*refusal.Error{
 	ErrNotOffered, ErrAlreadyRegistered, ErrNotRegistered, ErrNoStore,
-	ErrUnreadableRecord, ErrLoadUndetermined,
+	ErrUnreadableRecord, ErrFailedToLoad, ErrLoadUndetermined,
 }
 
 // stateFromLoad turns an [Extension.Load] outcome into a state, and it is the only place that

@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/channels"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/cli"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/extension"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/model"
@@ -587,4 +588,114 @@ func xtBuild(t *testing.T) string {
 		t.Fatalf("building omw: %v\n%s", err, out)
 	}
 	return bin
+}
+
+// The failure summary names NEITHER INTERFACE, whichever interface actually failed.
+//
+// # WHAT THIS CAUGHT, AND WHY IT IS DRIVEN BOTH WAYS
+//
+// `omw ext list`'s failure summary printed `model.ErrProviderFailedToLoad.Code`
+// unconditionally, so a machine whose only broken extension was a CHANNEL ADAPTER told every
+// machine reader `code: model-provider-extension-failed-to-load`. A reviewer drove it and refused
+// the pull request. It is the Issue's own opening story — the Slack adapter that will not load —
+// reported as a model fault, and it sends the reader to the wrong subsystem entirely.
+//
+// The obvious repair is to pick the code from whichever interface failed, and that is a trap: with
+// one broken extension of each, it has to pick one anyway, and it would break §2.5's symmetry in
+// exactly the place a script looks. So the summary is NEUTRAL, and this asserts it from both ends —
+// the channel-only case, the model-only case, and the mixed case — and asserts the three produce
+// the SAME code. Driving only the channel case would pass just as happily on a build that had
+// swapped one interface's bias for the other's.
+//
+// Per-ENTRY codes are a different question and stay interface-specific; `model.ErrProviderFailedToLoad`
+// argues why, and nothing here disturbs it.
+func TestTheFailureSummaryNamesNeitherInterface(t *testing.T) {
+	cases := map[string][]extension.Extension{
+		"only a channel adapter is broken": {
+			xtFake{name: "brokechan", iface: extension.Channel, err: errors.New("libslack.so is missing")},
+			xtFake{name: "finemodel", iface: extension.Model},
+		},
+		"only a model provider is broken": {
+			xtFake{name: "brokemodel", iface: extension.Model, err: errors.New("the acme extension needs a newer omw")},
+			xtFake{name: "finechan", iface: extension.Channel},
+		},
+		"one of each is broken": {
+			xtFake{name: "brokechan", iface: extension.Channel, err: errors.New("libslack.so is missing")},
+			xtFake{name: "brokemodel", iface: extension.Model, err: errors.New("the acme extension needs a newer omw")},
+		},
+	}
+
+	summaries := map[string]string{}
+	for label, exts := range cases {
+		t.Run(label, func(t *testing.T) {
+			xtRegistry(t, exts...)
+			env := xtWorld(t)
+			for _, e := range exts {
+				// NOT mustExt: registering a broken extension exits non-zero by criterion 12.
+				if got := runExtCmd(t, env, "register", e.Name()); !strings.Contains(got.stdout, "registered: "+e.Name()) {
+					t.Fatalf("%s was not registered, so this case examines nothing:\n%s", e.Name(), got.all())
+				}
+			}
+
+			got := runExtCmd(t, env, "list")
+			if got.code != cli.ExitFailure {
+				t.Fatalf("exit %d, want %d — this case is meant to have a failure in it\n%s",
+					got.code, cli.ExitFailure, got.all())
+			}
+
+			// The summary line, isolated. Asserting on the whole output would also match the
+			// per-entry lines, which are allowed to be interface-specific.
+			summary := ""
+			for _, line := range strings.Split(got.stderr, "\n") {
+				if strings.Contains(line, "FAILED TO LOAD (code:") {
+					summary = line
+				}
+			}
+			if summary == "" {
+				t.Fatalf("no failure summary line was printed at all, so the assertions below "+
+					"examine nothing:\n%s", got.stderr)
+			}
+			summaries[label] = summary
+
+			if !strings.Contains(summary, extension.ErrFailedToLoad.Code) {
+				t.Errorf("the summary does not carry the interface-neutral code %q:\n%s",
+					extension.ErrFailedToLoad.Code, summary)
+			}
+			for _, biased := range []string{
+				model.ErrProviderFailedToLoad.Code,
+				channels.ErrAdapterFailedToLoad.Code,
+				"model-provider", "channel-adapter",
+			} {
+				if strings.Contains(summary, biased) {
+					t.Errorf("the summary over a mixed set names one interface (%q). A machine whose "+
+						"broken extension is of the OTHER interface is told the wrong subsystem is "+
+						"at fault:\n%s", biased, summary)
+				}
+			}
+		})
+	}
+
+	// AND THE THREE ARE THE SAME SENTENCE apart from the count. Each case above could pass alone on
+	// a build that picked the code from whichever interface happened to fail.
+	if len(summaries) != len(cases) {
+		t.Fatalf("only %d of %d cases produced a summary; the comparison below is incomplete", len(summaries), len(cases))
+	}
+	normalised := map[string]string{}
+	for label, s := range summaries {
+		// The count differs between the one-broken and two-broken cases, and that is the only thing
+		// permitted to differ.
+		normalised[label] = strings.NewReplacer("1 extension(s)", "N extension(s)", "2 extension(s)", "N extension(s)").Replace(s)
+	}
+	var first, firstLabel string
+	for label, s := range normalised {
+		if first == "" {
+			first, firstLabel = s, label
+			continue
+		}
+		if s != first {
+			t.Errorf("the failure summary differs by which interface failed.\n%s: %s\n%s: %s\n"+
+				"§2.5: the two interfaces are one mechanism, and this is the one line a script reads.",
+				firstLabel, first, label, s)
+		}
+	}
 }

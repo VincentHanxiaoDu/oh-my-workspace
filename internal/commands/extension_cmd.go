@@ -296,11 +296,27 @@ func extensionExitFor(sum extension.Summary) int {
 
 // extensionSaySummary puts the exit code's reason in words on stderr, so a person reading the
 // terminal is told the same thing a script reads from `$?`.
+//
+// # THE CODES HERE ARE INTERFACE-NEUTRAL, AND A REVIEWER HAD TO SAY SO
+//
+// This summarises a MIXED set — channel adapters and model providers together — so the code it
+// prints cannot belong to either interface. It used `model.ErrProviderFailedToLoad.Code`
+// unconditionally, and a machine whose only broken extension was a channel adapter told every
+// machine reader that its MODEL PROVIDER was broken. The Slack adapter that will not load, reported
+// as a model fault, which sends the reader to the wrong subsystem entirely.
+//
+// Picking the code from whichever interface failed is the repair that looks obvious and is a trap:
+// with one broken extension of each it has to pick one anyway, and §2.5's symmetry breaks in
+// exactly the line a script reads. TestTheFailureSummaryNamesNeitherInterface drives both biases.
+//
+// Per-ENTRY codes stay interface-specific and must — see `model.ErrProviderFailedToLoad`, which
+// argues it. A summary over several is [extension.ErrFailedToLoad] and
+// [extension.ErrLoadUndetermined], both neutral, one for each of the two non-success answers.
 func extensionSaySummary(env cli.Env, sum extension.Summary) {
 	switch {
 	case sum.Failed > 0:
 		fmt.Fprintf(env.Stderr, "omw ext list: %d extension(s) FAILED TO LOAD (code: %s).\n",
-			sum.Failed, model.ErrProviderFailedToLoad.Code)
+			sum.Failed, extension.ErrFailedToLoad.Code)
 		fmt.Fprintf(env.Stderr, "  This is not a report that they are absent, and not a report that they are idle.\n")
 	case sum.Undetermined > 0:
 		fmt.Fprintf(env.Stderr, "omw ext list: whether %d extension(s) loaded %s (code: %s).\n",
