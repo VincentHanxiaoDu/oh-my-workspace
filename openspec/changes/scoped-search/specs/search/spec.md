@@ -118,6 +118,12 @@ SHALL NOT be treated as readable.
 - **WHEN** a complete search and a partially-covered search both return the same number of results
 - **THEN** their output differs and the incomplete one is never presented as a complete answer
 
+#### Scenario: The corpus size an agent grounds itself on
+- **WHEN** the settled corpus is asked how large it is, over a store holding one readable note, one
+  the searcher may not read, and one whose readability could not be determined
+- **THEN** it answers one, so that a count published as a corpus statistic can never disclose the
+  existence of a note the searcher may not see
+
 #### Scenario: A scope whose existence cannot be checked
 - **WHEN** the hub's record cannot be read to decide whether a named person or group exists
 - **THEN** the answer is undetermined and does not collapse into "there is no such person or group"

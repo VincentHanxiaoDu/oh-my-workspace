@@ -21,6 +21,9 @@
 - [x] `Outcome.Coverage` — a complete result is distinguishable from an incomplete one of the same size
 - [x] `Roster` — three-valued activity, with a nil roster answering undetermined
 - [x] `Record.Dissolve` — a real sequence of events that produces an unresolvable readability
+- [x] `Corpus.Size` pinned: only the readable are counted, with the unreadable AND the undetermined both present in the fixture
+- [x] `Corpus.UndeterminedIDs` pinned: the ids are reported, and the accessor hands out a copy
+- [x] `Corpus.Reader` pinned: a corpus reports the reader its exclusions were computed against
 
 ## Not narrowed at the edge
 

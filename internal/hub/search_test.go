@@ -463,6 +463,99 @@ func TestRosterIsThreeValued(t *testing.T) {
 	}
 }
 
+// --- the Corpus accessors, and the claims their doc comments make ------------------------------
+
+// mixedCorpus builds a corpus containing ALL THREE KINDS of note for one searcher: one they may
+// read, one they determinedly may not, and one whose readability genuinely cannot be worked out.
+//
+// Anything asserting "excludes the unreadable AND the undetermined" needs all three present, or it
+// cannot tell which of the two exclusions it is actually checking.
+func mixedCorpus(t *testing.T) (Corpus, *Store) {
+	t.Helper()
+	s, r := newTestHub(t)
+	r.AddPerson("searcher")
+	r.AddPerson("dana")
+	r.DefineGroup("platform", "ada")
+	toGroup, err := ToGroup("platform")
+	if err != nil {
+		t.Fatalf("to group: %v", err)
+	}
+	mustPublish(t, s, Publication{Author: "ada", Title: "readable", Body: "alpha"})                            // note-1: readable
+	mustPublish(t, s, Publication{Author: "dana", Title: "unreadable", Body: "alpha", Visibility: SelfOnly()}) // note-2: determined No
+	mustPublish(t, s, Publication{Author: "ada", Title: "unevaluable", Body: "alpha", Visibility: toGroup})    // note-3: undetermined
+	r.Dissolve("platform")
+
+	// The fixture is checked against CanReadNote directly, so that a change which quietly turns one
+	// of the three into another kind fails HERE rather than making the assertions below vacuous.
+	for id, want := range map[NoteID]tri.Value{"note-1": tri.Yes, "note-2": tri.No, "note-3": tri.Undetermined} {
+		if got := CanReadNote(s.notes[id], "searcher", r); got != want {
+			t.Fatalf("fixture: CanReadNote(%s) = %v, want %v — the corpus no longer holds one of each\n"+
+				"kind, so the exclusion assertions below would prove nothing", id, got, want)
+		}
+	}
+	return Settle(s, "searcher"), s
+}
+
+func TestCorpusSizeCountsOnlyWhatTheSearcherMayRead(t *testing.T) {
+	// THE DOC COMMENT ON Size() MAKES A SAFETY CLAIM — "the N in the corpus statistics, and it
+	// deliberately excludes both the unreadable and the undetermined" — and until this test existed
+	// nothing pinned it. Issue #13 (corpus statistics an agent grounds itself on) consumes exactly
+	// this number: a count that included a note the searcher cannot read would tell an agent that
+	// something exists which it may not see, which is PRD §3.5's leak arriving through the
+	// statistics door rather than the results door.
+	c, s := mixedCorpus(t)
+
+	if s.Count() != 3 {
+		t.Fatalf("the store holds %d notes, want 3", s.Count())
+	}
+	if got := c.Size(); got != 1 {
+		t.Fatalf("Corpus.Size() = %d, want 1. The store holds three notes: one readable, one the\n"+
+			"searcher may NOT read, and one whose readability could not be determined. Size() is the\n"+
+			"N in the corpus statistics and must count only the first.", got)
+	}
+	// Each exclusion named separately, so a failure says WHICH one broke.
+	if c.Size()+len(c.undetermined) == s.Count() {
+		t.Fatalf("Size() plus the undetermined count equals the whole store, so the UNREADABLE note\n" +
+			"is being counted somewhere it should not be")
+	}
+	if c.Size() != len(c.notes) {
+		t.Fatalf("Size() = %d but the corpus holds %d readable notes; Size() counts something else", c.Size(), len(c.notes))
+	}
+}
+
+func TestCorpusUndeterminedIDsAreReportedAndAreACopy(t *testing.T) {
+	// Two claims in one doc comment, both pinned. The IDs are RETURNED (not dropped), and the
+	// accessor hands out a copy — a caller that sorts or truncates the result must not be editing
+	// the corpus's own record of what it could not evaluate.
+	c, _ := mixedCorpus(t)
+
+	got := c.UndeterminedIDs()
+	if len(got) != 1 || got[0] != "note-3" {
+		t.Fatalf("UndeterminedIDs() = %v, want [note-3] — a note whose readability could not be\n"+
+			"worked out must be reported, never silently dropped", got)
+	}
+	got[0] = "clobbered"
+	if again := c.UndeterminedIDs(); again[0] != "note-3" {
+		t.Fatalf("UndeterminedIDs() = %v after a caller wrote to the previous result; the accessor\n"+
+			"handed out the corpus's own slice, so any caller can edit what search could not evaluate", again)
+	}
+	// And the undetermined id is not also in the readable set — the two lists are disjoint.
+	for _, n := range c.notes {
+		if n.ID == "note-3" {
+			t.Fatalf("note-3 is both readable and undetermined; undetermined must never be treated as readable")
+		}
+	}
+}
+
+func TestCorpusReaderIsWhoItWasSettledFor(t *testing.T) {
+	// Small, but it is the value every exclusion above was computed against. A Corpus that
+	// misreports its reader is a Corpus whose safety claims are about somebody else.
+	c, _ := mixedCorpus(t)
+	if got := c.Reader(); got != "searcher" {
+		t.Fatalf("Corpus.Reader() = %q, want %q", got, "searcher")
+	}
+}
+
 // --- criterion 12, 12a: not narrowed at the edge -----------------------------------------------
 
 func TestSearchRequiresTheReadScopeAndIsRefusedNotNarrowed(t *testing.T) {
