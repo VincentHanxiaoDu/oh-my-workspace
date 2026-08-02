@@ -66,6 +66,10 @@
       cherry-pick rather than by writing our own, so the two branches do not diverge on one file
 - [x] Re-drive that fix's own mutations here: the half-fix that sandboxes one variable, the
       quote-less match that lets the half-fix pass, and the control where the walk matches no spawn
+- [x] Take the follow-up that narrows the spawn check to `_test.go` files, so it cannot flag
+      production code that must inherit the real environment, and re-drive the mutations after it
+- [x] Drive the narrowing itself: a production file that spawns with `os.Environ()` is not flagged
+      with the filter, and IS flagged with the filter removed
 - [x] Pin the written-empty rendering of a `Field` specifically, not merely that it differs from the
       other three — the mutant product found surviving
 - [x] Fix `TestArrivedRendersTheUnknownTimeAsUndeterminedAndNotAsTheEpoch`, which asserted on 1970
