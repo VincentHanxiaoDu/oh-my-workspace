@@ -29,9 +29,12 @@ more the same rule produces: a subject whose source could not be read is undeter
 than reporting as empty, unmatched, or vanishing from the report.
 
 §4.2 and §4.4 constrain the surface: nothing here starts the daemon (every operation says whether it
-is running), and nothing here can open a connection at all — asserted by reading the source of
-everything the flow reaches, because with no hub configured the correct number of dials is zero and
-the honest way to guarantee zero is to have no `net` on the path.
+is running), and nothing on this path can open a NETWORK connection. That is asserted as a count of
+attempts rather than as a sandbox run — the transitive import closure of the flow reaches no network
+stack, and every dial or listen reachable from it names `"unix"`. The claim is deliberately not
+"opens no socket at all": since Issue #41 the liveness question reaches `daemon.Inspect`, which
+dials the local control socket when a daemon holds the store. The only socket anything here can open
+is a unix-domain one to a process on this machine.
 
 ## What Changes
 

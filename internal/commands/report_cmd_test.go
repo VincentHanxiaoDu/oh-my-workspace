@@ -2,6 +2,7 @@ package commands
 
 import (
 	"bytes"
+	"go/ast"
 	"go/parser"
 	"go/token"
 	"os"
@@ -283,53 +284,175 @@ func TestHubSuppliedSubjectWithNoHubSaysSo(t *testing.T) {
 	}
 }
 
-// CRITERION 21, STRUCTURALLY: no operation on subscriptions or reports opens any connection.
+// CRITERION 21: NO OPERATION ON SUBSCRIPTIONS OR REPORTS OPENS A NETWORK CONNECTION.
 //
-// WHY STRUCTURAL. "Zero outbound connections were attempted" is only observable at run time by
-// something that can see the syscalls; a test that dialled a listener and found nobody there would
-// be asserting that this build has no transport, which is true today for a reason unrelated to this
-// Issue. So this reads the source of everything this flow can reach and requires that it cannot
-// open a connection at all: no net, no net/http, no exec. The repository's existing check that
-// every listen and dial names "unix" is the complement — this one says there are none.
-func TestTheReportFlowCannotOpenAConnection(t *testing.T) {
-	files := []string{"report_cmd.go"}
-	dir, err := os.ReadDir("../reports")
-	if err != nil {
-		t.Fatalf("reading the reports package: %v", err)
+// # WHAT KIND OF CLAIM THIS IS, STATED BEFORE THE CODE
+//
+// The criterion's literal wording is "zero outbound connections are attempted across the whole
+// flow". A run-time observation of that is either a syscall trace or a sandbox, and a SANDBOX PROVES
+// THE WRONG THING: running under a network-denying sandbox and succeeding shows the flow WORKS
+// without network, not that it never TRIES. A dial that is attempted and denied is indistinguishable
+// from one never made when the caller ignores the error. That is a deny-and-succeed argument, not a
+// count of attempts.
+//
+// So this counts attempts, statically, over everything the flow can reach. It walks the TRANSITIVE
+// import closure of the report flow inside this module and requires:
+//
+//   - no package in the closure imports a network stack at all (net/http, net/url, net/rpc,
+//     crypto/tls, os/exec) — none of these has a local-IPC use, so an import is the attempt;
+//   - every net.Dial* / net.Listen* CALL SITE reachable from the flow names "unix" as a literal.
+//
+// That second rule is why this is not an import ban: `net` cannot be banned outright any more,
+// because the control API is a unix socket and Go puts unix sockets in `net`. The rule about the
+// USE is strictly stronger than a ban on the import — a ban cannot tell a local socket from a
+// connection to another machine, and this can. It is the repository-wide rule from
+// `network_guard_test.go`, scoped to this flow and paired with a count.
+//
+// # THE ONE THING THE REPORT FLOW DOES DIAL, NAMED HONESTLY
+//
+// Since Issue #41 this command asks `daemonLiveness`, which reaches `daemon.Inspect`, which calls
+// `net.DialTimeout("unix", socket, …)` when the lock says a daemon is holding the store. So the
+// flow is NOT "cannot open a socket at all" — an earlier version of this test asserted that, and it
+// was true only before the liveness rewiring. It is: the only socket anything on this path can open
+// is a unix-domain socket to a process on this machine, and there is no code path from here to a
+// network one. That is what the assertions below establish, and it is what the PR body claims.
+func TestTheReportFlowOpensNoNetworkConnection(t *testing.T) {
+	const modulePrefix = "github.com/VincentHanxiaoDu/oh-my-workspace/"
+
+	// The roots the report flow actually reaches: this package's report command imports cli,
+	// reports, store and tri, and daemonLiveness takes it into daemon and hub.
+	roots := []string{
+		"internal/reports", "internal/store", "internal/cli", "internal/tri",
+		"internal/daemon", "internal/hub",
 	}
-	paths := append([]string{}, files...)
-	for _, e := range dir {
-		if strings.HasSuffix(e.Name(), ".go") && !strings.HasSuffix(e.Name(), "_test.go") {
-			paths = append(paths, filepath.Join("../reports", e.Name()))
-		}
+	// Banned outright: none of these has a local-IPC use, so reaching one IS the attempt.
+	banned := map[string]string{
+		"net/http":   "an HTTP client or server",
+		"net/url":    "a URL, which is a thing addressed on another machine",
+		"net/rpc":    "an RPC transport",
+		"crypto/tls": "a TLS connection",
+		"os/exec":    "a child process, which could dial on this flow's behalf",
 	}
-	banned := map[string]bool{"net": true, "net/http": true, "net/url": true, "os/exec": true}
 
 	fset := token.NewFileSet()
-	checked := 0
-	for _, p := range paths {
-		f, err := parser.ParseFile(fset, p, nil, parser.ImportsOnly)
+	seen := map[string]bool{}
+	var files []string     // every file in the closure, for the call-site walk
+	var order []string     // packages visited, for the report
+	var unixDials []string // every reachable dial/listen, with the network it names
+
+	var visit func(pkg string)
+	visit = func(pkg string) {
+		if seen[pkg] {
+			return
+		}
+		seen[pkg] = true
+		order = append(order, pkg)
+		entries, err := os.ReadDir(filepath.Join("..", "..", pkg))
 		if err != nil {
-			t.Fatalf("parsing %s: %v", p, err)
+			t.Fatalf("reading %s: %v", pkg, err)
 		}
-		checked++
-		for _, imp := range f.Imports {
-			path, err := strconv.Unquote(imp.Path.Value)
+		for _, e := range entries {
+			name := e.Name()
+			if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			rel := filepath.Join("..", "..", pkg, name)
+			f, err := parser.ParseFile(fset, rel, nil, parser.ParseComments)
 			if err != nil {
-				t.Fatalf("%s: unquoting %s: %v", p, imp.Path.Value, err)
+				t.Fatalf("parsing %s: %v", rel, err)
 			}
-			if banned[path] {
-				t.Errorf("%s imports %q. With no hub configured nothing on this path may reach out "+
-					"(PRD §4.2), and a subscription is a local standing instruction.", p, path)
+			files = append(files, rel)
+			for _, imp := range f.Imports {
+				path, err := strconv.Unquote(imp.Path.Value)
+				if err != nil {
+					t.Fatalf("%s: unquoting %s: %v", rel, imp.Path.Value, err)
+				}
+				if why, bad := banned[path]; bad {
+					t.Errorf("%s imports %q — %s. With no hub configured nothing on the report flow "+
+						"may reach out (PRD §4.2), and a subscription is a local standing instruction.",
+						rel, path, why)
+				}
+				if strings.HasPrefix(path, modulePrefix) {
+					visit(strings.TrimPrefix(path, modulePrefix))
+				}
 			}
 		}
 	}
-	// A CONTROL. Fewer files than the package has means the walk examined the wrong place, and a
-	// pass would say nothing at all.
-	if checked < 6 {
-		t.Fatalf("examined only %d file(s) — the walk found nothing to check, so its pass is empty", checked)
+	// report_cmd.go's own imports are walked first, so this test fails if the command ever grows a
+	// dependency on something the roots above do not already cover.
+	cmd, err := parser.ParseFile(fset, "report_cmd.go", nil, parser.ImportsOnly)
+	if err != nil {
+		t.Fatalf("parsing report_cmd.go: %v", err)
 	}
-	t.Logf("examined %d file(s) on the report flow", checked)
+	for _, imp := range cmd.Imports {
+		path, _ := strconv.Unquote(imp.Path.Value)
+		if why, bad := banned[path]; bad {
+			t.Errorf("report_cmd.go imports %q — %s", path, why)
+		}
+		if strings.HasPrefix(path, modulePrefix) {
+			visit(strings.TrimPrefix(path, modulePrefix))
+		}
+	}
+	for _, r := range roots {
+		visit(r)
+	}
+
+	// EVERY REACHABLE DIAL AND LISTEN NAMES "unix". This is the count of attempts: each one is
+	// found, and each one is checked, rather than the absence of any being inferred from a run.
+	dialOrListen := func(name string) bool {
+		return strings.HasPrefix(name, "Dial") || strings.HasPrefix(name, "Listen")
+	}
+	for _, rel := range files {
+		f, err := parser.ParseFile(fset, rel, nil, parser.ParseComments)
+		if err != nil {
+			t.Fatalf("re-parsing %s: %v", rel, err)
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			ident, ok := sel.X.(*ast.Ident)
+			if !ok || ident.Name != "net" || !dialOrListen(sel.Sel.Name) {
+				return true
+			}
+			where := rel + ":" + strconv.Itoa(fset.Position(call.Pos()).Line)
+			if len(call.Args) == 0 {
+				t.Errorf("%s: net.%s with no network argument — this test cannot tell what it opens", where, sel.Sel.Name)
+				return true
+			}
+			lit, ok := call.Args[0].(*ast.BasicLit)
+			if !ok || lit.Kind != token.STRING {
+				t.Errorf("%s: net.%s takes its network from a variable, so what it opens cannot be "+
+					"read here. Name \"unix\" as a literal.", where, sel.Sel.Name)
+				return true
+			}
+			if lit.Value != `"unix"` {
+				t.Errorf("%s: net.%s opens %s, not \"unix\". The report flow may reach a process on "+
+					"this machine and nothing else (PRD §4.2, §4.6).", where, sel.Sel.Name, lit.Value)
+				return true
+			}
+			unixDials = append(unixDials, where)
+			return true
+		})
+	}
+
+	// TWO CONTROLS, because a static walk that examined nothing passes vacuously and a green would
+	// then mean "I found no network" when it means "I looked nowhere".
+	for _, want := range []string{"internal/reports", "internal/daemon"} {
+		if !seen[want] {
+			t.Fatalf("the closure never reached %s — the walk is wrong, so its pass says nothing", want)
+		}
+	}
+	if len(files) < 20 {
+		t.Fatalf("the closure held only %d file(s); the walk examined too little to mean anything", len(files))
+	}
+	t.Logf("walked %d package(s), %d file(s); %d reachable dial/listen call site(s), all \"unix\": %v",
+		len(order), len(files), len(unixDials), unixDials)
 }
 
 // The report command reaches nothing outside its own package and cli/reports/store. Asserted so a

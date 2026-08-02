@@ -55,4 +55,6 @@ happen were deleted rather than left unticked; the pull request says which and w
 - [x] A record damaged on disk makes its subject undetermined and never `count: 0`
 - [x] A refused list leaves the previously stored subscription byte-identical
 - [x] All three liveness answers rendered and driven, the third one distinct in words and reason
-- [x] The report flow imports no `net`, `net/http`, `net/url` or `os/exec`, with a walk control
+- [x] Criterion 21 as a COUNT OF ATTEMPTS, not a deny-and-succeed run: the transitive import
+      closure of the report flow reaches no network stack, and every dial or listen reachable from
+      it names `"unix"` — the two in `daemon.Inspect` are found, named and checked
