@@ -26,6 +26,7 @@ import (
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/daemon"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/drafts"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/hub"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/model"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/store"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri"
 )
@@ -42,18 +43,55 @@ const outboxEnvHub = "OMW_HUB"
 
 // outboxReviewer is how this command reaches the person's model.
 //
-// THERE IS NO MODEL TRANSPORT IN THIS BUILD, and this says so rather than pretending. Issue #18
-// owns model configuration and the transport; until it lands, a configured model is one this build
-// cannot reach, which is UNDETERMINED and never a pass (criterion 16). Tests replace this to drive
-// the passing, refusing and unusable paths.
-var outboxReviewer = func(env cli.Env, cfg drafts.ModelConfig) drafts.Reviewer {
-	return outboxUnreachableReviewer{}
+// IT ASKS THE PROVIDER REGISTRY (Issue #18, PRD §2.5) and it never invents a fallback. Three things
+// can happen and all three are named:
+//
+//   - The chosen provider is registered in this build: it is opened with the person's credential
+//     and asked. THE CREDENTIAL ENTERS HERE AND NOWHERE ELSE — this is the one call to
+//     [model.Config.Secret] in the product, and a test walks the tree to keep it that way.
+//   - The chosen provider is NOT registered in this build: that is a determined fact, said in those
+//     words, and it is a review that could not be run — never a pass (criterion 11, criterion 14).
+//     Which providers exist is Issue #21's mechanism to populate; choosing one is this Issue's.
+//   - Opening fails: same, with the provider's own reason.
+//
+// It never consults the hub, and there is nothing in this function that could (criteria 12, 13,
+// PRD §5.2). Tests replace it to drive the passing, refusing and unusable paths.
+var outboxReviewer = func(env cli.Env, cfg model.Config) drafts.Reviewer {
+	p, ok := model.Lookup(cfg.Name)
+	if !ok {
+		return outboxUnreachableReviewer{why: "this build has no adapter for the provider " + cfg.Name +
+			"; registering providers is Issue #21"}
+	}
+	sess, err := p.Open(cfg.Secret())
+	if err != nil {
+		return outboxUnreachableReviewer{why: "the provider " + cfg.Name + " could not be opened: " + err.Error()}
+	}
+	if sess == nil {
+		return outboxUnreachableReviewer{why: "the provider " + cfg.Name + " opened nothing to ask"}
+	}
+	return outboxProviderReviewer{sess: sess}
 }
 
-type outboxUnreachableReviewer struct{}
+// outboxProviderReviewer is the seam between a provider and `review`.
+//
+// The prompt is the person's rules and their draft, and the answer is returned VERBATIM.
+// drafts.Interpret is the only thing that decides what an answer means, and it lives in one place
+// so that "the model said something that is not a verdict" is a tested case rather than each
+// provider's private guess.
+type outboxProviderReviewer struct{ sess model.Session }
 
-func (outboxUnreachableReviewer) Review(rules, body string) (string, error) {
-	return "", errors.New("this build has no transport to a model (Issue #18)")
+func (r outboxProviderReviewer) Review(rules, body string) (string, error) {
+	return r.sess.Ask("Rules, in the person's own words:\n" + rules + "\n\nDraft:\n" + body +
+		"\n\nAnswer with exactly `pass`, or `refuse: <reason>`.")
+}
+
+type outboxUnreachableReviewer struct{ why string }
+
+func (r outboxUnreachableReviewer) Review(rules, body string) (string, error) {
+	if r.why == "" {
+		return "", errors.New("your model could not be reached")
+	}
+	return "", errors.New(r.why)
 }
 
 // outboxControlState is the control API's state, as the DAEMON reports it.
@@ -303,9 +341,9 @@ func outboxDraft(env cli.Env, args []string) int {
 		// CRITERION 14, AT THE MOMENT THE PERSON WRITES. A `review` person with no model must not
 		// be able to accumulate drafts in silence; the missing model is named the first time it
 		// matters, not only when they eventually try to publish.
-		cfg := drafts.ReadModel(env.Getenv)
+		cfg := model.Read(env.Getenv, s)
 		fmt.Fprintf(env.Stdout, "%s\n", cfg.Render())
-		switch cfg.Configured {
+		switch cfg.Configured() {
 		case tri.Yes:
 			fmt.Fprintf(env.Stdout, "%s\n", o.StateOf(id).Render())
 			fmt.Fprintf(env.Stdout, "your rules will be checked when you run 'omw outbox review %s' or publish it.\n", string(id))
@@ -313,13 +351,13 @@ func outboxDraft(env cli.Env, args []string) int {
 		case tri.No:
 			_ = o.SetState(id, drafts.StateBlocked, "you chose review mode and no model is configured, so nothing can check your rules")
 			fmt.Fprintf(env.Stdout, "%s\n", o.StateOf(id).Render())
-			fmt.Fprintf(env.Stderr, "omw outbox draft: %v (code: %s)\n", drafts.ErrNoModel, drafts.ErrNoModel.Code)
+			fmt.Fprintf(env.Stderr, "omw outbox draft: %v (code: %s)\n", model.ErrNoModel, model.ErrNoModel.Code)
 			fmt.Fprintf(env.Stderr, "  You chose review. This draft has NOT been checked and will not be published.\n")
 			return cli.ExitFailure
 		default:
 			_ = o.SetState(id, drafts.StateBlocked, "you chose review mode and whether a model is configured could not be determined")
 			fmt.Fprintf(env.Stdout, "%s\n", o.StateOf(id).Render())
-			fmt.Fprintf(env.Stderr, "omw outbox draft: %v (code: %s)\n", drafts.ErrModelUndetermined, drafts.ErrModelUndetermined.Code)
+			fmt.Fprintf(env.Stderr, "omw outbox draft: %v (code: %s)\n", model.ErrUndetermined, model.ErrUndetermined.Code)
 			return cli.ExitUndetermined
 		}
 
@@ -511,14 +549,24 @@ func outboxRules(env cli.Env, args []string) int {
 // model
 // ---------------------------------------------------------------------------
 
+// outboxModel reads back the model configuration from the outbox's point of view.
+//
+// IT IS THE SAME ANSWER `omw model` GIVES, AND IT IS THE SAME FUNCTION (Issue #18). It stays here
+// because a person in review mode looks for it here, and because deleting a published subcommand to
+// move a sentence is churn — but it computes nothing of its own. `omw model` is where the choice is
+// made and cleared; this only reads.
 func outboxModel(env cli.Env, args []string) int {
 	if len(args) != 0 {
-		fmt.Fprintf(env.Stderr, "omw outbox model: this takes no arguments; configuring a model is Issue #18.\n")
+		fmt.Fprintf(env.Stderr, "omw outbox model: this takes no arguments; choose a provider with 'omw model use <provider>'.\n")
 		return cli.ExitUsage
 	}
-	cfg := drafts.ReadModel(env.Getenv)
+	s, code, ok := outboxOpenStore(env, "model")
+	if !ok {
+		return code
+	}
+	cfg := model.Read(env.Getenv, s)
 	fmt.Fprintf(env.Stdout, "%s\n", cfg.Render())
-	switch cfg.Configured {
+	switch cfg.Configured() {
 	case tri.Yes:
 		return cli.Success
 	case tri.No:
@@ -526,7 +574,7 @@ func outboxModel(env cli.Env, args []string) int {
 		// being told "no" is an answer; it is the attempt to REVIEW without one that fails.
 		return cli.Success
 	default:
-		fmt.Fprintf(env.Stderr, "omw outbox model: %v (code: %s)\n", drafts.ErrModelUndetermined, drafts.ErrModelUndetermined.Code)
+		fmt.Fprintf(env.Stderr, "omw outbox model: %v (code: %s)\n", model.ErrUndetermined, model.ErrUndetermined.Code)
 		return cli.ExitUndetermined
 	}
 }
@@ -559,9 +607,9 @@ func outboxReviewGate(env cli.Env, s *store.Store, o *drafts.Outbox, id hub.Note
 		return outboxGateResult{mayLeave: true, code: cli.Success}
 	}
 
-	cfg := drafts.ReadModel(env.Getenv)
+	cfg := model.Read(env.Getenv, s)
 	fmt.Fprintf(env.Stdout, "%s\n", cfg.Render())
-	switch cfg.Configured {
+	switch cfg.Configured() {
 	case tri.No:
 		// THE CENTRAL REFUSAL (criteria 13, 14, 15). It names the missing model, it exits non-zero,
 		// the draft is left in a state that does not read as "awaiting you", and NOTHING IS
@@ -569,14 +617,14 @@ func outboxReviewGate(env cli.Env, s *store.Store, o *drafts.Outbox, id hub.Note
 		// auto (publish it unchecked) are the two failures this Issue exists to prevent.
 		_ = o.SetState(id, drafts.StateBlocked, "you chose review mode and no model is configured, so nothing can check your rules")
 		fmt.Fprintf(env.Stdout, "%s\n", o.StateOf(id).Render())
-		fmt.Fprintf(env.Stderr, "omw outbox %s: %v (code: %s)\n", what, drafts.ErrNoModel, drafts.ErrNoModel.Code)
+		fmt.Fprintf(env.Stderr, "omw outbox %s: %v (code: %s)\n", what, model.ErrNoModel, model.ErrNoModel.Code)
 		fmt.Fprintf(env.Stderr, "  %s\n", cfg.Missing)
 		fmt.Fprintf(env.Stderr, "  Nothing has been published, and this draft is not merely awaiting you.\n")
 		return outboxGateResult{code: cli.ExitFailure}
 	case tri.Undetermined:
 		_ = o.SetState(id, drafts.StateBlocked, "you chose review mode and whether a model is configured could not be determined")
 		fmt.Fprintf(env.Stdout, "%s\n", o.StateOf(id).Render())
-		fmt.Fprintf(env.Stderr, "omw outbox %s: %v (code: %s)\n", what, drafts.ErrModelUndetermined, drafts.ErrModelUndetermined.Code)
+		fmt.Fprintf(env.Stderr, "omw outbox %s: %v (code: %s)\n", what, model.ErrUndetermined, model.ErrUndetermined.Code)
 		return outboxGateResult{code: cli.ExitUndetermined}
 	}
 

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/model"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri"
 )
 
@@ -367,6 +368,14 @@ type Report struct {
 	ControlDetail string `json:"control_detail,omitempty"`
 	// ControlSocket is the path the control API listens on when it is open.
 	ControlSocket string `json:"control_socket,omitempty"`
+	// Model is the person's model configuration, as an API surface may report it (Issue #18
+	// criterion 18).
+	//
+	// IT IS A model.View AND NOT A model.Config, and see model_report.go for why: a View has no
+	// field a credential could occupy, so "the credential never crosses the control API" is a
+	// property of the type rather than of anybody remembering. Its three-valued fields cross the
+	// wire as their own rendering, for the reason RunningText does.
+	Model model.View `json:"model"`
 }
 
 // wire fills the text fields from the tri values. Called on every path that produces a Report, so
@@ -480,6 +489,15 @@ func (r Report) WriteTo(w io.Writer) (int64, error) {
 			return total, err
 		}
 	}
+	// THE MODEL, RENDERED BY THE VIEW ITSELF (Issue #18 criterion 18). This does not word the state
+	// here: it calls the same Render the `omw model` command calls, so the CLI and the control API
+	// cannot describe one configuration two ways. The credential is not available on this path at
+	// all — a View has no field for one.
+	n, err = fmt.Fprintf(w, "%s\n", r.Model.Render())
+	total += int64(n)
+	if err != nil {
+		return total, err
+	}
 	return total, nil
 }
 
@@ -536,6 +554,7 @@ func Inspect(storeRoot string) Report {
 		}
 	}
 
+	rep.Model = modelViewFor(storeRoot)
 	rep.Healthy, rep.HealthDetail = healthFromDisk(running, rep.HealthDetail)
 	rep.Control, rep.ControlDetail = controlFromDisk(p, running, rec, err)
 	rep.wire()

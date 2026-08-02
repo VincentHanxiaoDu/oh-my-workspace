@@ -1,7 +1,6 @@
 package drafts
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -346,64 +345,17 @@ func TestTheThreeReviewOutcomesRenderPairwiseDistinctly(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Criteria 18, 19 — the model, and the key
+// The model, and the key — MOVED TO internal/model BY ISSUE #18
 // ---------------------------------------------------------------------------
-
-func envOf(m map[string]string) func(string) string {
-	return func(k string) string { return m[k] }
-}
-
-const testSecret = "sk-ZQXJ-do-not-print-me-3f8a"
-
-func TestWhetherAModelIsConfiguredHasThreeAnswersThatRenderDistinctly(t *testing.T) {
-	yes := ReadModel(envOf(map[string]string{ModelEnv: "local-llama", ModelKeyEnv: testSecret}))
-	if yes.Configured != tri.Yes {
-		t.Errorf("a named model with a key reports %v", yes.Configured)
-	}
-	no := ReadModel(envOf(nil))
-	if no.Configured != tri.No {
-		t.Errorf("nothing configured reports %v", no.Configured)
-	}
-
-	// The undetermined answer is PROBED, not asserted into being: a key file that exists and cannot
-	// be read. If this environment can read it anyway (running as root), the probe says so and the
-	// case is skipped rather than passing vacuously.
-	dir := t.TempDir()
-	keyFile := filepath.Join(dir, "key")
-	if err := os.WriteFile(keyFile, []byte(testSecret), 0o000); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.ReadFile(keyFile); err == nil {
-		t.Skip("this environment can read a 0o000 file, so an unreadable key file cannot be produced here")
-	}
-	und := ReadModel(envOf(map[string]string{ModelEnv: "local-llama", ModelKeyFileEnv: keyFile}))
-	if und.Configured != tri.Undetermined {
-		t.Fatalf("an unreadable key file reports %v, want undetermined — this is not 'no model'", und.Configured)
-	}
-	pairwiseDistinct(t, "whether a model is configured", map[string]string{
-		"configured":              yes.Render(),
-		"none configured":         no.Render(),
-		"could not be determined": und.Render(),
-	})
-}
-
-// CRITERION 18 at the level of the type: neither the rendering nor the default formatting of a
-// ModelConfig may contain the key. The %v case is the one that bites — fmt reflects into unexported
-// fields quite happily unless a String method stops it.
-func TestTheKeyIsNeverInAnyRenderingOfTheModelConfig(t *testing.T) {
-	cfg := ReadModel(envOf(map[string]string{ModelEnv: "local-llama", ModelKeyEnv: testSecret}))
-	if cfg.Key() != testSecret {
-		t.Fatalf("Key() = %q; this test is not holding the key it means to check for", cfg.Key())
-	}
-	for name, s := range map[string]string{
-		"Render()": cfg.Render(),
-		"String()": cfg.String(),
-		"%v":       fmt.Sprintf("%v", cfg),
-		"%s":       fmt.Sprintf("%s", cfg),
-		"%+v":      fmt.Sprintf("%+v", cfg),
-	} {
-		if strings.Contains(s, testSecret) {
-			t.Errorf("%s contains the person's key:\n  %s", name, s)
-		}
-	}
-}
+//
+// Issue #9's criteria 18 and 19 were driven here, against a ReadModel that lived in this package
+// because #18 had not landed. #18 has now landed and owns the answer: the resolution, its three
+// values and the guarantee that the credential is never rendered are all in `internal/model`, and
+// the tests that drive them moved there with the code rather than being duplicated.
+//
+// #9's criteria are still driven, and by MORE than they were: `internal/model` keeps the same third
+// value (an unreadable credential file), adds the ones #9 could not have (an unreadable recorded
+// choice), and greps every command in the binary for a sentinel credential rather than only this
+// package's renderings. What this package still owns — that `review` with no model refuses rather
+// than behaving like `manual` or `auto` — is driven in internal/commands/outbox_cmd_test.go, which
+// is where the refusal is.

@@ -17,6 +17,7 @@ import (
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/cli"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/daemon"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/drafts"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/model"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/store"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri"
 )
@@ -81,7 +82,7 @@ func mustRun(t *testing.T, env map[string]string, args ...string) obResult {
 func withReviewer(t *testing.T, answer string, err error) {
 	t.Helper()
 	prev := outboxReviewer
-	outboxReviewer = func(cli.Env, drafts.ModelConfig) drafts.Reviewer {
+	outboxReviewer = func(cli.Env, model.Config) drafts.Reviewer {
 		return scriptedReviewer{answer: answer, err: err}
 	}
 	t.Cleanup(func() { outboxReviewer = prev })
@@ -98,8 +99,8 @@ func (r scriptedReviewer) Review(string, string) (string, error) { return r.answ
 const obSecret = "sk-ZQXJ-the-persons-key-9f31"
 
 func obWithModel(env map[string]string) map[string]string {
-	env[drafts.ModelEnv] = "local-llama"
-	env[drafts.ModelKeyEnv] = obSecret
+	env[model.EnvProvider] = "local-llama"
+	env[model.EnvCredential] = obSecret
 	return env
 }
 
@@ -622,7 +623,7 @@ func TestThePersonsKeyAppearsInNoOutputOfThisCapability(t *testing.T) {
 	}
 	// A CONTROL: the key really is configured, so the sweep above was looking for something that
 	// could have appeared.
-	if drafts.ReadModel(func(k string) string { return env[k] }).Key() != obSecret {
+	if model.Read(func(k string) string { return env[k] }, nil).Secret() != obSecret {
 		t.Fatal("the key was not configured, so this sweep proves nothing")
 	}
 }
@@ -665,8 +666,8 @@ func TestWhetherAModelIsConfiguredHasThreeDistinctRenderingsThroughTheCommand(t 
 		t.Skip("this environment can read a 0o000 file, so an unreadable key file cannot be produced here")
 	}
 	env := obWorld(t)
-	env[drafts.ModelEnv] = "local-llama"
-	env[drafts.ModelKeyFileEnv] = keyFile
+	env[model.EnvProvider] = "local-llama"
+	env[model.EnvCredentialFile] = keyFile
 	undet := runOutboxCmd(t, env, "model")
 	if undet.code != cli.ExitUndetermined {
 		t.Errorf("an unreadable key file exits %d, want %d:\n%s", undet.code, cli.ExitUndetermined, undet.all())
