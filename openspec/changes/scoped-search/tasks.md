@@ -48,3 +48,5 @@
 - [x] A guard test proving suggestions work at all when the term is readable
 - [x] Every CLI failure mode compared PAIRWISE against every other and against the empty result
 - [x] Six mutations driven to red, each naming the defect, recorded in the pull request body
+- [x] Merged current `main` and dropped this branch's duplicate `mustPublish` in favour of Issue #11's merged copy
+- [x] Every mutation re-driven on the merged tree, because a result from a tree that does not compile is not a result

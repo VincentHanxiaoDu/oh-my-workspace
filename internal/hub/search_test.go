@@ -27,14 +27,10 @@ func newTestHub(t *testing.T) (*Store, *Record) {
 	return s, r
 }
 
-func mustPublish(t *testing.T, s *Store, p Publication) *Note {
-	t.Helper()
-	n, err := s.Publish(p)
-	if err != nil {
-		t.Fatalf("publish %q: %v", p.Title, err)
-	}
-	return n
-}
+// mustPublish is NOT defined here. Issue #11's versions_test.go defines it for this package and
+// that copy is the merged, reviewed one, so it wins; this file had an identical helper that
+// differed only in its failure wording. Both branches were cut from a main that did not yet contain
+// the other, so the collision appeared only on merge — a clean merge is not a working merge.
 
 func mustScope(t *testing.T, s string) SearchScope {
 	t.Helper()
