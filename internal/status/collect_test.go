@@ -611,6 +611,7 @@ func TestFullDiskEncryptionsThreeValuesReachTheScreenWithoutCollapsing(t *testin
 	sb := newSandbox(t)
 	lines := map[string]string{}
 	summaries := map[string]Summary{}
+	values := map[string]string{}
 	undetermined := map[string]bool{}
 	for name, checker := range map[string]health.EncryptionChecker{
 		"enabled":      stubChecker{on: true},
@@ -628,6 +629,12 @@ func TestFullDiskEncryptionsThreeValuesReachTheScreenWithoutCollapsing(t *testin
 			}
 			found = true
 			lines[name] = render(it)
+			// THE RENDERED VALUE ON ITS OWN, cut before the mechanism and before the reason.
+			// Comparing whole lines is not enough: an undetermined answer worded "not enabled"
+			// still differs from the real not-enabled line by its reason text, and would pass a
+			// whole-line comparison while telling the person their disk is unprotected on the
+			// strength of the product not having looked.
+			values[name] = strings.SplitN(it.Detail, " (", 2)[0]
 		}
 		if !found {
 			t.Fatalf("the %s encryption answer never reached the store line:\n%s", name, screen.Render())
@@ -647,6 +654,17 @@ func TestFullDiskEncryptionsThreeValuesReachTheScreenWithoutCollapsing(t *testin
 			t.Errorf("the %s encryption answer and the %s one render identically: %q", name, other, l)
 		}
 		seen[l] = name
+	}
+	seenValue := map[string]string{}
+	for name, v := range values {
+		if strings.TrimSpace(v) == "" {
+			t.Errorf("the %s encryption answer rendered no value at all", name)
+		}
+		if other, dup := seenValue[v]; dup {
+			t.Errorf("the %s encryption answer and the %s one render the same VALUE %q — two of "+
+				"§4.1's three collapsed into one", name, other, v)
+		}
+		seenValue[v] = name
 	}
 	// AN UNREADABLE DISK STATE IS NOT A FAILED STATUS SCREEN. §4.1: a report, never a blocker; and
 	// §3.9 keeps the health report a separate capability that status only points at.
