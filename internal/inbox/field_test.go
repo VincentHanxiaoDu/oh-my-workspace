@@ -41,6 +41,34 @@ func TestFieldRendersItsFourStatesPairwiseDistinctly(t *testing.T) {
 	}
 }
 
+// A SURVIVING MUTANT, FOUND BY PRODUCT ON PR #29, AND WHY THE TEST ABOVE DID NOT CATCH IT.
+//
+// Deleting the written-empty branch from Render left the whole suite green. With it gone, a summary
+// somebody wrote as the empty string falls through to `tri.Yes.Render("", absentText)`, which
+// returns tri's neutral wording for a yes — so the person reads `summary: yes`, the raw name of an
+// internal state, where an empty summary should be. It is still distinguishable from the other
+// three, which is exactly why the pairwise test passes: pairwise distinctness asserts that the
+// four differ and never what any one of them IS.
+//
+// So this pins the written-empty case specifically. It is the one place a literal-free assertion is
+// not enough, and it is asserted against the package's own constant rather than a copy of its text,
+// so the wording can still be changed in one place.
+func TestAWrittenEmptyValueRendersAsTheWrittenEmptyWordingAndNotAsAStateName(t *testing.T) {
+	got := Text("").Render()
+	if got != emptyText {
+		t.Errorf("a field written as the empty string renders as %q; want %q", got, emptyText)
+	}
+	// AND NOT AS AN INTERNAL STATE NAME. This is what the deleted branch actually produced, and it
+	// is the failure worth naming: a person reading their inbox does not know what "yes" means as
+	// the value of a summary.
+	for _, state := range []tri.Value{tri.Yes, tri.No} {
+		if got == state.String() {
+			t.Errorf("a field written as the empty string renders as %q — the bare name of an "+
+				"internal state, shown to a person in place of their empty summary", got)
+		}
+	}
+}
+
 // The undetermined rendering is tri's and not this package's: the third answer having one wording
 // across the whole product is the reason package tri exists. Compared against tri rather than
 // against a literal, so a change in tri's wording moves this with it instead of failing.

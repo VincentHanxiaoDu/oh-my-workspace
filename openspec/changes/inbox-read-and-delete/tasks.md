@@ -59,3 +59,16 @@
 - [x] The control API's refusal staged on a real unix socket, in a directory FOUND by binding one
       rather than named by platform
 - [x] Every mutation in the pull request's table applied, run, confirmed red by name, and reverted
+
+## Review round 1 — PR #29, changes-requested by product and QA
+
+- [x] Take #27's fix for the spawned binary rewriting the developer's real device pointer, by
+      cherry-pick rather than by writing our own, so the two branches do not diverge on one file
+- [x] Re-drive that fix's own mutations here: the half-fix that sandboxes one variable, the
+      quote-less match that lets the half-fix pass, and the control where the walk matches no spawn
+- [x] Pin the written-empty rendering of a `Field` specifically, not merely that it differs from the
+      other three — the mutant product found surviving
+- [x] Fix `TestArrivedRendersTheUnknownTimeAsUndeterminedAndNotAsTheEpoch`, which asserted on 1970
+      when Go's zero time is year 0001, so it could not fail for the reason it was named for
+- [x] Make every declared acknowledgement reachable — `"+1"` was declared and never matched — and
+      add a test over the whole list so a dead entry fails on the commit that adds it

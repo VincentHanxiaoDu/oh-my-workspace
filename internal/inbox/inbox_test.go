@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/store"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri"
 )
 
 func newStore(t *testing.T) *store.Store {
@@ -388,14 +389,76 @@ func TestAnEmptyTitleIsStorableBecauseItIsAWrittenValue(t *testing.T) {
 	}
 }
 
-func TestArrivedRendersTheUnknownTimeAsUndeterminedAndNotAsTheEpoch(t *testing.T) {
+// A TEST THAT COULD NOT FAIL FOR THE REASON IT WAS NAMED FOR, until QA drove it on PR #29.
+//
+// It asserted `!strings.Contains(got, "1970")`. Go's zero time.Time is year **0001**, not 1970 —
+// the Unix epoch is 1970 and the zero Time is not the Unix epoch — so removing the undetermined
+// branch from ArrivedRender made the listing say `0001-01-01T00:00:00Z` and this test stayed green.
+// It reported success having examined nothing, on the one field where a wrong value looks most
+// plausible, because a date looks like a fact.
+//
+// It now asserts EQUALITY with tri's own wording rather than the absence of one substring. An
+// absence assertion is only as good as the guess about what would be present; an equality
+// assertion against the product's third answer fails for every wrong rendering there is, including
+// the ones nobody thought of. Compared against `tri` rather than a literal so it moves with the
+// product's wording instead of failing on it.
+func TestArrivedRendersAnUnknownTimeAsTheProductsThirdAnswer(t *testing.T) {
 	got := Ticket{ID: "x"}.ArrivedRender()
-	if strings.Contains(got, "1970") {
-		t.Errorf("a ticket with no arrival time renders as %q — a real-looking date for a fact "+
-			"nobody knows", got)
+	if want := tri.Undetermined.Render("", ""); got != want {
+		t.Errorf("a ticket with no arrival time renders as %q; want the product's third answer, %q. "+
+			"A date renders as a fact, so a wrong one here is a missing value shown as a real one", got, want)
+	}
+	// And named explicitly, because these two are what a zero time actually formats as and they are
+	// the renderings this test exists to keep out of the output.
+	for _, wrong := range []string{"0001", "1970"} {
+		if strings.Contains(got, wrong) {
+			t.Errorf("a ticket with no arrival time renders as %q, which contains %q — a "+
+				"real-looking date for a fact nobody knows", got, wrong)
+		}
 	}
 	if got == "" {
 		t.Error("a ticket with no arrival time renders as nothing; silence is not an answer")
+	}
+	// The control: a ticket that DOES have an arrival time must not render as the third answer, or
+	// the assertion above would be satisfied by an ArrivedRender that says "could not be
+	// determined" for everything.
+	known := Ticket{ID: "x", Arrived: time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)}.ArrivedRender()
+	if known == got {
+		t.Errorf("a ticket with a known arrival time renders identically to one without: %q", known)
+	}
+	if !strings.Contains(known, "2026") {
+		t.Errorf("a known arrival time renders as %q and does not show the year it happened", known)
+	}
+}
+
+// EVERY ENTRY IN THE LIST MUST BE REACHABLE, or the list claims a coverage it does not have.
+//
+// Found on PR #29: `"+1"` was declared and `IsAcknowledgement("+1")` returned false, because the
+// normaliser trimmed `+` as a symbol and reduced it to `"1"`. A ticket titled `+1` was accepted by
+// the real Put. Nothing failed, because every test named a body it already knew was covered. This
+// asks the question of the whole map instead, so the next dead entry fails on the commit that adds
+// it rather than on a reviewer's afternoon.
+func TestEveryDeclaredAcknowledgementIsReachable(t *testing.T) {
+	if len(acknowledgements) == 0 {
+		t.Fatal("the list is empty, so asserting over it asserts nothing")
+	}
+	for body := range acknowledgements {
+		if !IsAcknowledgement(body) {
+			t.Errorf("%q is declared an acknowledgement and IsAcknowledgement says it is not — "+
+				"the list claims a coverage it does not have", body)
+		}
+	}
+	// And the forms a person actually types, each of which must reduce to a declared entry.
+	for _, body := range []string{"+1", "OK!", "ok 👍", "  Yes  ", "THANKS.", "Got it!"} {
+		if !IsAcknowledgement(body) {
+			t.Errorf("%q is not recognised as an acknowledgement", body)
+		}
+	}
+	// The control: a real obligation must not be swept up by the normalisation above.
+	for _, body := range []string{"Restore Ana's login", "any update?", "Approve the Q3 invoice", "1"} {
+		if IsAcknowledgement(body) {
+			t.Errorf("%q was classed as an acknowledgement; it is a real request", body)
+		}
 	}
 }
 

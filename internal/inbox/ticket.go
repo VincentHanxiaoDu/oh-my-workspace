@@ -116,18 +116,33 @@ var acknowledgements = map[string]bool{
 // test fixture — does not have. The cost is that this package now has an opinion about text, and a
 // person who genuinely owes somebody a ticket titled exactly "Done" cannot store it under that
 // title. That trade is worth naming; it is not obviously right.
+//
+// TWO NORMALISATIONS ARE TRIED, NOT ONE, and here is why. Trimming symbols is what lets "ok
+// 👍" and "OK!" reach "ok" — but `+` is a symbol too, so trimming it reduced "+1" to "1" and the
+// "+1" entry in the list above could never match. The list claimed a coverage it did not have: a
+// reviewer stored a ticket titled "+1" through Put and it was accepted. So the case-folded,
+// whitespace-collapsed form is tried FIRST, before anything is stripped, and the stripped form
+// second. TestEveryDeclaredAcknowledgementIsReachable now fails on any entry that cannot match,
+// so a dead entry cannot be added again.
 func IsAcknowledgement(s string) bool {
-	n := strings.TrimFunc(strings.ToLower(strings.TrimSpace(s)), func(r rune) bool {
-		return unicode.IsPunct(r) || unicode.IsSpace(r) || unicode.IsSymbol(r)
-	})
-	n = strings.Join(strings.Fields(n), " ")
-	if n == "" {
-		// An empty or punctuation-only title is not an acknowledgement — it is an empty title, and
+	loose := strings.Join(strings.Fields(strings.ToLower(s)), " ")
+	if loose == "" {
+		// An empty or whitespace-only title is not an acknowledgement — it is an empty title, and
 		// [Field] already has a rendering that says so. Answering "yes" here would make Put refuse
 		// the empty title criterion 1 requires be storable and renderable.
 		return false
 	}
-	return acknowledgements[n]
+	if acknowledgements[loose] {
+		return true
+	}
+	stripped := strings.TrimFunc(loose, func(r rune) bool {
+		return unicode.IsPunct(r) || unicode.IsSpace(r) || unicode.IsSymbol(r)
+	})
+	stripped = strings.Join(strings.Fields(stripped), " ")
+	if stripped == "" {
+		return false
+	}
+	return acknowledgements[stripped]
 }
 
 // Validate reports whether the ticket can be stored, and why not when it cannot.
