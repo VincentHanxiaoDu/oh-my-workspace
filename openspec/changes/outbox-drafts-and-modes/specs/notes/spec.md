@@ -133,18 +133,19 @@ network connection; with a hub configured, purely local work SHALL still open no
 - **THEN** every command succeeds, and none of them warns about a missing hub
 
 ### Requirement: Where a hub or an owner-only socket is required, the command says so
-Where the transfer of a draft genuinely requires a hub, or where owner-only permissions on the
-control socket cannot be confirmed, the command SHALL say precisely what is missing and exit
-non-zero rather than half-working.
+Where the transfer of a draft genuinely requires a hub, or where the daemon reports that its
+control API is not open on an owner-only socket — or that this could not be confirmed — the command
+SHALL say precisely what is missing and exit non-zero rather than half-working.
 
 #### Scenario: Auto mode with no hub
 - **WHEN** a person under `auto` writes a draft on a device with no hub configured
 - **THEN** the command names the missing hub, exits non-zero, and the draft rests in the outbox
 
-#### Scenario: A control socket that is not owner-only
-- **WHEN** any command in this capability is run beside a control socket whose permissions are not
-  owner-only
-- **THEN** the command says so and exits non-zero rather than proceeding
+#### Scenario: A control API that is not open, or cannot be confirmed
+- **WHEN** any command in this capability is run while a daemon is running and reports that its
+  control API is not open, or that whether it is open could not be established
+- **THEN** the command says which of the two it is and exits non-zero rather than proceeding, and
+  the two do not share an exit code
 
 ### Requirement: Nothing in the outbox expires
 No draft SHALL be removed from the outbox by age.
