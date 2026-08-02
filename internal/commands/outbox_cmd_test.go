@@ -484,6 +484,17 @@ func TestReviewWithNoModelPublishesNothing(t *testing.T) {
 	if strings.Contains(st.stdout, string(drafts.StateLeaving)) {
 		t.Errorf("the draft was handed onward despite the review not running:\n%s", st.stdout)
 	}
+	// THE GATE ITSELF MUST HAVE HELD, not merely the transfer that does not exist yet. Asserting
+	// only on the draft's state lets a build through in which the gate passed the draft and the
+	// missing transport is the only thing that stopped it — which is a publication the day #10
+	// lands. Found by mutating the gate to let a model-less review through WITHOUT recording a
+	// state, and watching this test stay green.
+	if !strings.Contains(got.stdout, "published: no") {
+		t.Errorf("publish does not state that the draft was not published:\n%s", got.stdout)
+	}
+	if strings.Contains(got.stdout, "and passed") {
+		t.Errorf("publish reports a pass with no model configured:\n%s", got.stdout)
+	}
 }
 
 // ---------------------------------------------------------------------------
