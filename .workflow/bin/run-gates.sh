@@ -25,9 +25,11 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # the self-test below requires that anything excluded is also disclosed in the closing message.
 # Found by this file's own self-test, which failed the first time it was run.
 #   check-review.sh     needs the PR's comments; only CI has them
+#   check-readme.sh     answers about THIS repository's README, which a project does not have a copy
+#                       of — it is the framework's own check and runs in the framework's own CI
 #   check-no-orphans.sh answers about the BOARD, not about this diff — a role runs it when it wants
 #                       to know whether anything has fallen out of every queue, not before a push
-CANNOT_RUN_LOCALLY="check-review.sh check-no-orphans.sh"
+CANNOT_RUN_LOCALLY="check-review.sh check-no-orphans.sh check-readme.sh"
 
 self_test() {
   local rc=0 g b
