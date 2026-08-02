@@ -72,3 +72,16 @@
       permission bits, skip where no Go toolchain exists to build the binary, and drive the
       owner-only refusal through an injected seam so it runs everywhere
 - [x] Record each mutation and its exact failure message in the pull request body
+
+## The device pointer, carried in from #3
+
+- [x] Cherry-pick `8d095f5` from `dev/feat/3-store-create` rather than writing a second fix, so the
+      two branches do not diverge on one file
+- [x] Sandbox both `XDG_DATA_HOME` and `HOME` in this package's own binary spawn, which the
+      cherry-picked structural check flags — a latent hazard here rather than damage that happened,
+      since nothing in the daemon tests writes the pointer
+- [x] Scope that structural check to test files, because it also flagged `omw daemon start`
+      launching its own child, where inheriting the person's environment is the correct behaviour
+      and a blanked `$HOME` would be the defect rather than the guard
+- [x] Measure the real pointer before and after `go test ./internal/commands/` and record the
+      result, rather than asserting from the code that it is safe

@@ -501,7 +501,25 @@ func treeSnapshot(t *testing.T, dir string) map[string]string {
 // matters — the original was written by someone who did not think to look.
 func TestEveryProcessSpawnSandboxesTheDevicePointer(t *testing.T) {
 	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, ".", nil, parser.ParseComments)
+	// TESTS ONLY, AND THE EXCLUSION IS THE POINT RATHER THAN AN OVERSIGHT.
+	//
+	// This rule is about a TEST writing the developer's own device pointer and then deleting what
+	// it points at. A spawn in PRODUCTION code — `omw daemon start` launching `omw daemon run` —
+	// inherits the person's environment on purpose: the child IS the person's daemon, on the
+	// person's machine, and a blanked $HOME is not a sandbox there, it is a daemon looking at the
+	// wrong home directory.
+	//
+	// To be exact about today's build: blanking it in `daemon.go` would not visibly break anything
+	// yet, because the parent passes the resolved store path to the child as an argument and
+	// nothing else in the child reads $HOME. The exclusion is not resting on that. It rests on the
+	// spawn being a different act with a different owner — and on the fact that the moment the
+	// daemon does read $HOME, a sandbox added here to keep a test quiet would be a live defect
+	// nobody would think to look for in a test file.
+	//
+	// Added when this check, cherry-picked onto Issue #2's branch, flagged `daemon.go`'s launch of
+	// its own child alongside the test spawn it was written for.
+	testFilesOnly := func(fi os.FileInfo) bool { return strings.HasSuffix(fi.Name(), "_test.go") }
+	pkgs, err := parser.ParseDir(fset, ".", testFilesOnly, parser.ParseComments)
 	if err != nil {
 		t.Fatalf("parsing this package: %v", err)
 	}

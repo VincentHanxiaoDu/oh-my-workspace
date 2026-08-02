@@ -160,7 +160,24 @@ type runResult struct {
 func runBinary(t *testing.T, bin, storePath string, args ...string) runResult {
 	t.Helper()
 	cmd := exec.Command(bin, args...)
-	cmd.Env = append(os.Environ(), store.PathEnv+"="+storePath)
+	// THE DEVICE POINTER IS SANDBOXED, and this is not caution about a hypothetical.
+	// `store.productDir` resolves the pointer from $XDG_DATA_HOME, else $HOME; a spawn that
+	// inherits the developer's environment can repoint their REAL store at a t.TempDir() that is
+	// deleted when this test ends, after which the product reports no store while their tickets
+	// and drafts sit on disk unreferenced (§4.3's present-thing-rendered-as-absent, done to
+	// §3.14's sole home of unpublished data).
+	//
+	// Nothing here writes the pointer today — only `store create` does, and these tests do not run
+	// it — so this is a latent hazard rather than damage that happened. It is closed anyway,
+	// because the next daemon test to need a store created is the one that would find out.
+	//
+	// BOTH VARIABLES. productDir reads XDG_DATA_HOME first and falls back to HOME, so setting one
+	// leaves the other live on whichever platform uses it.
+	sandbox := t.TempDir()
+	cmd.Env = append(os.Environ(),
+		store.PathEnv+"="+storePath,
+		"XDG_DATA_HOME="+sandbox, "HOME="+sandbox,
+	)
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	err := cmd.Run()
