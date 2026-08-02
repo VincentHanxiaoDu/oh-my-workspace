@@ -8,12 +8,12 @@ package commands
 import (
 	"fmt"
 	"io"
-	"os"
 	"strings"
 
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/cli"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/drafts"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/hub"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri"
 )
 
 func init() {
@@ -24,9 +24,12 @@ func init() {
 	})
 }
 
+// NO SOCKET VARIABLE (Issue #41). This file used to name its own `OMW_CONTROL_SOCKET` constant —
+// a second, independent copy of the same guess the visibility command was making — and stat the
+// path it named. Nothing in the product ever set it, so it answered "not running" unconditionally.
+// Liveness now has exactly one definition, in liveness.go, and it asks internal/daemon.
 const (
-	noteEnvHub    = "OMW_HUB"
-	noteEnvSocket = "OMW_CONTROL_SOCKET"
+	noteEnvHub = "OMW_HUB"
 )
 
 // noteSource is how this command reaches a hub.
@@ -37,20 +40,6 @@ const (
 // store, and to drive the failing paths against a source that fails the way a transport will.
 var noteSource = func(env cli.Env) (hub.VersionSource, *hub.Archive, error) {
 	return nil, nil, hub.ErrHubUnreachable
-}
-
-// noteDaemonRunning PROBES for the daemon rather than naming a platform's convention.
-//
-// PRD §4.2, criterion 10: no command starts the daemon; a command that needs it says it is not
-// running. If the environment names no control socket there is nothing to find; if it names one,
-// whether that path exists is the answer. Issue #1 owns the real liveness check.
-var noteDaemonRunning = func(env cli.Env) bool {
-	p := strings.TrimSpace(env.Getenv(noteEnvSocket))
-	if p == "" {
-		return false
-	}
-	_, err := os.Stat(p)
-	return err == nil
 }
 
 func runNote(env cli.Env) int {
@@ -153,9 +142,11 @@ func reachHub(env cli.Env, what string) (hub.VersionSource, *hub.Archive, int, b
 		fmt.Fprintf(env.Stderr, "  local draft revisions do not need a hub: see 'omw note draft'.\n")
 		return nil, nil, cli.ExitFailure, false
 	}
-	if !noteDaemonRunning(env) {
-		fmt.Fprintf(env.Stderr, "omw note %s: %v (code: %s)\n", what, hub.ErrDaemonNotRunning, hub.ErrDaemonNotRunning.Code)
-		return nil, nil, cli.ExitFailure, false
+	// ONE DEFINITION OF LIVENESS, AND THREE ANSWERS (Issue #41). The same call the visibility
+	// command makes and the same call `omw daemon status` renders, so this surface cannot report a
+	// running daemon as absent — and an undetermined liveness is not written down as a stopped one.
+	if live, why := daemonLiveness(env); live != tri.Yes {
+		return nil, nil, reportDaemonNotLive(env, "omw note "+what, live, why), false
 	}
 	src, arch, err := noteSource(env)
 	if err != nil || src == nil {
