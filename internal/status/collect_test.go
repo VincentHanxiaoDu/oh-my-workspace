@@ -1,6 +1,7 @@
 package status
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/channels"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/daemon"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/devices"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/health"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/projects"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/store"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri"
@@ -597,3 +599,72 @@ func connectChannel(t *testing.T, st *store.Store, id string, expires time.Time)
 		t.Fatalf("could not connect channel %q: %v", id, err)
 	}
 }
+
+// ISSUE #5's RELATED NOTE ON ISSUE #1: "status renders FDE's three values and must show them
+// without collapsing any two of them into one."
+//
+// The three are compared PAIRWISE against each other rather than against literals, and the last
+// assertion is the one the Issue's scope note demands: rendering the value is not implementing the
+// health report, so an encryption answer nobody could read does not turn "is everything running?"
+// into a question status failed to answer.
+func TestFullDiskEncryptionsThreeValuesReachTheScreenWithoutCollapsing(t *testing.T) {
+	sb := newSandbox(t)
+	lines := map[string]string{}
+	summaries := map[string]Summary{}
+	undetermined := map[string]bool{}
+	for name, checker := range map[string]health.EncryptionChecker{
+		"enabled":      stubChecker{on: true},
+		"not enabled":  stubChecker{on: false},
+		"undetermined": stubChecker{err: errors.New("the platform tool refused to answer")},
+	} {
+		screen := Collect(Query{
+			Getenv: sb.getenv, Now: time.Now().UTC(), Daemon: tri.No, Report: daemon.Inspect(sb.root),
+			Health: health.Runner{Checker: checker},
+		})
+		found := false
+		for _, it := range find(t, screen, Store).Items {
+			if it.Name != "full-disk encryption" {
+				continue
+			}
+			found = true
+			lines[name] = render(it)
+		}
+		if !found {
+			t.Fatalf("the %s encryption answer never reached the store line:\n%s", name, screen.Render())
+		}
+		summaries[name] = screen.Summary
+		undetermined[name] = screen.AnyUndetermined()
+		if !strings.Contains(screen.Render(), "full-disk encryption") {
+			t.Errorf("the %s encryption answer is in the value and not on the rendered screen", name)
+		}
+	}
+	seen := map[string]string{}
+	for name, l := range lines {
+		if strings.TrimSpace(l) == "" {
+			t.Errorf("the %s encryption answer rendered as nothing", name)
+		}
+		if other, dup := seen[l]; dup {
+			t.Errorf("the %s encryption answer and the %s one render identically: %q", name, other, l)
+		}
+		seen[l] = name
+	}
+	// AN UNREADABLE DISK STATE IS NOT A FAILED STATUS SCREEN. §4.1: a report, never a blocker; and
+	// §3.9 keeps the health report a separate capability that status only points at.
+	if summaries["undetermined"] != summaries["enabled"] {
+		t.Errorf("an unreadable encryption answer changed the screen's summary from %v to %v — "+
+			"status answered 'is everything running?' perfectly well in both cases",
+			summaries["enabled"], summaries["undetermined"])
+	}
+	if undetermined["undetermined"] != undetermined["enabled"] {
+		t.Error("an unreadable encryption answer changed whether the screen counts as having " +
+			"something undetermined, and with it the invocation's outcome")
+	}
+}
+
+type stubChecker struct {
+	on  bool
+	err error
+}
+
+func (stubChecker) Mechanism() string                       { return "a probe this test supplied" }
+func (c stubChecker) Enabled(context.Context) (bool, error) { return c.on, c.err }

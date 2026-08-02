@@ -51,6 +51,18 @@ type Item struct {
 	// Detail is this member's own sentence. It is never empty, because a member with a state and
 	// no account of it is the "empty field" criterion 5 refuses to let stand in for an answer.
 	Detail string `json:"detail"`
+	// Advisory marks a member that is a REPORTED FACT rather than part of a subsystem's state.
+	//
+	// THERE IS EXACTLY ONE OF THESE TODAY and it is full-disk encryption. Issue #5's Related note
+	// asks that status render §4.1's three values; §4.1 says that report is "a report, never a
+	// blocker", and §3.9 keeps the health report a separate capability. So the value is shown, in
+	// all three of its forms, and it does not decide whether the store is working and does not
+	// decide the summary — a machine whose FileVault state could not be read has not thereby
+	// failed to answer "is everything running?".
+	//
+	// It is a field on the member rather than a name the summary knows, so that the summary still
+	// has no switch on names in it.
+	Advisory bool `json:"advisory,omitempty"`
 }
 
 // Subsystem is one line of the screen.
@@ -186,7 +198,7 @@ func Summarise(subs []Subsystem) Summary {
 	// screen that may say everything is fine.
 	for _, s := range subs {
 		for _, it := range s.Items {
-			if !it.State.Determined() {
+			if !it.Advisory && !it.State.Determined() {
 				return SummaryUndetermined
 			}
 		}
@@ -225,7 +237,7 @@ func (s Screen) AnyUndetermined() bool {
 			return true
 		}
 		for _, it := range sub.Items {
-			if !it.State.Determined() {
+			if !it.Advisory && !it.State.Determined() {
 				return true
 			}
 		}

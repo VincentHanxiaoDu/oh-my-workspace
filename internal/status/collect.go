@@ -1,6 +1,7 @@
 package status
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -8,6 +9,7 @@ import (
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/channels"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/daemon"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/devices"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/health"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/projects"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/store"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri"
@@ -48,7 +50,21 @@ type Query struct {
 	// Dial is the route to a hub. Nil means this build's real answer: there is no transport, so a
 	// configured hub is UNREACHABLE — which is undetermined, and never a confident "not working".
 	Dial devices.Dial
+	// Health is the deployment-assumption probe whose full-disk encryption answer the store line
+	// carries (Issue #5's "Related" note on Issue #1: "status renders FDE's three values and must
+	// show them without collapsing any two of them into one").
+	//
+	// IT IS THE PROBE AND NOT THE REPORT. Status renders ONE assumption as one member of one line;
+	// the health report itself is Issue #1's, already built, and the screen points at it rather
+	// than reproducing it. The zero Runner is the real probe for this platform.
+	Health health.Runner
 }
+
+// healthProbeTimeout bounds the encryption probe. It shells out, and a probe that never returns
+// would leave the person looking at nothing — and silence is not one of the three answers (§4.3).
+// A probe that runs out of time yields UNDETERMINED, which is the honest answer about a question
+// nobody finished asking.
+const healthProbeTimeout = 5 * time.Second
 
 func (q Query) getenv() func(string) string {
 	if q.Getenv != nil {
@@ -88,7 +104,7 @@ func Collect(q Query) Screen {
 		TakenAt: now,
 		Subsystems: []Subsystem{
 			daemonSubsystem(q, now),
-			storeSubsystem(root, rootErr, opened, now),
+			storeSubsystem(root, rootErr, opened, now, q.Health),
 			channelsSubsystem(opened, root, rootErr, openErr, now, q.Daemon),
 			projectsSubsystem(opened, root, rootErr, openErr, getenv, now, q),
 			devicesSubsystem(q, getenv, now),
@@ -154,8 +170,12 @@ func daemonSubsystem(q Query, now time.Time) Subsystem {
 // The store's existence and its LOCATION are both facts establishable with no daemon, so both are
 // reported with no daemon. A store that is not there is NOT CONFIGURED — a determined answer that
 // reads as neither running nor failing — and nothing here creates one (§4.2).
-func storeSubsystem(root string, rootErr error, opened *store.Store, now time.Time) Subsystem {
+func storeSubsystem(root string, rootErr error, opened *store.Store, now time.Time, hr health.Runner) Subsystem {
 	sub := Subsystem{Name: Store, ObservedAt: now}
+	// THE DISK UNDER THE STORE, AS ITS OWN MEMBER WITH ITS OWN THREE-VALUED STATE. It is attached
+	// even when the store's own location could not be worked out, because whether this machine's
+	// disk is encrypted is a fact about the machine and not about the path.
+	sub.Items = append(sub.Items, encryptionItem(hr))
 	if rootErr != nil {
 		sub.State = Undetermined
 		sub.Detail = "where this device's store lives could not be worked out: " + rootErr.Error()
@@ -179,6 +199,40 @@ func storeSubsystem(root string, rootErr error, opened *store.Store, now time.Ti
 		sub.Detail = "a store may or may not be present at " + root + "; it could not be inspected"
 	}
 	return sub
+}
+
+// encryptionItem is §4.1's three-valued answer, carried onto the status screen without collapsing
+// any two of them (Issue #5's "Related" note on Issue #1).
+//
+// IT IS NEVER A NEGATIVE WHEN NOBODY LOOKED. A platform with no probe, a probe that errored and a
+// probe that ran out of time all land on Undetermined, because telling a person their disk is
+// unprotected on the strength of the product not having looked is the exact failure §4.1 and §4.3
+// are both written about.
+//
+// IT IS ADVISORY. Whether the store WORKS is a different question from whether the disk under it
+// is encrypted, and §4.1 says that answer is "a report, never a blocker" — so this member does not
+// decide the store line's state and does not decide the summary. See [Item.Advisory].
+func encryptionItem(hr health.Runner) Item {
+	ctx, cancel := context.WithTimeout(context.Background(), healthProbeTimeout)
+	defer cancel()
+	rep := hr.Run(ctx)
+	a, ok := rep.Encryption()
+	if !ok {
+		return Item{
+			Name:     "full-disk encryption",
+			Advisory: true,
+			State:    Undetermined,
+			Detail: "this run produced no full-disk encryption answer at all, which is itself " +
+				tri.Undetermined.String() + " — omw health",
+		}
+	}
+	it := Item{Name: "full-disk encryption", Advisory: true, State: fromTri(a.Value)}
+	it.Detail = a.Rendered() + " (" + a.Mechanism + ")"
+	if a.Reason != "" {
+		it.Detail += " — " + a.Reason
+	}
+	it.Detail += ". This is a report, not a blocker: omw health has the full account"
+	return it
 }
 
 // noStoreDetail is the one sentence for a subsystem whose facts live in a store this run could not
