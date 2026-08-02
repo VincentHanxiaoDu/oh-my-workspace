@@ -245,6 +245,9 @@ func (d *Daemon) Report() Report {
 		ControlDetail: d.controlDetail,
 		ControlSocket: d.control.Path(),
 	}
+	// The SAME function the CLI calls (criterion 23). Not a cached field: a cached one is a second
+	// answer, and a second answer goes stale.
+	rep.Auth, rep.AuthDetail, rep.AuthCode = authStateFor(d.opts.StorePath)
 	switch ph {
 	case phaseHealthy:
 		rep.Healthy = tri.Yes
