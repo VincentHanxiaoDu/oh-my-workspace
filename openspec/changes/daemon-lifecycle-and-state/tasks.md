@@ -87,5 +87,16 @@
       equivalent local edit so the two branches do not diverge on one file
 - [x] Re-drive both spawn mutations after the narrowing, and confirm the vacuous-pass control still
       reports the spawns it examined
+
+## What a merge simulation found that this branch cannot see
+
+- [x] Test-merge `main` + #27 + this branch in a scratch clone and run the whole suite there, rather
+      than trusting that a branch green on its own base is green on the base it lands on
+- [x] Report that the merged tree fails #12's `TestVisibilitySurfacesCannotOpenANetworkConnection`,
+      because that guard bans the `net` package outright and this daemon's control API is a unix
+      socket — attributed by bisecting the merge, and left for its owner to narrow rather than
+      worked around here
+- [x] Record that `omw health` has since landed on `main`, so Issue #1's carried-forward criterion 14
+      is drivable after all — and drive it in the merged tree, where it passes
 - [x] Measure the real pointer before and after `go test ./internal/commands/` and record the
       result, rather than asserting from the code that it is safe
