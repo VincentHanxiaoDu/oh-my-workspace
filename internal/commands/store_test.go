@@ -2,6 +2,10 @@ package commands
 
 import (
 	"bytes"
+	"go/ast"
+	"go/parser"
+	"go/printer"
+	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -390,11 +394,26 @@ func TestCreatingAStoreStartsNothingAndIsUsableByTheNextCommand(t *testing.T) {
 	}
 
 	root := filepath.Join(t.TempDir(), "store")
+	sandbox := t.TempDir()
 	run := func(args ...string) (int, string, *os.ProcessState) {
 		cmd := exec.Command(bin, args...)
 		// Its own process group, so "did it leave anything running?" is a question with an answer.
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		cmd.Env = append(os.Environ(), store.PathEnv+"="+root, "OMW_HUB=", "OMW_MODEL=")
+		// THE DEVICE POINTER MUST BE SANDBOXED TOO, NOT JUST THE STORE. This spawns the real
+		// binary, and `store create` records which store is this device's store in a per-user
+		// file resolved from XDG_DATA_HOME, else HOME. Inheriting the developer's environment
+		// pointed that file at a t.TempDir() which is then deleted — so on a machine with a real
+		// store, running the tests left the product reporting NO STORE while the person's tickets
+		// and drafts sat on disk unreferenced. A present thing rendered as an absent one (§4.3),
+		// done to the sole home of unpublished data (§3.14), by the test suite.
+		//
+		// Both variables are set because productDir() reads XDG_DATA_HOME first and falls back to
+		// HOME: setting only one leaves the other path live on the platform that uses it, which is
+		// the could-not-check-reading-as-checked shape this project exists to remove.
+		cmd.Env = append(os.Environ(),
+			store.PathEnv+"="+root, "OMW_HUB=", "OMW_MODEL=",
+			"XDG_DATA_HOME="+sandbox, "HOME="+sandbox,
+		)
 		out, _ := cmd.CombinedOutput()
 		return cmd.ProcessState.ExitCode(), string(out), cmd.ProcessState
 	}
@@ -463,4 +482,81 @@ func treeSnapshot(t *testing.T, dir string) map[string]string {
 		t.Fatalf("snapshotting %s: %v", dir, err)
 	}
 	return out
+}
+
+// THE SUITE MUST NOT TOUCH THE DEVELOPER'S OWN DEVICE POINTER, and this is checked STRUCTURALLY.
+//
+// The defect: a spawned `omw store create` inherited the real environment and rewrote
+// `~/Library/Application Support/omw/device-store.json` to a t.TempDir() that is deleted when the
+// test ends. On a machine with a real store the product then reported NO STORE while the person's
+// tickets and drafts sat on disk unreferenced — §4.3's "a present thing rendered as an absent one",
+// done to §3.14's sole home of unpublished data, by `make ci`.
+//
+// WHY STRUCTURAL AND NOT BEHAVIOURAL. The obvious test — read the real pointer, run the suite,
+// read it again — cannot be written honestly: to observe the damage it must first allow the
+// damage, on the machine of whoever runs it. And a version that merely reads the file before and
+// after doing nothing passes unconditionally, which is worse than no test. So this reads the
+// source instead and requires every process spawn in this package to sandbox the pointer's
+// location. It fails when the NEXT test to spawn the binary forgets, which is the case that
+// matters — the original was written by someone who did not think to look.
+func TestEveryProcessSpawnSandboxesTheDevicePointer(t *testing.T) {
+	fset := token.NewFileSet()
+	pkgs, err := parser.ParseDir(fset, ".", nil, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("parsing this package: %v", err)
+	}
+
+	// The pointer resolves from XDG_DATA_HOME, else HOME (see store.productDir). BOTH must be set:
+	// setting only one leaves the other path live on the platform that uses it, which is the
+	// could-not-check-reading-as-checked shape this project exists to remove.
+	// MATCHED WITH THEIR OPENING QUOTE. `strings.Contains(src, "HOME=")` is satisfied by
+	// `XDG_DATA_HOME=`, so the half-fix — sandboxing one and not the other — passed this check
+	// when it was written without the quote. Caught by driving the half-fix and watching this
+	// test stay green, which is the only way that class of error surfaces.
+	required := []string{`"XDG_DATA_HOME=`, `"HOME=`}
+
+	found := 0
+	for _, pkg := range pkgs {
+		for name, file := range pkg.Files {
+			ast.Inspect(file, func(n ast.Node) bool {
+				assign, ok := n.(*ast.AssignStmt)
+				if !ok || len(assign.Lhs) != 1 {
+					return true
+				}
+				sel, ok := assign.Lhs[0].(*ast.SelectorExpr)
+				if !ok || sel.Sel.Name != "Env" {
+					return true
+				}
+				found++
+				var b strings.Builder
+				if err := printer.Fprint(&b, fset, assign.Rhs[0]); err != nil {
+					t.Fatalf("printing the env expression: %v", err)
+				}
+				src := b.String()
+				if !strings.Contains(src, "os.Environ()") {
+					return true // a fully-constructed env inherits nothing; nothing to sandbox.
+				}
+				for _, want := range required {
+					if !strings.Contains(src, want) {
+						t.Errorf("%s:%d: this spawn inherits os.Environ() but does not set %s\n"+
+							"  It will write the DEVELOPER'S OWN device pointer at $XDG_DATA_HOME/omw or\n"+
+							"  $HOME/.../omw, repointing their real store at a t.TempDir() that is then\n"+
+							"  deleted — the product reports no store while their tickets remain on disk.\n"+
+							"  Set both XDG_DATA_HOME and HOME to a t.TempDir() in this command's env.\n"+
+							"  env expression: %s",
+							filepath.Base(name), fset.Position(assign.Pos()).Line, want, src)
+					}
+				}
+				return true
+			})
+		}
+	}
+
+	// A CONTROL. If the walk found no spawns at all it would pass vacuously, and a green would say
+	// "every spawn is sandboxed" when it had examined none.
+	if found == 0 {
+		t.Fatal("found no cmd.Env assignment in this package — the check examined nothing, " +
+			"so its pass says nothing. Fix the walk, do not delete the test.")
+	}
+	t.Logf("examined %d process-spawn environment(s)", found)
 }
