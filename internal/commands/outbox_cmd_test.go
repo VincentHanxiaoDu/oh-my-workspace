@@ -366,7 +366,10 @@ func TestAutoWithNoHubSaysWhatIsMissingAndExitsNonZero(t *testing.T) {
 // Criteria 11, 12 — review runs here, on the person's words
 // ---------------------------------------------------------------------------
 
-const cliAwkwardRules = "  NEVER mention customer names.\n\n\tno half-finished reasoning — Acme is a customer, acme is a package.  "
+// The wording is chosen to break a naive normaliser: leading spaces, a blank line, a tab, CRLF,
+// mixed case and trailing spaces. The CRLF is here because a mutation that normalised line endings
+// on read-back only was caught in internal/drafts and sailed through this package.
+const cliAwkwardRules = "  NEVER mention customer names.\n\r\n\tno half-finished reasoning — Acme is a customer, acme is a package.  "
 
 func TestTheRulesAreReadBackExactlyAsRecorded(t *testing.T) {
 	env := obWorld(t)
