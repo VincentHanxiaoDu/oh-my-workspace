@@ -23,7 +23,12 @@ running the product SHALL NOT observe any watched directory between commands.
 #### Scenario: A change while the daemon is running
 - **WHEN** a file changes inside a watched directory while the daemon is running, and more than the
   poll interval passes with no command run
-- **THEN** the state the product holds for that project reflects the change
+- **THEN** the state the product holds for that project reflects the change, and a listing run
+  afterwards attributes that state to the daemon rather than to its own examination
+
+#### Scenario: A daemon started the way a person starts it
+- **WHEN** a person starts the daemon and adds a file to a watched directory, running nothing else
+- **THEN** the polled state recorded for that project advances without any command being run
 
 #### Scenario: A change while nothing is running
 - **WHEN** the daemon is stopped, a file changes inside a watched directory, and well beyond the poll

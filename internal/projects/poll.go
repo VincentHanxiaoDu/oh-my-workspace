@@ -40,15 +40,19 @@ func Poll(s *store.Store, getenv func(string) string, now time.Time) error {
 // for a whole interval, then on a [PollInterval] ticker — PRD §3.6's "every couple of seconds",
 // which criterion 4 is stated in terms of.
 //
-// A failing poll stops the loop and returns the error rather than continuing. The project's standing
-// rule: "the daemon stops when it cannot write rather than continuing in a state a person reads as
-// healthy" — and a poll loop that keeps ticking over a store it cannot write to keeps refreshing
-// nothing while the store's lock still says a daemon is up, so the listing would report
-// daemon-polled provenance over state that stopped advancing. The caller is owed the error.
+// A FAILING POLL DOES NOT STOP THE LOOP, AND DOES NOT STOP THE DAEMON. Deciding to stop is the
+// daemon's own business and it already has the means: PRD §4.3, "the daemon stops when it cannot
+// write", is enforced by the daemon's own write probe against the same store. A poller that also
+// exited on a write error would be a second thing making that decision, on less evidence — and one
+// that exited on a TRANSIENT error would silently stop watching a person's directories for the rest
+// of the run while the daemon went on reporting itself healthy.
+//
+// A poll that fails writes no state record, and a project with no record is examined by the listing
+// and stamped ExaminedNow. So a run whose polls are all failing degrades to exactly what a person
+// would see with no daemon at all, per row, honestly — rather than to a stale number wearing a
+// daemon-polled stamp.
 func Run(ctx context.Context, s *store.Store, getenv func(string) string) error {
-	if err := Poll(s, getenv, time.Now().UTC()); err != nil {
-		return err
-	}
+	_ = Poll(s, getenv, time.Now().UTC())
 	t := time.NewTicker(PollInterval)
 	defer t.Stop()
 	for {
@@ -56,9 +60,8 @@ func Run(ctx context.Context, s *store.Store, getenv func(string) string) error 
 		case <-ctx.Done():
 			return ctx.Err()
 		case now := <-t.C:
-			if err := Poll(s, getenv, now.UTC()); err != nil {
-				return err
-			}
+			// The error is deliberately not propagated; see the comment above.
+			_ = Poll(s, getenv, now.UTC())
 		}
 	}
 }

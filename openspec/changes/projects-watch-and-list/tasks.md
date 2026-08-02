@@ -45,6 +45,11 @@
       and never the established-absence sentence
 - [x] `Poll` writes only the polled state and announces nothing about its own liveness
 - [x] `Run` is the whole contract the daemon has with this package, and nothing else starts a poll
+- [x] Make `Run` survive a failing poll instead of exiting: the daemon's own write probe already
+      decides when to stop, and a second exit decision on less evidence would stop watching silently
+- [x] WIRE IT IN, so that a running daemon actually polls — `omw daemon run` starts the polling for
+      the length of the run, which is what makes criterion 4 true rather than merely available
+- [x] Assert structurally that only the daemon's run command can start the polling
 
 ## The command
 
@@ -59,6 +64,8 @@
 
 - [x] Drive criterion 4 by running the poller and reading the STORE, not a listing, so the
       observation cannot be what caused the state to advance
+- [x] Drive criterion 4 END TO END against a real daemon started by the real binary: change a file,
+      run nothing, and require the polled record to advance
 - [x] Drive criterion 5 by stopping the poller, changing a file, waiting past the interval and
       comparing every file in the store byte for byte
 - [x] Compare the missing, unreadable, empty and real-count renderings PAIRWISE inside one listing
@@ -74,7 +81,7 @@
 - [x] Drive criterion 7 against a REAL daemon started by the real binary, not a fixture this package
       invented, and assert agreement with `omw daemon status` rather than with a local record
 
-## Not done, and why
+## Not done, and why — read with the pull request, which says the same thing
 
 Two things named in the proposal are deliberately absent rather than ticked. Both are stated on the
 pull request as well, because a tasks file nobody re-reads is not where a gap should live.
@@ -82,4 +89,8 @@ pull request as well, because a tasks file nobody re-reads is not where a gap sh
 - A test running Issue #2's real control API against the CLI. It is on another branch, under review,
   and cannot be imported. What is here instead: one determination, one wire form, and a test that
   both renderings agree on all three markings.
-- Any daemon. `Run` is a function; nothing in this change starts it.
+- The polling is started from `internal/commands/projects_daemon.go` rather than registered with
+  `daemon.RegisterBackground`, because that registry is on Issue #6's branch (PR #40) and not on
+  `main`. It is one function called from one line, and the file says how to migrate it. It MUST be
+  migrated when #40 lands: two ways to run daemon background work is a second mechanism, and this
+  branch has already been refused once for shipping a second answer to a settled question.
