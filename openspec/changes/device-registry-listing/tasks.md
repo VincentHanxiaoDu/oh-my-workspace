@@ -27,13 +27,15 @@
 ## The snapshot, and what the product does not know
 
 - [x] Give `Snapshot` a `Complete` `tri.Value` with the precise reasons beside it
+- [x] Take every outside input through one `Query` struct
 - [x] Report no hub configured as a DETERMINED incompleteness, and an unreachable hub as undetermined
 - [x] Take the hub as a `Dial` parameter rather than a package-level variable, so no connection can
       happen without a caller deciding to allow one
 - [x] Merge the hub's devices by label only, never folding two labels together
-- [x] Probe for the daemon by looking for the socket the environment names, starting nothing
-- [x] Confirm the control socket owner-only in three values, and carry an unconfirmable one into the
-      listing's completeness
+- [x] Take the daemon's state as a three-valued INPUT (`Query.Daemon`) rather than deriving it —
+      this package names, derives and stats no control socket (Issue #41)
+- [x] Carry an UNDETERMINED liveness into the listing's completeness, and leave a determined
+      "not running" alone: the inventory is a file that needs no daemon
 - [x] Render an empty-and-complete listing, an empty-because-partial one and an empty-because-
       undetermined one differently
 - [x] Serve the control API's JSON form from the same snapshot and the same `Describe`
@@ -47,6 +49,8 @@
 - [x] Give the three endings three exit codes: 0 whole and determined, 1 known to be partial or a
       refused registration, 3 anything that could not be determined
 - [x] Refuse an unknown flag rather than treating it as a label
+- [x] Ask the product's ONE liveness answer through `daemonLiveness`, and pin in a test that it is
+      the real one and answers a determined negative in a sandbox
 
 ## Driving it, and breaking it
 
@@ -67,4 +71,6 @@
 - [x] Mutate and watch each test go red: a never-started device omitted; never-started rendered as
       undetermined; a no-hub listing presented as complete; a check-in registering implicitly; a
       duplicate label accepted; an unreadable check-in read as "never"; the two non-zero exit codes
-      collapsed; the control form dropping a device; an unregistered label answered as a device
+      collapsed; the control form dropping a device; an unregistered label answered as a device;
+      an unestablishable daemon ignored; the command guessing instead of asking `daemonLiveness`;
+      the deleted socket constant reinstated

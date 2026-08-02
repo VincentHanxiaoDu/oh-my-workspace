@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
-	"os"
 	"sort"
 	"strings"
 	"time"
@@ -13,16 +11,19 @@ import (
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri"
 )
 
-// Environment names this package reads. They are spelled here rather than borrowed from another
-// package's constants so that this Issue's files do not appear in another Issue's diff.
-const (
-	// EnvHub names the hub. Empty means NO HUB CONFIGURED, and with no hub nothing reaches out
-	// (PRD §4.2) — so it is also the reason a listing cannot claim to be the person's whole
-	// inventory (PRD §4.4, criterion 12).
-	EnvHub = "OMW_HUB"
-	// EnvControlSocket names the daemon's control socket.
-	EnvControlSocket = "OMW_CONTROL_SOCKET"
-)
+// EnvHub is the one environment name this package reads. It is spelled here rather than borrowed
+// from another package's constants so that this Issue's file does not appear in another's diff.
+//
+// EnvHub names the hub. Empty means NO HUB CONFIGURED, and with no hub nothing reaches out
+// (PRD §4.2) — so it is also the reason a listing cannot claim to be the person's whole inventory
+// (PRD §4.4, criterion 12).
+//
+// THERE IS NO CONTROL-SOCKET NAME HERE, ON PURPOSE. Whether a daemon is running against a store has
+// one definition and it lives in internal/daemon (Issue #41); the socket path is chosen by that
+// package's socketFor, which falls back to a per-user runtime directory above the sun_path limit.
+// A copy of that rule here would be wrong on the fallback path rather than merely duplicated, so
+// this package does not derive, name or stat a socket. It is TOLD the answer — see Query.Daemon.
+const EnvHub = "OMW_HUB"
 
 // Source is a hub that can report the devices registered to this person.
 //
@@ -48,6 +49,28 @@ type Dial func(getenv func(string) string) (Source, error)
 
 // NoTransport is the default Dial: this build has no hub transport, and says so.
 func NoTransport(func(string) string) (Source, error) { return nil, ErrHubUnreachable }
+
+// Query is everything one listing needs from outside this package.
+//
+// THE DAEMON'S STATE IS AN INPUT, NOT SOMETHING THIS PACKAGE WORKS OUT. Whether a daemon is running
+// against a store has one definition, in internal/daemon, reached through package commands'
+// daemonLiveness (Issue #41). Four surfaces once each stat'd a path named by an environment
+// variable nothing ever set, so all four answered "not running" unconditionally. This package does
+// not get to be the fifth: it is told the answer, in three values, and renders what it is told.
+type Query struct {
+	// Getenv reads the environment. Nil reads nothing, which is the no-hub case.
+	Getenv func(string) string
+	// Now is this listing's instant.
+	Now time.Time
+	// Dial is the route to a hub. Nil means this build's real answer: no transport.
+	Dial Dial
+	// Daemon is whether the daemon is running, from the product's ONE answer. Undetermined is a
+	// real value here and is not a stopped daemon: it is carried into the listing's completeness,
+	// because a listing that could not consult the daemon may not present itself as whole.
+	Daemon tri.Value
+	// DaemonWhy is why the daemon's state could not be established. Empty for a determined answer.
+	DaemonWhy string
+}
 
 // Snapshot is one answer to "what machines are registered under my name", including how much of
 // that answer this run was able to establish.
@@ -80,10 +103,12 @@ type Snapshot struct {
 //
 // The registry failing to read is the one error returned, because then there is no listing at all
 // and the caller must say so rather than print an empty one.
-func Load(getenv func(string) string, now time.Time, dial Dial) (Snapshot, error) {
+func Load(q Query) (Snapshot, error) {
+	getenv := q.Getenv
 	if getenv == nil {
 		getenv = func(string) string { return "" }
 	}
+	dial := q.Dial
 	if dial == nil {
 		dial = NoTransport
 	}
@@ -96,8 +121,7 @@ func Load(getenv func(string) string, now time.Time, dial Dial) (Snapshot, error
 		return Snapshot{}, err
 	}
 
-	snap := Snapshot{Devices: local, Complete: tri.Yes}
-	snap.Daemon, snap.DaemonWhy = probeDaemon(getenv)
+	snap := Snapshot{Devices: local, Complete: tri.Yes, Daemon: q.Daemon, DaemonWhy: q.DaemonWhy}
 
 	// THE HUB HALF. With no hub configured nothing is dialled — there is no code path here that
 	// reaches a transport when EnvHub is empty, which is criterion 11 as a structural property and
@@ -129,15 +153,29 @@ func Load(getenv func(string) string, now time.Time, dial Dial) (Snapshot, error
 		}
 	}
 
-	// CRITERION 14. §4.6: the control API does not open unless it can confirm its socket is
-	// owner-only. If that confirmation cannot be made here either, the CLI says so instead of
-	// presenting the listing as if it were whole.
-	if state, why := confirmControlSocket(getenv); state == tri.Undetermined {
+	// CRITERION 14, AND IT IS NOW THE CALLER'S ONE ANSWER RATHER THAN A SECOND GUESS.
+	//
+	// §4.6: the control API does not open unless it can confirm its socket is owner-only, and
+	// Issue #41 put "could the daemon be established at all" in exactly one place. An UNDETERMINED
+	// liveness is that refusal reaching this listing — owner-only could not be confirmed, the lock
+	// could not be read, the store could not be resolved — and §4.3 will not let it read as a
+	// stopped daemon or be quietly left out. A listing that could not consult the daemon is not a
+	// listing that may present itself as whole.
+	//
+	// A DETERMINED "not running" does NOT demote the listing. That is an established fact, and the
+	// inventory is a file this command reads without any daemon; saying otherwise would make every
+	// machine with a stopped daemon report a listing it could not complete.
+	if q.Daemon == tri.Undetermined {
 		if snap.Complete == tri.Yes {
 			snap.Complete = tri.Undetermined
 		}
-		snap.Missing = append(snap.Missing, "the control API's socket could not be confirmed "+
-			"owner-only, so what the daemon would add to this listing is not in it: "+why)
+		why := strings.TrimSpace(q.DaemonWhy)
+		if why == "" {
+			why = "no reason was recorded, which is itself a thing that could not be determined"
+		}
+		snap.Missing = append(snap.Missing, "whether the daemon is running "+tri.Undetermined.String()+
+			", so whatever it would add to this listing is not in it, and this listing is not "+
+			"whatever a running daemon would have reported: "+why)
 	}
 
 	sort.Slice(snap.Devices, func(i, j int) bool { return snap.Devices[i].Label < snap.Devices[j].Label })
@@ -177,54 +215,6 @@ func merge(local, remote []Device) []Device {
 		}
 	}
 	return out
-}
-
-// probeDaemon PROBES rather than naming a convention: if nothing names a control socket there is
-// nothing running to find; if something does, whether that path is there is the answer; and a
-// path that cannot be examined is undetermined, not "stopped".
-//
-// It opens nothing, dials nothing and starts nothing.
-func probeDaemon(getenv func(string) string) (tri.Value, string) {
-	p := strings.TrimSpace(getenv(EnvControlSocket))
-	if p == "" {
-		return tri.No, "nothing in this environment names a control socket, so no daemon is running for this listing to consult"
-	}
-	fi, err := os.Stat(p)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		return tri.No, "there is no socket at " + p + ", so the daemon is not running. It has NOT been started"
-	case err != nil:
-		return tri.Undetermined, "whether a daemon is running could not be established: " + err.Error()
-	case fi.Mode()&os.ModeSocket == 0:
-		return tri.Undetermined, p + " is not a socket, so whether a daemon is running could not be established"
-	default:
-		return tri.Yes, p
-	}
-}
-
-// confirmControlSocket confirms the control socket is owner-only, in three values.
-//
-// Yes: it is there and no group or other bit is set. No: it is there and it is reachable by
-// somebody else. Undetermined: it could not be examined, which §4.6 treats exactly as a refusal
-// and which criterion 14 requires the CLI to SAY rather than paper over. A socket that is simply
-// absent is Yes-by-vacuity — there is nothing open to be reachable — and does not make the
-// listing undetermined, or every machine with no daemon would report a permissions problem.
-func confirmControlSocket(getenv func(string) string) (tri.Value, string) {
-	p := strings.TrimSpace(getenv(EnvControlSocket))
-	if p == "" {
-		return tri.Yes, ""
-	}
-	fi, err := os.Stat(p)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		return tri.Yes, ""
-	case err != nil:
-		return tri.Undetermined, "the socket at " + p + " could not be examined: " + err.Error()
-	case fi.Mode().Perm()&0o077 != 0:
-		return tri.No, fmt.Sprintf("the socket at %s is mode %#o, which other users can reach", p, fi.Mode().Perm())
-	default:
-		return tri.Yes, ""
-	}
 }
 
 // Determined reports whether this run could say everything it was asked. A listing that is not

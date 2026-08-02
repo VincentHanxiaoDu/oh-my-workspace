@@ -482,7 +482,7 @@ func TestDevicesListStartsNothingAndReachesNothing(t *testing.T) {
 		// would rewrite their real device pointer to a t.TempDir() that is then deleted, and the
 		// product would report no store while their tickets sat on disk unreferenced.
 		cmd.Env = append(os.Environ(),
-			"XDG_DATA_HOME="+sandbox, "HOME="+sandbox, "OMW_HUB=", "OMW_CONTROL_SOCKET=",
+			"XDG_DATA_HOME="+sandbox, "HOME="+sandbox, "OMW_HUB=",
 		)
 		cmd.Env = append(cmd.Env, extra...)
 		out, _ := cmd.CombinedOutput()
@@ -559,4 +559,81 @@ func processGroupMembers(t *testing.T, pgid int) []string {
 	}
 	out, _ := exec.Command(pgrep, "-g", strconv.Itoa(pgid)).Output()
 	return strings.Fields(string(out))
+}
+
+// withDaemonLiveness drives a RENDERING with the daemon's answer forced.
+//
+// Stubbing is right here and wrong elsewhere. liveness.go says the agreement tests must NOT stub —
+// a stub proves the rendering and only a started daemon proves the answer — and these are rendering
+// tests: they assert what the listing SAYS when told each of the three, not what the answer is.
+// TestTheDevicesListingUsesTheProductsRealLivenessAnswer below runs unstubbed.
+func withDaemonLiveness(t *testing.T, live tri.Value, why string) {
+	t.Helper()
+	prev := daemonLiveness
+	daemonLiveness = func(cli.Env) (tri.Value, string) { return live, why }
+	t.Cleanup(func() { daemonLiveness = prev })
+}
+
+// CRITERION 14 AT THE CLI LAYER: where the daemon's state could not be established — which is
+// where §4.6's "owner-only could not be confirmed" refusal arrives — the CLI says so and does not
+// present the listing as complete.
+func TestAnUnestablishableDaemonIsSaidAndTheListingIsNotCalledComplete(t *testing.T) {
+	env := devicesEnv(t, map[string]string{"OMW_HUB": "https://hub.example"})
+	registerVia(t, env, "laptop", "store-A")
+	withHub(t, []devices.Device{{Label: "laptop", CheckIn: devices.NeverCheckedIn(), Source: devices.SourceHub}})
+
+	withDaemonLiveness(t, tri.Yes, "")
+	okCode, okOut, _ := runDevices2(t, env, "list")
+
+	withDaemonLiveness(t, tri.Undetermined, "owner-only access to the control socket could not be confirmed")
+	badCode, badOut, _ := runDevices2(t, env, "list")
+
+	if okCode != cli.Success {
+		t.Errorf("with a running daemon and a hub that answered, the listing exited %d:\n%s", okCode, okOut)
+	}
+	if badCode != cli.ExitUndetermined {
+		t.Errorf("with the daemon unestablishable the listing exited %d, want ExitUndetermined (%d):\n%s",
+			badCode, cli.ExitUndetermined, badOut)
+	}
+	if okOut == badOut {
+		t.Errorf("a listing that could not consult the daemon renders exactly like one that could:\n%s", okOut)
+	}
+	if !strings.Contains(badOut, "owner-only") {
+		t.Errorf("the listing does not say why the daemon could not be established:\n%s", badOut)
+	}
+	// AND IT IS NOT REPORTED AS A STOPPED DAEMON. That collapse is the defect #41 removed.
+	withDaemonLiveness(t, tri.No, "")
+	stoppedCode, stoppedOut, _ := runDevices2(t, env, "list")
+	if stoppedOut == badOut {
+		t.Error("an undetermined daemon renders identically to a stopped one")
+	}
+	if stoppedCode != cli.Success {
+		t.Errorf("a determined 'not running' made the listing incomplete (exit %d); the inventory needs no daemon:\n%s",
+			stoppedCode, stoppedOut)
+	}
+}
+
+// The listing must go through the product's ONE liveness answer, unstubbed.
+//
+// WHY THIS EXISTS AS ITS OWN TEST. Every other devices test here runs with the real daemonLiveness,
+// which is what makes their exit codes meaningful — but that is invisible, and a future change that
+// made it answer Undetermined in a sandbox would silently reroute all of them onto the undetermined
+// exit code while they carried on passing. This pins the assumption: in a sandbox with no daemon,
+// the product's one answer is a DETERMINED negative, so a no-hub listing's exit 1 is the
+// known-partial code and not an undetermined one wearing it.
+func TestTheDevicesListingUsesTheProductsRealLivenessAnswer(t *testing.T) {
+	env := devicesEnv(t, nil)
+	live, why := daemonLiveness(cli.Env{Getenv: func(k string) string { return env[k] }})
+	if live == tri.Undetermined {
+		t.Skipf("the product cannot establish liveness in this sandbox (%s); the assumption below cannot be pinned here", why)
+	}
+	if live != tri.No {
+		t.Fatalf("a sandbox with no daemon reports liveness %v, want a determined No", live)
+	}
+	registerVia(t, env, "laptop", "store-A")
+	code, out, _ := runDevices2(t, env, "list")
+	if code != cli.ExitFailure {
+		t.Errorf("a no-hub listing with a determinedly-stopped daemon exited %d, want ExitFailure (%d) — "+
+			"the KNOWN-partial code, not the undetermined one:\n%s", code, cli.ExitFailure, out)
+	}
 }

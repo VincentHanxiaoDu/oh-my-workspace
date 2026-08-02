@@ -2,7 +2,6 @@ package devices
 
 import (
 	"errors"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,7 +24,16 @@ func dialing(h Source, err error) Dial {
 
 func loadOrFail(t *testing.T, getenv func(string) string, dial Dial) Snapshot {
 	t.Helper()
-	s, err := Load(getenv, time.Unix(1_700_000_000, 0), dial)
+	return loadWithDaemon(t, getenv, dial, tri.No, "")
+}
+
+// loadWithDaemon is the same listing with the daemon's ONE answer supplied, which is how this
+// package now learns it — see Query.Daemon.
+func loadWithDaemon(t *testing.T, getenv func(string) string, dial Dial, live tri.Value, why string) Snapshot {
+	t.Helper()
+	s, err := Load(Query{
+		Getenv: getenv, Now: time.Unix(1_700_000_000, 0), Dial: dial, Daemon: live, DaemonWhy: why,
+	})
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -161,156 +169,74 @@ func TestTheHubHalfNeverCollapsesTwoLabels(t *testing.T) {
 	}
 }
 
-// CRITERION 10: nothing here starts a daemon, and the daemon's state is reported in three values
-// by PROBING for the socket rather than by naming a platform convention.
-func TestTheDaemonIsProbedAndNeverStarted(t *testing.T) {
-	// No socket named at all.
-	none, _ := sandbox(t, nil)
-	if s := loadOrFail(t, none, nil); s.Daemon != tri.No {
-		t.Errorf("with nothing naming a control socket the daemon reads %v, want No", s.Daemon)
-	}
-
-	// A socket path that is not there.
-	dir := t.TempDir()
-	missing, _ := sandbox(t, map[string]string{EnvControlSocket: filepath.Join(dir, "nothing.sock")})
-	s := loadOrFail(t, missing, nil)
-	if s.Daemon != tri.No {
-		t.Errorf("with no socket at the named path the daemon reads %v, want No", s.Daemon)
-	}
-	if _, err := os.Stat(filepath.Join(dir, "nothing.sock")); !os.IsNotExist(err) {
-		t.Error("listing devices created the control socket — it started something")
-	}
-
-	// A real socket. Listening on it is the test's doing, not the product's; the product only
-	// looks. "unix" is the only network this tree may name.
-	sockDir := shortDir(t)
-	sock := filepath.Join(sockDir, "c.sock")
-	ln, err := net.Listen("unix", sock)
-	if err != nil {
-		t.Skipf("this environment cannot create a unix socket: %v", err)
-	}
-	defer ln.Close()
-	running, _ := sandbox(t, map[string]string{EnvControlSocket: sock})
-	if s := loadOrFail(t, running, nil); s.Daemon != tri.Yes {
-		t.Errorf("with a socket present the daemon reads %v, want Yes", s.Daemon)
-	}
-
-	// A path that is there and is NOT a socket: undetermined, never "stopped".
-	notSock := filepath.Join(sockDir, "regular")
-	if err := os.WriteFile(notSock, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	odd, _ := sandbox(t, map[string]string{EnvControlSocket: notSock})
-	if s := loadOrFail(t, odd, nil); s.Daemon != tri.Undetermined {
-		t.Errorf("a non-socket at the control path reads %v, want Undetermined", s.Daemon)
-	}
-}
-
-// CRITERION 14: where owner-only access to the control socket cannot be confirmed, the listing
-// SAYS SO instead of being presented as complete.
+// CRITERION 10 AND 14, AS THIS PACKAGE NOW SEES THEM.
 //
-// THE ENVIRONMENT IS PROBED, NOT NAMED. Whether a filesystem honours permission bits at all is
-// established by setting them and reading them back; if it does not, this check cannot mean
-// anything here and the test says so rather than asserting against a system that cannot comply.
-func TestASocketThatIsNotOwnerOnlyIsSaidRatherThanIgnored(t *testing.T) {
-	dir := shortDir(t)
-	probe := filepath.Join(dir, "probe")
-	if err := os.WriteFile(probe, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(probe, 0o666); err != nil {
-		t.Skipf("this filesystem does not accept a chmod: %v", err)
-	}
-	fi, err := os.Stat(probe)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fi.Mode().Perm()&0o077 == 0 {
-		t.Skip("this filesystem does not preserve group/other permission bits, so owner-only cannot be observed here")
-	}
+// This package no longer probes for a daemon — it is told, in three values, by the product's one
+// answer (Issue #41). What it owes is that it renders all three, starts nothing, and lets an
+// UNDETERMINED liveness reach the listing's completeness rather than passing as a stopped daemon.
+func TestTheDaemonsThreeAnswersAreRenderedAndNothingIsStarted(t *testing.T) {
+	getenv, dir := sandbox(t, map[string]string{EnvHub: "h"})
+	r := mustRegistry(t, getenv)
+	mustRegister(t, r, "laptop", "store-A")
 
-	sock := filepath.Join(dir, "c.sock")
-	ln, lerr := net.Listen("unix", sock)
-	if lerr != nil {
-		t.Skipf("this environment cannot create a unix socket: %v", lerr)
-	}
-	defer ln.Close()
+	running := loadWithDaemon(t, getenv, dialing(fakeHub{}, nil), tri.Yes, "")
+	stopped := loadWithDaemon(t, getenv, dialing(fakeHub{}, nil), tri.No, "")
+	unknown := loadWithDaemon(t, getenv, dialing(fakeHub{}, nil), tri.Undetermined,
+		"owner-only access to the control socket could not be confirmed")
 
-	tight, _ := sandbox(t, map[string]string{EnvHub: "h", EnvControlSocket: sock})
-	if err := os.Chmod(sock, 0o600); err != nil {
-		t.Skipf("this filesystem does not accept a chmod on a socket: %v", err)
-	}
-	okState, _ := confirmControlSocket(tight)
-	if okState != tri.Yes {
-		t.Skipf("an owner-only socket does not read back as owner-only here (%v); this environment cannot drive the check", okState)
-	}
-	confirmed := loadOrFail(t, tight, dialing(fakeHub{}, nil))
-
-	if err := os.Chmod(sock, 0o666); err != nil {
-		t.Skipf("this filesystem does not accept a widening chmod on a socket: %v", err)
-	}
-	if state, _ := confirmControlSocket(tight); state != tri.No {
-		t.Skipf("a world-reachable socket does not read back as such here (%v)", state)
-	}
-	// A DETERMINED "other users can reach this" is a finding, and a finding is not an
-	// undetermined listing — the listing stays complete and reports the finding elsewhere.
-	// The case criterion 14 is about is the one that could not be CONFIRMED, driven below.
-	wide := loadOrFail(t, tight, dialing(fakeHub{}, nil))
-	if wide.Render() == "" {
-		t.Fatal("empty render")
-	}
-
-	// The unconfirmable case: the socket's directory cannot be traversed, so its mode cannot be
-	// read at all. Skipped where the test runs as a user permissions do not apply to.
-	blind := filepath.Join(dir, "blind")
-	if err := os.MkdirAll(blind, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	hidden := filepath.Join(blind, "c.sock")
-	ln2, l2err := net.Listen("unix", hidden)
-	if l2err != nil {
-		t.Skipf("this environment cannot create a second unix socket: %v", l2err)
-	}
-	defer ln2.Close()
-	if err := os.Chmod(blind, 0o000); err != nil {
-		t.Skipf("this filesystem does not accept chmod 000: %v", err)
-	}
-	defer os.Chmod(blind, 0o700)
-	if _, serr := os.Stat(hidden); serr == nil {
-		t.Skip("this process can stat inside an unreadable directory, so 'could not be confirmed' cannot be produced here")
-	}
-	blindEnv, _ := sandbox(t, map[string]string{EnvHub: "h", EnvControlSocket: hidden})
-	unconfirmed := loadOrFail(t, blindEnv, dialing(fakeHub{}, nil))
-	if unconfirmed.Complete != tri.Undetermined {
-		t.Errorf("with owner-only access unconfirmable the listing claims completeness %v, want Undetermined", unconfirmed.Complete)
-	}
-	if !mentions(unconfirmed.Missing, "owner-only") {
-		t.Errorf("the listing does not say the socket could not be confirmed owner-only: %v", unconfirmed.Missing)
-	}
-	if unconfirmed.Render() == confirmed.Render() {
-		t.Error("a listing whose control API could not be confirmed renders exactly like a confirmed one")
-	}
-}
-
-// shortDir is a directory short enough for a unix socket address to fit in.
-//
-// A SOCKET PATH HAS A LENGTH LIMIT AND t.TempDir() DOES NOT KNOW ABOUT IT. On macOS a temporary
-// directory lives under /var/folders/<long>/<long>/T/<test name>/<n>, which with a socket name on
-// the end exceeds sockaddr_un's 104 bytes — and `bind: invalid argument` looked exactly like "this
-// environment cannot make unix sockets", so the check quietly skipped on the developer's own
-// machine and proved nothing. This tries the short root first and falls back, and the CALLER still
-// probes by actually listening, so an environment that genuinely cannot is still skipped honestly.
-func shortDir(t *testing.T) string {
-	t.Helper()
-	for _, root := range []string{"/tmp", ""} {
-		dir, err := os.MkdirTemp(root, "omwsock")
-		if err != nil {
-			continue
+	// The three render distinguishably, compared with each other rather than against wording.
+	renders := map[string]string{"running": running.Render(), "stopped": stopped.Render(), "undetermined": unknown.Render()}
+	seen := map[string]string{}
+	for name, got := range renders {
+		if other, dup := seen[got]; dup {
+			t.Errorf("the %s daemon and the %s daemon render identically:\n%s", name, other, got)
 		}
-		t.Cleanup(func() { os.RemoveAll(dir) })
-		return dir
+		seen[got] = name
 	}
-	return t.TempDir()
+
+	// CRITERION 14. An undetermined liveness is §4.6's refusal reaching this listing, so the
+	// listing must not present itself as whole, and must say why.
+	if unknown.Complete != tri.Undetermined {
+		t.Errorf("with the daemon's state undetermined the listing claims completeness %v, want Undetermined", unknown.Complete)
+	}
+	if !mentions(unknown.Missing, "owner-only") {
+		t.Errorf("the listing does not carry the reason the daemon could not be established: %v", unknown.Missing)
+	}
+
+	// A DETERMINED "not running" is an established fact and must NOT demote the listing — the
+	// inventory is a file, readable with no daemon at all. Without this, every machine with a
+	// stopped daemon would report a listing it could not complete.
+	if stopped.Complete != tri.Yes {
+		t.Errorf("a stopped daemon made the listing incomplete (%v); the inventory needs no daemon", stopped.Complete)
+	}
+	if running.Complete != tri.Yes {
+		t.Errorf("a running daemon gave completeness %v, want Yes", running.Complete)
+	}
+
+	// NOTHING WAS STARTED, AND NOTHING WAS WRITTEN. Listing is reading.
+	entries, err := os.ReadDir(filepath.Join(dir, "omw"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Type()&os.ModeSocket != 0 {
+			t.Errorf("listing devices left a socket at %s", e.Name())
+		}
+	}
+}
+
+// An undetermined liveness with no reason recorded must still not render as silence.
+func TestAnUndeterminedDaemonWithNoReasonStillSaysSomething(t *testing.T) {
+	getenv, _ := sandbox(t, map[string]string{EnvHub: "h"})
+	s := loadWithDaemon(t, getenv, dialing(fakeHub{}, nil), tri.Undetermined, "")
+	if len(s.Missing) == 0 {
+		t.Fatal("an undetermined daemon produced no explanation at all")
+	}
+	for _, m := range s.Missing {
+		if strings.TrimSpace(m) == "" {
+			t.Error("an undetermined daemon produced a blank explanation — silence is not an answer")
+		}
+	}
 }
 
 func mentions(list []string, want string) bool {
@@ -331,7 +257,7 @@ func TestLoadRefusesRatherThanReturningAnEmptySnapshot(t *testing.T) {
 	if err := os.WriteFile(r.Path(), []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	s, err := Load(getenv, time.Now(), nil)
+	s, err := Load(Query{Getenv: getenv, Now: time.Now()})
 	if !errors.Is(err, ErrRegistryUnreadable) {
 		t.Fatalf("Load over a damaged inventory gave %v, want ErrRegistryUnreadable", err)
 	}

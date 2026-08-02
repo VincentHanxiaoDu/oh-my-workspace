@@ -47,6 +47,30 @@ var devicesNow = time.Now
 // hub, so the "genuinely complete listing" path is exercised and not merely described.
 var devicesDial devices.Dial = devices.NoTransport
 
+// devicesQuery assembles one listing's inputs, and it is where this command asks the product's ONE
+// question about the daemon.
+//
+// IT CALLS daemonLiveness AND DERIVES NOTHING ITSELF (Issue #41). The socket path is chosen by
+// internal/daemon's socketFor, which falls back to a per-user runtime directory whenever the
+// in-store path would exceed the kernel's sun_path limit — so a second copy of that rule here would
+// not be a duplicate, it would be WRONG on the fallback path, and this listing would disagree with
+// `omw daemon status` about a daemon that is running. An earlier version of this file stat'd a path
+// named by an environment variable nothing in the product ever set, which answered "not running"
+// unconditionally; that is exactly the defect #41 removed, and it is deleted rather than updated.
+//
+// The three-valued answer is carried through unchanged, because it is the same rule this Issue is
+// built on: a daemon whose state could not be established is a fact worth seeing, not an absence.
+func devicesQuery(env cli.Env) devices.Query {
+	live, why := daemonLiveness(env)
+	return devices.Query{
+		Getenv:    env.Getenv,
+		Now:       devicesNow(),
+		Dial:      devicesDial,
+		Daemon:    live,
+		DaemonWhy: why,
+	}
+}
+
 // devicesMachine answers "which machine is this" — and it does not invent an identity.
 //
 // Issue #17 says each device has exactly one store, "so device identity and store identity are the
@@ -167,7 +191,7 @@ func devicesList(env cli.Env, f devicesFlags) int {
 		fmt.Fprintf(env.Stderr, "omw devices list: takes no arguments, got %q\n", f.rest[0])
 		return cli.ExitUsage
 	}
-	snap, err := devices.Load(env.Getenv, devicesNow(), devicesDial)
+	snap, err := devices.Load(devicesQuery(env))
 	if err != nil {
 		// AN UNREADABLE INVENTORY IS NOT AN EMPTY ONE. No listing is printed at all, because a
 		// printed empty listing is exactly the false "you have no devices" this refuses to say.
@@ -209,7 +233,7 @@ func devicesShow(env cli.Env, f devicesFlags) int {
 		return cli.ExitUsage
 	}
 	label := devices.Label(f.rest[0])
-	snap, err := devices.Load(env.Getenv, devicesNow(), devicesDial)
+	snap, err := devices.Load(devicesQuery(env))
 	if err != nil {
 		fmt.Fprintf(env.Stderr, "omw devices show: %v\n", err)
 		return cli.ExitFailure

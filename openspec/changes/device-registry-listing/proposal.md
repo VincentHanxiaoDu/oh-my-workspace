@@ -51,10 +51,12 @@ Two more things hang off the same sentence:
 - **A new `omw devices` command** — `list`, `show`, `register`, `check-in`, with `--json` for the
   control API's form of the same answer. An empty listing for a person with no devices, an empty
   listing that could not be completed, and a one-device listing with no hub each render differently.
-- **The daemon is probed, never started, and never named.** The command looks for the control socket
-  the environment names; nothing there is "not running", a path it cannot examine is undetermined.
-  Where owner-only access to that socket cannot be confirmed, §4.6's refusal is carried through to
-  the listing, which says so instead of presenting itself as complete.
+- **The daemon's state is asked of the product's one answer, never guessed.** `internal/devices`
+  names, derives and stats no control socket: it takes liveness as a three-valued `Query.Daemon`,
+  and `omw devices` fills it from `daemonLiveness` (Issue #41). An UNDETERMINED liveness is where
+  §4.6's "owner-only could not be confirmed" refusal reaches this listing, so the listing says so
+  instead of presenting itself as complete — while a determined "not running" leaves it alone,
+  because the inventory is a file that needs no daemon.
 
 ## What Issue #17 did NOT settle, and what this build does about it
 
