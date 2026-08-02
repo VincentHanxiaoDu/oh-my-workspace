@@ -80,8 +80,12 @@
 - [x] Sandbox both `XDG_DATA_HOME` and `HOME` in this package's own binary spawn, which the
       cherry-picked structural check flags — a latent hazard here rather than damage that happened,
       since nothing in the daemon tests writes the pointer
-- [x] Scope that structural check to test files, because it also flagged `omw daemon start`
-      launching its own child, where inheriting the person's environment is the correct behaviour
-      and a blanked `$HOME` would be the defect rather than the guard
+- [x] Report that the check also flagged `omw daemon start` launching its own child, where
+      inheriting the person's environment is the correct behaviour and a blanked `$HOME` would be
+      the defect rather than the guard — rather than contorting the product to go green
+- [x] Take `60fb700`, the narrowing made on #3's branch where the check lives, and revert the
+      equivalent local edit so the two branches do not diverge on one file
+- [x] Re-drive both spawn mutations after the narrowing, and confirm the vacuous-pass control still
+      reports the spawns it examined
 - [x] Measure the real pointer before and after `go test ./internal/commands/` and record the
       result, rather than asserting from the code that it is safe
