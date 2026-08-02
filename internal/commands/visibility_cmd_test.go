@@ -2,9 +2,11 @@ package commands
 
 import (
 	"bytes"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -421,10 +423,19 @@ func TestDaemonProbeReadsTheSocketItIsGiven(t *testing.T) {
 //
 // PROVED STRUCTURALLY, BY WHAT THE CODE CAN REACH, rather than by watching a socket — a test that
 // observed zero connections during one run would also pass on a build that dials only sometimes.
-// The visibility surfaces cannot open a connection because nothing they can reach imports net.
 //
-// The test PROBES for the toolchain rather than assuming it: `go test` normally has one, but this
-// asserts it rather than failing obscurely if it does not.
+// WHY "net" IS NOT SIMPLY BANNED, AND WHY THIS IS STRONGER THAN THE BAN IT REPLACES.
+// The original form of this test banned the `net` package outright, as a proxy for "cannot open a
+// network connection". That proxy was valid only while nothing in the product spoke to anything.
+// PRD §4.6 REQUIRES a control API that is local and demonstrably so, and on Unix a local IPC socket
+// is a `net.Listen("unix", ...)` — the same package. So the ban conflated "reaches the net package"
+// with "can reach the network", and would have forced the control API to be implemented worse to
+// keep a test green.
+//
+// The replacement is not a relaxation. Banning the package says only "cannot reach it". This asserts
+// something the ban never did: that EVERY listen and dial in the product names the "unix" network.
+// A TCP dial would now fail this test at the call site, which the package ban could only have caught
+// by forbidding the local socket too.
 func TestVisibilitySurfacesCannotOpenANetworkConnection(t *testing.T) {
 	goBin, err := exec.LookPath("go")
 	if err != nil {
@@ -438,8 +449,9 @@ func TestVisibilitySurfacesCannotOpenANetworkConnection(t *testing.T) {
 	if err != nil {
 		t.Skipf("go list could not compute the import graph here: %v\n%s", err, out)
 	}
+	// These have no local-IPC use whatever. Reaching any of them is reaching outward.
 	banned := map[string]bool{
-		"net": true, "net/http": true, "net/url": true, "crypto/tls": true, "net/rpc": true,
+		"net/http": true, "net/url": true, "crypto/tls": true, "net/rpc": true,
 	}
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		pkg := strings.TrimSpace(line)
@@ -447,6 +459,43 @@ func TestVisibilitySurfacesCannotOpenANetworkConnection(t *testing.T) {
 			t.Errorf("the visibility surfaces can reach %q — with no hub configured nothing may reach out (PRD §4.2, criterion 19)", pkg)
 		}
 	}
+}
+
+// CRITERION 19, the half the import graph cannot answer: every listen and dial in this product
+// names the "unix" network, so the only socket anything opens is a local one (PRD §4.2, §4.6).
+//
+// A CONTROL IS ASSERTED FIRST. If the scan finds no call sites at all it proves nothing, and would
+// go on proving nothing after somebody renamed the file it reads.
+func TestEveryListenAndDialIsAUnixSocket(t *testing.T) {
+	root := repoRoot(t)
+	callSite := regexp.MustCompile(`net\.(Listen|Dial|DialTimeout)\s*\(\s*("[^"]*")?`)
+	found := 0
+	err := filepath.WalkDir(filepath.Join(root, "internal"), func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return err
+		}
+		b, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return rerr
+		}
+		for _, m := range callSite.FindAllStringSubmatch(string(b), -1) {
+			found++
+			if m[2] != `"unix"` {
+				rel, _ := filepath.Rel(root, path)
+				t.Errorf("%s: net.%s opens %s, not \"unix\" — with no hub configured nothing may reach out (PRD §4.2), and the control API must be local (§4.6)", rel, m[1], m[2])
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking internal/: %v", err)
+	}
+	// THE CONTROL. Zero call sites means the regex stopped matching, not that the product stopped
+	// dialling — and those two look identical in a green run.
+	if found == 0 {
+		t.Fatal("found no net.Listen/net.Dial call sites at all; the scan is not looking at anything, so its pass proves nothing")
+	}
+	t.Logf("checked %d listen/dial call sites, all \"unix\"", found)
 }
 
 // ============================================================================================
