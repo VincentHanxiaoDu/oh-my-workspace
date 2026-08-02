@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/cli"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/daemon"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/drafts"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/hub"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/store"
@@ -59,15 +60,14 @@ func (outboxUnreachableReviewer) Review(rules, body string) (string, error) {
 	return "", errors.New("this build has no transport to a model (Issue #18)")
 }
 
-// outboxDaemonRunning PROBES for the daemon rather than naming a platform's convention. Nothing in
-// this file starts it (PRD §4.2, criterion 20).
-var outboxDaemonRunning = func(env cli.Env) bool {
-	p := strings.TrimSpace(env.Getenv(outboxEnvSocket))
-	if p == "" {
-		return false
-	}
-	_, err := os.Stat(p)
-	return err == nil
+// outboxDaemonRunning asks Issue #2's own answer rather than inventing a second one.
+//
+// [daemon.Inspect] reads the store's lock and run record and starts nothing, and its answer is
+// three-valued — which is the point: "the daemon is not running" and "I could not tell whether the
+// daemon is running" are different things to say to a person, and a private socket-stat here could
+// only ever say the first. It is a var so a test can drive the three branches without a daemon.
+var outboxDaemonRunning = func(storeRoot string) tri.Value {
+	return daemon.Inspect(storeRoot).Running
 }
 
 func runOutbox(env cli.Env) int {
@@ -168,10 +168,19 @@ func outboxPreflight(env cli.Env, what string) (int, bool) {
 	// CRITERION 20: the daemon's state is REPORTED, on every command, and started by none of them.
 	// It goes to stderr because it is not the answer the person asked for; it is said anyway
 	// because a person whose daemon is down should never have to infer it.
-	if outboxDaemonRunning(env) {
-		fmt.Fprintf(env.Stderr, "daemon: running.\n")
-	} else {
-		fmt.Fprintf(env.Stderr, "daemon: not running — nothing has been started on your behalf.\n")
+	//
+	// A store this command cannot even locate is not reported on: the subcommand is about to say
+	// so precisely, and "the daemon is not running" said about a store nobody found would be a
+	// determined answer nobody determined.
+	if root, rerr := store.Resolve(env.Getenv); rerr == nil {
+		switch outboxDaemonRunning(root) {
+		case tri.Yes:
+			fmt.Fprintf(env.Stderr, "daemon: running — this command did not start it.\n")
+		case tri.No:
+			fmt.Fprintf(env.Stderr, "daemon: not running — nothing has been started on your behalf.\n")
+		default:
+			fmt.Fprintf(env.Stderr, "daemon: whether it is running %s; nothing has been started on your behalf.\n", tri.Undetermined)
+		}
 	}
 	return cli.Success, true
 }

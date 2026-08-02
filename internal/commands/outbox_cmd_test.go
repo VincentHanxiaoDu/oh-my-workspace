@@ -17,6 +17,7 @@ import (
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/cli"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/drafts"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/store"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri"
 )
 
 // ---------------------------------------------------------------------------
@@ -761,6 +762,34 @@ func TestNoCommandStartsTheDaemonAndEachSaysItIsNotRunning(t *testing.T) {
 	}
 }
 
+// The daemon's state is Issue #2's three-valued answer, and this capability passes all three
+// through. "Not running" and "I could not tell" are different sentences here for the same reason
+// they are different values there.
+func TestTheDaemonsThreeStatesAreSaidDistinctly(t *testing.T) {
+	env := obWorld(t)
+	said := map[string]string{}
+	for name, v := range map[string]tri.Value{"running": tri.Yes, "not running": tri.No, "could not be determined": tri.Undetermined} {
+		prev := outboxDaemonRunning
+		outboxDaemonRunning = func(string) tri.Value { return v }
+		got := runOutboxCmd(t, env, "list")
+		outboxDaemonRunning = prev
+		line := ""
+		for _, l := range strings.Split(got.stderr, "\n") {
+			if strings.HasPrefix(l, "daemon:") {
+				line = l
+			}
+		}
+		if line == "" {
+			t.Fatalf("with the daemon %s, no daemon line was printed:\n%s", name, got.stderr)
+		}
+		said[name] = line
+	}
+	assertThreeDistinct(t, "the daemon's state", said)
+	if strings.Contains(said["could not be determined"], "not running —") {
+		t.Errorf("an undetermined daemon is reported as not running: %q", said["could not be determined"])
+	}
+}
+
 // CRITERION 21 and 8, at runtime: with a hub address that is a REAL LISTENER this test controls,
 // nothing in this capability connects to it.
 func watchForDials(t *testing.T, env map[string]string) func() int {
@@ -805,8 +834,15 @@ func TestTheLocalHalfOpensNoConnectionEvenWithAHubConfigured(t *testing.T) {
 	}
 }
 
-// CRITERION 21, the structural half: nothing this capability is built from can reach the network at
-// all. The listener test above can only observe the address it was given; this observes the code.
+// CRITERION 21, the structural half: this capability's own files reach for no network package.
+//
+// STATED PRECISELY, because it is easy to overclaim. It covers the files this Issue wrote — the
+// command and package drafts — and not their transitive imports: `daemon.Inspect` is called from
+// the preflight and package daemon does use `net`, for a UNIX DOMAIN SOCKET on this machine.
+// Whole-repository coverage of that is `TestEveryListenAndDialIsAUnixSocket` above, which requires
+// every listen and dial under internal/ to name "unix" as a literal. This check is the narrower
+// one: the capability itself has no business importing net at all, and if it ever does, the reason
+// should have to be argued in a diff.
 func TestThisCapabilityImportsNoNetworkPackage(t *testing.T) {
 	files := []string{"outbox_cmd.go"}
 	matches, err := filepath.Glob(filepath.Join("..", "drafts", "*.go"))
