@@ -37,7 +37,8 @@
 ## The command
 
 - [x] `omw outbox` with draft, list, state, mode, mode set, rules, rules set, model, review, publish
-- [x] Preflight on every subcommand: platform, the control socket's owner-only permissions, the daemon's state
+- [x] Preflight on every subcommand: platform, the daemon's liveness, and the control API's state
+- [x] Both taken from Issue #41's `daemonLiveness` and `daemon.Inspect` — no control-socket path is derived here
 - [x] The review gate in one function, so there is exactly one path by which a draft may leave
 - [x] The gate runs before the hub is considered, so review never depends on a hub
 - [x] The boundary with Issue #10 stated in the output: the gate passed, and nothing has left this machine
