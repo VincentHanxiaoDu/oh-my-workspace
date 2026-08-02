@@ -1,14 +1,10 @@
 # Project-specific instructions for the ops role
 
-**This file is yours. The installer creates it once and never overwrites it.** Everything in
-`.claude/commands/` belongs to the framework and is replaced on every install, so anything you add
-there is lost — put it here instead.
+**This file is yours. The installer creates it once and never overwrites it.**
 
-What belongs here: this project's build and test commands, its domain vocabulary, conventions a
-newcomer would get wrong, and anything the ops role needs that is true of this project and not of
-every project.
+**Platforms are an open question** (PRD §5.1): the control API must prove its socket is owner-only,
+which is straightforward on Unix domain sockets and unresolved on Windows. Until the owner rules,
+say on every release which platforms were actually built and tested.
 
-What does not: how the process works. That is the framework's half, and if you find yourself
-restating it here, the framework is missing something — change it there.
-
-_(empty — nothing project-specific yet)_
+Product decides a release; you execute. The notes name what CI actually saw on the tagged sha — a
+merge commit is not the commit that was reviewed.

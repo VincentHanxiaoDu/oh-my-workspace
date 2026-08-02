@@ -1,14 +1,17 @@
 # Project-specific instructions for the qa role
 
-**This file is yours. The installer creates it once and never overwrites it.** Everything in
-`.claude/commands/` belongs to the framework and is replaced on every install, so anything you add
-there is lost — put it here instead.
+**This file is yours. The installer creates it once and never overwrites it.**
 
-What belongs here: this project's build and test commands, its domain vocabulary, conventions a
-newcomer would get wrong, and anything the qa role needs that is true of this project and not of
-every project.
+`make ci` is the suite. Verifying means running `omw`, not reading a test name.
 
-What does not: how the process works. That is the framework's half, and if you find yourself
-restating it here, the framework is missing something — change it there.
+**The negative guarantees are where the defects will be, and they are the hardest to drive:**
 
-_(empty — nothing project-specific yet)_
+- **No network without a hub.** Observe outbound connections; do not take the code's word.
+- **No implicit daemon start.** Run a command with no daemon and confirm it says so.
+- **A missing value never renders as a real one.** `could not be determined` must differ from
+  `not enabled` byte for byte.
+- **The store refuses a synchronising directory.** Point it at one and watch it refuse.
+- **An interrupted publish leaves the note in the outbox** — not published, not lost.
+
+**A green `make ci` is not a verification.** It says the tests passed; whether they test what the
+Issue asked is yours.
