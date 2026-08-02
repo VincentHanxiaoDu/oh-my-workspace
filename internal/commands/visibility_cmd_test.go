@@ -421,10 +421,19 @@ func TestDaemonProbeReadsTheSocketItIsGiven(t *testing.T) {
 //
 // PROVED STRUCTURALLY, BY WHAT THE CODE CAN REACH, rather than by watching a socket — a test that
 // observed zero connections during one run would also pass on a build that dials only sometimes.
-// The visibility surfaces cannot open a connection because nothing they can reach imports net.
 //
-// The test PROBES for the toolchain rather than assuming it: `go test` normally has one, but this
-// asserts it rather than failing obscurely if it does not.
+// WHY "net" IS NOT SIMPLY BANNED, AND WHY THIS IS STRONGER THAN THE BAN IT REPLACES.
+// The original form of this test banned the `net` package outright, as a proxy for "cannot open a
+// network connection". That proxy was valid only while nothing in the product spoke to anything.
+// PRD §4.6 REQUIRES a control API that is local and demonstrably so, and on Unix a local IPC socket
+// is a `net.Listen("unix", ...)` — the same package. So the ban conflated "reaches the net package"
+// with "can reach the network", and would have forced the control API to be implemented worse to
+// keep a test green.
+//
+// The replacement is not a relaxation. Banning the package says only "cannot reach it". This asserts
+// something the ban never did: that EVERY listen and dial in the product names the "unix" network.
+// A TCP dial would now fail this test at the call site, which the package ban could only have caught
+// by forbidding the local socket too.
 func TestVisibilitySurfacesCannotOpenANetworkConnection(t *testing.T) {
 	goBin, err := exec.LookPath("go")
 	if err != nil {
@@ -438,8 +447,20 @@ func TestVisibilitySurfacesCannotOpenANetworkConnection(t *testing.T) {
 	if err != nil {
 		t.Skipf("go list could not compute the import graph here: %v\n%s", err, out)
 	}
+	// These have no local-IPC use whatever. Reaching any of them is reaching outward.
+	//
+	// "net" IS DELIBERATELY NOT IN THIS LIST, AND THE RULE IT CARRIED IS NOT GONE — see
+	// TestEveryNetUseInTheReachableTreeIsAUnixSocket, which replaced it with a stricter check.
+	// Unlike the four above, `net` DOES have a local-IPC use: PRD §2.1's control API is a unix
+	// domain socket, and Go puts unix sockets in `net`. So once `omw daemon` existed this ban and
+	// §2.1 could not both be satisfied — obeying it meant deleting the local control API.
+	//
+	// Removing the entry ALONE would have opened a real hole: a bare net.Dial("tcp", …) was
+	// measured passing the whole suite. So it left together with a replacement that bans the USE
+	// rather than the import, across the same reachable tree this list covers, and that
+	// replacement rejects the tcp dial this list could not tell apart from a local socket.
 	banned := map[string]bool{
-		"net": true, "net/http": true, "net/url": true, "crypto/tls": true, "net/rpc": true,
+		"net/http": true, "net/url": true, "crypto/tls": true, "net/rpc": true,
 	}
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		pkg := strings.TrimSpace(line)
@@ -448,6 +469,11 @@ func TestVisibilitySurfacesCannotOpenANetworkConnection(t *testing.T) {
 		}
 	}
 }
+
+// The unix-socket half of criterion 19 lives in network_guard_test.go, as
+// TestEveryListenAndDialIsAUnixSocket — moved there when two independently written versions of it
+// had to be merged, and kept out of this file so the import ban above and the use rule below it
+// can be read as the two halves they are.
 
 // ============================================================================================
 // One vocabulary — criterion 13.
