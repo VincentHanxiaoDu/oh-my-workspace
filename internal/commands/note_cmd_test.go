@@ -3,7 +3,6 @@ package commands
 import (
 	"bytes"
 	"encoding/json"
-	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -11,7 +10,10 @@ import (
 	"testing"
 
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/cli"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/daemon"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/hub"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/store"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri"
 )
 
 // ---------------------------------------------------------------------------
@@ -30,35 +32,6 @@ func runNoteCmd(t *testing.T, env map[string]string, args ...string) result {
 	var out, errb bytes.Buffer
 	code := cli.Run(append([]string{"note"}, args...), &out, &errb, func(k string) string { return env[k] })
 	return result{code: code, stdout: out.String(), stderr: errb.String()}
-}
-
-// liveSocket PROBES rather than names. It creates a real unix socket in a temp directory and
-// returns its path, so the daemon probe is answered by something that genuinely exists on this
-// machine instead of by a constant this test happened to agree with.
-//
-// If this platform cannot make a unix socket, the test that needs one skips: an unrunnable
-// assertion must not pass silently.
-func liveSocket(t *testing.T) string {
-	t.Helper()
-	// NOT t.TempDir(): its path is built from the test's name, and a unix socket path has a hard
-	// length limit (104 bytes on darwin, 108 on Linux) that a long test name silently exceeds. That
-	// is exactly the environment assumption this helper exists to avoid — a socket that could not be
-	// bound would skip every test here and the suite would go green having asserted nothing.
-	dir, err := os.MkdirTemp("", "omw")
-	if err != nil {
-		t.Fatalf("temp dir: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	p := filepath.Join(dir, "s")
-	l, err := net.Listen("unix", p)
-	if err != nil {
-		t.Skipf("this environment cannot create a unix socket to probe: %v", err)
-	}
-	t.Cleanup(func() { _ = l.Close() })
-	if _, err := os.Stat(p); err != nil {
-		t.Skipf("the socket was created but cannot be stat'd here: %v", err)
-	}
-	return p
 }
 
 // withSource swaps the hub source for the duration of a test and restores it.
@@ -82,9 +55,17 @@ func seededStore(t *testing.T) (*hub.Store, hub.NoteID) {
 	return s, n.ID
 }
 
-// hubEnv is a machine with a hub configured and a daemon running.
+// hubEnv is a machine with a hub configured and the ONE liveness definition answering yes.
+//
+// IT NO LONGER NAMES A SOCKET. Liveness used to be "does the path in $OMW_CONTROL_SOCKET exist",
+// which is why these tests bound a real unix socket in a temp directory to make the probe say yes:
+// the fixture was shaped by the defect. Liveness is now the daemon package's answer about a store
+// (Issue #41), so the fixture stubs that answer — and the fact that the answer is RIGHT is driven
+// against a real daemon in liveness_test.go, not here.
 func hubEnv(t *testing.T) map[string]string {
-	return map[string]string{noteEnvHub: "https://hub.example", noteEnvSocket: liveSocket(t)}
+	t.Helper()
+	withDaemon(t)
+	return map[string]string{noteEnvHub: "https://hub.example", store.PathEnv: storeThatExists(t)}
 }
 
 // ---------------------------------------------------------------------------
@@ -92,10 +73,10 @@ func hubEnv(t *testing.T) map[string]string {
 // ---------------------------------------------------------------------------
 
 func TestReadingATimelineNeverStartsTheDaemonAndSaysItIsNotRunning(t *testing.T) {
-	// A hub IS configured, so the daemon is the relevant missing thing. The socket path names a
-	// file that does not exist — and the command must not create it, connect to it, or start
-	// anything.
-	sock := filepath.Join(t.TempDir(), "not-there.sock")
+	// A hub IS configured, so the daemon is the relevant missing thing. The store exists and its
+	// daemon has never run, which is a DETERMINED "not running" — and the command must not start
+	// one, nor create anything in the store's run directory.
+	root := storeThatExists(t)
 	dialled := false
 	prev := noteSource
 	noteSource = func(cli.Env) (hub.VersionSource, *hub.Archive, error) {
@@ -104,7 +85,7 @@ func TestReadingATimelineNeverStartsTheDaemonAndSaysItIsNotRunning(t *testing.T)
 	}
 	t.Cleanup(func() { noteSource = prev })
 
-	got := runNoteCmd(t, map[string]string{noteEnvHub: "https://hub.example", noteEnvSocket: sock}, "versions", "note-1")
+	got := runNoteCmd(t, map[string]string{noteEnvHub: "https://hub.example", store.PathEnv: root}, "versions", "note-1")
 	if got.code != cli.ExitFailure {
 		t.Fatalf("exit = %d, want %d", got.code, cli.ExitFailure)
 	}
@@ -114,8 +95,8 @@ func TestReadingATimelineNeverStartsTheDaemonAndSaysItIsNotRunning(t *testing.T)
 	if dialled {
 		t.Fatalf("the command reached for the hub before establishing the daemon was running")
 	}
-	if _, err := os.Stat(sock); err == nil {
-		t.Fatalf("the command created %s — it started something on the person's behalf", sock)
+	if rep := daemon.Inspect(root); rep.Running != tri.No {
+		t.Fatalf("reading a timeline left the daemon %v against %s; no command starts it", rep.Running, root)
 	}
 }
 

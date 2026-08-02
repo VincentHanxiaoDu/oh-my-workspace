@@ -7,7 +7,6 @@ package commands
 import (
 	"fmt"
 	"io"
-	"os"
 	"strings"
 
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/cli"
@@ -23,11 +22,15 @@ func init() {
 	})
 }
 
-// Environment this command reads. Named here rather than inline so the "no hub configured" and
-// "no daemon" states are one lookup each and a test can drive both.
+// Environment this command reads.
+//
+// THERE IS NO SOCKET VARIABLE HERE ANY MORE (Issue #41). This file used to name its own
+// `OMW_CONTROL_SOCKET` constant and stat whatever it pointed at; nothing in the product ever set
+// it, so the check answered "not running" whatever the daemon was doing. Liveness now has one
+// definition for the whole product — see liveness.go — and it is derived from the store, not from
+// an environment variable a person would have had to know to set.
 const (
-	envHub    = "OMW_HUB"
-	envSocket = "OMW_CONTROL_SOCKET"
+	envHub = "OMW_HUB"
 )
 
 // visibilitySource is how this command reaches a hub.
@@ -41,21 +44,6 @@ const (
 // Tests replace it to drive the hub-backed paths against an in-memory [hub.Store].
 var visibilitySource = func(env cli.Env) (*hub.Store, error) {
 	return nil, hub.ErrHubUnreachable
-}
-
-// daemonRunning reports whether the daemon is up.
-//
-// PRD §4.2, criterion 18: no command starts the daemon; a command that needs it says it is not
-// running. This PROBES the control socket path rather than assuming a platform's convention: if
-// the environment names no socket, there is no daemon to find, and if it names one, its existence
-// is the answer. Issue #1 / #3 own the daemon and will replace this with a real liveness check.
-var daemonRunning = func(env cli.Env) bool {
-	p := strings.TrimSpace(env.Getenv(envSocket))
-	if p == "" {
-		return false
-	}
-	_, err := os.Stat(p)
-	return err == nil
 }
 
 func runVisibility(env cli.Env) int {
@@ -180,9 +168,11 @@ func visibilityShow(env cli.Env, args []string) int {
 		fmt.Fprintf(env.Stderr, "  configure one and ask again; nothing about this note has been established.\n")
 		return cli.ExitFailure
 	}
-	if !daemonRunning(env) {
-		fmt.Fprintf(env.Stderr, "omw visibility show: %v (code: %s)\n", hub.ErrDaemonNotRunning, hub.ErrDaemonNotRunning.Code)
-		return cli.ExitFailure
+	// ONE DEFINITION OF LIVENESS, AND THREE ANSWERS (Issue #41). A daemon that is running is not
+	// reported as absent, and a liveness that could not be established is not reported as a
+	// stopped daemon — the second is the specific defect #41 exists to remove.
+	if live, why := daemonLiveness(env); live != tri.Yes {
+		return reportDaemonNotLive(env, "omw visibility show", live, why)
 	}
 
 	store, err := visibilitySource(env)
