@@ -9,12 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/cli"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/reports"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/store"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri"
 )
 
 func init() {
@@ -25,22 +25,7 @@ func init() {
 	})
 }
 
-const (
-	reportEnvHub    = "OMW_HUB"
-	reportEnvSocket = "OMW_CONTROL_SOCKET"
-)
-
-// reportDaemonRunning PROBES rather than naming a platform's convention, and it NEVER STARTS
-// ANYTHING (§4.2, criterion 20). If the environment names no control socket there is nothing to
-// find; if it names one, whether that path exists is the answer.
-var reportDaemonRunning = func(env cli.Env) bool {
-	p := strings.TrimSpace(env.Getenv(reportEnvSocket))
-	if p == "" {
-		return false
-	}
-	_, err := os.Stat(p)
-	return err == nil
-}
+const reportEnvHub = "OMW_HUB"
 
 func runReport(env cli.Env) int {
 	if len(env.Args) == 0 {
@@ -90,47 +75,38 @@ A selector that cannot be read is REFUSED and nothing is stored. A selector that
 subject is reported as unmatched, by name, every time the report runs — it never comes back as
 an empty report, because an empty report looks exactly like a quiet day.
 
-flags:
-  --store <path>                 which store; otherwise this device's store is resolved
+Everything here is local: subscriptions live in this device's store, no command starts the
+daemon, and with no hub configured nothing reaches out.
 `)
 }
 
 type reportFlags struct {
-	storePath string
-	rest      []string
+	rest []string
 }
 
 func parseReportFlags(args []string, stderr io.Writer) (reportFlags, bool) {
 	var f reportFlags
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		switch {
-		case a == "--store" && i+1 < len(args):
-			i++
-			f.storePath = args[i]
-		case strings.HasPrefix(a, "--store="):
-			f.storePath = strings.TrimPrefix(a, "--store=")
-		case strings.HasPrefix(a, "--"):
+	for _, a := range args {
+		if strings.HasPrefix(a, "--") {
 			fmt.Fprintf(stderr, "omw report: unknown flag %q\n", a)
 			return f, false
-		default:
-			f.rest = append(f.rest, a)
 		}
+		f.rest = append(f.rest, a)
 	}
 	return f, true
 }
 
-// openReportStore opens the store WITHOUT creating one (§4.2). A missing store is said, never
-// conjured, and never reported as a subscription list that happens to be empty.
+// openReportStore opens THIS DEVICE'S store, without creating one (§4.2). A missing store is said,
+// never conjured, and never reported as a subscription list that happens to be empty.
+//
+// IT RESOLVES THE STORE THE SAME WAY daemonLiveness DOES, and this command takes no --store flag,
+// because the two questions must be about the same store. A report over one store that reported the
+// daemon state of another would be two answers to two different questions printed as one screen.
 func openReportStore(env cli.Env, what string, f reportFlags) (*store.Store, int, bool) {
-	path := strings.TrimSpace(f.storePath)
-	if path == "" {
-		p, err := store.Resolve(env.Getenv)
-		if err != nil {
-			fmt.Fprintf(env.Stderr, "omw report %s: %v\n", what, err)
-			return nil, cli.ExitUndetermined, false
-		}
-		path = p
+	path, err := store.Resolve(env.Getenv)
+	if err != nil {
+		fmt.Fprintf(env.Stderr, "omw report %s: %v\n", what, err)
+		return nil, cli.ExitUndetermined, false
 	}
 	s, err := store.Open(path)
 	if err != nil {
@@ -149,12 +125,36 @@ func openReportStore(env cli.Env, what string, f reportFlags) (*store.Store, int
 //
 // Printed always, not only when it is running, because "the command says so rather than appearing
 // to succeed silently" is a line about the case where it is NOT running. Nothing here starts it.
+//
+// THE ANSWER COMES FROM daemonLiveness AND IS NOT DERIVED HERE (Issue #41). This command previously
+// stat'ed a path named by an environment variable nothing in the product sets, which answered "not
+// running" unconditionally — a confident false negative that contradicted `omw daemon status` while
+// looking entirely normal. No package outside `internal/daemon` derives a control socket path, and
+// there is a test over the whole tree that keeps it that way.
+//
+// IT IS THREE-VALUED, and the third value is why this is a switch and not an if. Liveness that
+// could not be established is rendered as undetermined, with its reason and with the sentence that
+// stops a reader taking it for a stopped daemon (§4.3).
+//
+// The value does NOT change this command's exit code. These operations are local and need no daemon
+// (§4.4); the daemon's state is reported because criterion 20 requires it be said, not because
+// anything here depends on it. The exit code answers the question the person asked.
 func sayDaemon(env cli.Env) {
-	if reportDaemonRunning(env) {
+	live, why := daemonLiveness(env)
+	switch live {
+	case tri.Yes:
 		fmt.Fprintf(env.Stdout, "daemon: running\n")
-		return
+	case tri.No:
+		fmt.Fprintf(env.Stdout, "daemon: not running — subscriptions are written and read on this machine, and nothing here has started it\n")
+	default:
+		if why == "" {
+			why = "no reason was recorded, which is itself a thing that could not be determined"
+		}
+		fmt.Fprintf(env.Stdout, "daemon: whether it is running %s (code: %s)\n", tri.Undetermined, codeDaemonUndetermined)
+		fmt.Fprintf(env.Stdout, "  %s\n", why)
+		fmt.Fprintf(env.Stdout, "  this is not a report that the daemon is stopped; nothing about it has been established.\n")
+		fmt.Fprintf(env.Stdout, "  these subscriptions are local and need no daemon, so this report stands either way.\n")
 	}
-	fmt.Fprintf(env.Stdout, "daemon: not running — subscriptions are written and read on this machine, and nothing here has started it\n")
 }
 
 func reportSubscribe(env cli.Env, args []string) int {

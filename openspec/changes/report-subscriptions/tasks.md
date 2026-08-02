@@ -41,6 +41,8 @@ happen were deleted rather than left unticked; the pull request says which and w
 - [x] `omw report subscribe | show | list | run | subjects`
 - [x] Four exit codes: refusal, unmatched, undetermined, success
 - [x] Every operation says whether the daemon is running, and none of them starts it
+- [x] The daemon question routes through `daemonLiveness` (Issue #41) — three-valued, no socket
+      path derived here, and an undetermined daemon does not change a determined report's exit code
 - [x] No hub is read for anything local, and the flow cannot open a connection at all
 
 ## Tests, each driven red before being trusted
@@ -52,4 +54,5 @@ happen were deleted rather than left unticked; the pull request says which and w
 - [x] Refusal, unmatched, quiet day, undetermined and no-hub, pairwise distinct
 - [x] A record damaged on disk makes its subject undetermined and never `count: 0`
 - [x] A refused list leaves the previously stored subscription byte-identical
+- [x] All three liveness answers rendered and driven, the third one distinct in words and reason
 - [x] The report flow imports no `net`, `net/http`, `net/url` or `os/exec`, with a walk control

@@ -51,6 +51,11 @@ the honest way to guarantee zero is to have no `net` on the path.
 - **`omw report`** — `subscribe`, `show`, `list`, `run`, `subjects`. Exit codes: `ExitUsage` for a
   refusal, `ExitFailure` for an unmatched selector or a subject only a hub could answer,
   `ExitUndetermined` for a subject that could not be read, `Success` otherwise.
+- **The daemon question is asked once, not guessed.** `omw report` routes it through
+  `daemonLiveness` (Issue #41), which is three-valued: liveness that could not be established is
+  rendered as undetermined with its reason, never as a stopped daemon. No control socket path is
+  derived outside `internal/daemon`. The value does not change these commands' exit codes — they are
+  local and need no daemon (§4.4) — it is reported because criterion 20 requires it be said.
 - **The subject catalogue is small on purpose:** `git`, `git.commit`, `token_usage`, `channel` from
   the PRD, plus `published_notes` as the one hub-supplied subject criterion 23 needs to exist before
   it can be reported on. Nothing else was invented; adding one is a line in the catalogue.

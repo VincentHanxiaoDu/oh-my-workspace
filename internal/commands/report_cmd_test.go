@@ -13,6 +13,7 @@ import (
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/cli"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/reports"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/store"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri"
 )
 
 // reportRunner drives `omw report ...` IN THIS PROCESS, with a fully constructed environment.
@@ -33,15 +34,19 @@ func newReportRunner(t *testing.T) *reportRunner {
 	if _, err := store.Create(dir, store.AcceptUndeterminedLocation()); err != nil {
 		t.Skipf("this environment cannot create a store to test against: %v", err)
 	}
-	return &reportRunner{t: t, env: map[string]string{}, store: dir}
+	// The store is named in the ENVIRONMENT rather than by a flag, because the command resolves it
+	// the same way daemonLiveness does and the two must be about the same store. It is set to a
+	// t.TempDir(), so nothing here can reach the developer's own store or their device pointer.
+	return &reportRunner{t: t, env: map[string]string{store.PathEnv: dir}, store: dir}
 }
+
+func (r *reportRunner) getenv(k string) string { return r.env[k] }
 
 func (r *reportRunner) run(args ...string) (int, string, string) {
 	r.t.Helper()
 	var out, errb bytes.Buffer
 	full := append([]string{"report"}, args...)
-	full = append(full, "--store", r.store)
-	code := cli.Run(full, &out, &errb, func(k string) string { return r.env[k] })
+	code := cli.Run(full, &out, &errb, r.getenv)
 	return code, out.String(), errb.String()
 }
 
@@ -161,26 +166,64 @@ func TestSubscriptionOperationsSayTheDaemonIsNotRunningAndDoNotStartIt(t *testin
 		}
 	}
 
-	// AND IT IS STILL NOT RUNNING AFTERWARDS. The probe is the same one the command uses, so a
-	// command that had started something would be visible here.
-	if reportDaemonRunning(cli.Env{Getenv: func(k string) string { return r.env[k] }}) {
-		t.Error("something started the daemon")
+	// AND IT IS STILL NOT RUNNING AFTERWARDS, asked through the SAME function the command uses —
+	// which is the whole point of Issue #41: a second opinion here would be a second guess.
+	if live, why := daemonLiveness(cli.Env{Getenv: r.getenv}); live != tri.No {
+		t.Errorf("after four report operations, liveness is %v (%s) — want a determined no", live, why)
+	}
+}
+
+// THE OTHER TWO ANSWERS, DRIVEN. Without these the test above would pass for a command that printed
+// "not running" unconditionally — which is precisely the defect Issue #41 removed from four
+// surfaces, this one among them.
+//
+// daemonLiveness is stubbed here and ONLY here: this asserts the RENDERING of each of the three
+// answers. That the answer itself is right is asserted by `liveness_test.go`, against a real daemon
+// started by the real binary, and stubbing would prove nothing about it.
+func TestTheReportCommandRendersAllThreeLivenessAnswers(t *testing.T) {
+	r := newReportRunner(t)
+	real := daemonLiveness
+	t.Cleanup(func() { daemonLiveness = real })
+
+	daemonLiveness = func(cli.Env) (tri.Value, string) { return tri.Yes, "" }
+	_, running, _ := r.run("list")
+	if !strings.Contains(running, "daemon: running") {
+		t.Errorf("with the daemon running the command does not say so:\n%s", running)
+	}
+	if strings.Contains(running, "not running") {
+		t.Errorf("the running answer contains the negative's wording:\n%s", running)
 	}
 
-	// The other side of the probe: when the socket IS there, the command says running. Without this
-	// the assertion above would pass for a command that printed "not running" unconditionally.
-	sockDir, err := os.MkdirTemp("", "omw-report")
-	if err != nil {
-		t.Skipf("cannot make a directory to probe with: %v", err)
+	daemonLiveness = func(cli.Env) (tri.Value, string) { return tri.No, "" }
+	_, stopped, _ := r.run("list")
+	if !strings.Contains(stopped, "daemon: not running") {
+		t.Errorf("with the daemon stopped the command does not say so:\n%s", stopped)
 	}
-	defer os.RemoveAll(sockDir)
-	sock := filepath.Join(sockDir, "control.sock")
-	if err := os.WriteFile(sock, nil, 0o600); err != nil {
-		t.Skipf("cannot create a file to stand for the socket: %v", err)
+
+	daemonLiveness = func(cli.Env) (tri.Value, string) {
+		return tri.Undetermined, "the daemon lock could not be opened"
 	}
-	r.env["OMW_CONTROL_SOCKET"] = sock
-	if _, out, _ := r.run("list"); !strings.Contains(out, "daemon: running") {
-		t.Errorf("with the control socket present the command still reports it as not running:\n%s", out)
+	code, undetermined, _ := r.run("list")
+	if undetermined == stopped || undetermined == running {
+		t.Errorf("the third answer renders identically to a determined one:\n%s", undetermined)
+	}
+	if !strings.Contains(undetermined, tri.Undetermined.String()) {
+		t.Errorf("the third answer is not rendered in words:\n%s", undetermined)
+	}
+	if strings.Contains(undetermined, "daemon: not running") {
+		t.Errorf("liveness that could not be established was rendered as a stopped daemon:\n%s", undetermined)
+	}
+	if !strings.Contains(undetermined, "the daemon lock could not be opened") {
+		t.Errorf("the third answer dropped its reason:\n%s", undetermined)
+	}
+	if !strings.Contains(undetermined, "this is not a report that the daemon is stopped") {
+		t.Errorf("the third answer does not tell the reader it is not a negative:\n%s", undetermined)
+	}
+	// AND IT DOES NOT CHANGE THE ANSWER TO THE QUESTION THE PERSON ASKED. These operations are
+	// local and need no daemon (§4.4); an undetermined daemon must not turn a determined, complete
+	// subscription listing into an undetermined one.
+	if code != cli.Success {
+		t.Errorf("`omw report list` exited %d because the DAEMON's state was undetermined; the listing itself was determined", code)
 	}
 }
 
@@ -298,7 +341,8 @@ func TestReportCommandImportsAreNarrow(t *testing.T) {
 		t.Fatalf("parsing report_cmd.go: %v", err)
 	}
 	allowed := map[string]bool{
-		"errors": true, "fmt": true, "io": true, "os": true, "strings": true,
+		"errors": true, "fmt": true, "io": true, "strings": true,
+		"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri":     true,
 		"github.com/VincentHanxiaoDu/oh-my-workspace/internal/cli":     true,
 		"github.com/VincentHanxiaoDu/oh-my-workspace/internal/reports": true,
 		"github.com/VincentHanxiaoDu/oh-my-workspace/internal/store":   true,
@@ -315,6 +359,8 @@ func TestReportCommandImportsAreNarrow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading report_cmd.go: %v", err)
 	}
+	// daemonLiveness is the ONE exception and is deliberately not in this list: Issue #41 made it
+	// shared on purpose, and a command that avoided it would be the fifth guess.
 	for _, foreign := range []string{"reachHub(", "noteSource", "noteDaemonRunning", "parseNoteFlags"} {
 		if bytes.Contains(src, []byte(foreign)) {
 			t.Errorf("report_cmd.go uses %s from another Issue's file", foreign)
