@@ -25,7 +25,7 @@
 set -euo pipefail
 
 case "${1:-}" in
-  -*) [ "$1" = "--self-test" ] || {
+  -*) [ "$1" = "--self-test" ] || [ "$1" = "--main-state" ] || {
         echo "::error::unknown option '$1'. This is a typo, not an argument — refusing." >&2; exit 2; } ;;
 esac
 
@@ -77,7 +77,36 @@ self_test() {
   [ "$n" -ge 1 ] || { echo "SELF-TEST FAIL: a failing poll emitted nothing — an outage looks like 'no PRs'" >&2; rc=1; }
   [ "$n" -ge 2 ] || { echo "SELF-TEST FAIL: a failing poll emitted once and stopped — a transient outage must wake the role, not end the watch (got $n)" >&2; rc=1; }
 
-  [ "$rc" -eq 0 ] && echo "self-test passed: every outcome emits including the failing ones, unknown roles refuse, and a failed poll does not end the watch"
+  # MAIN'S THREE ANSWERS, DRIVEN. A red main reported as green is the whole reason this exists, and
+  # so is an unreadable one reported as green. Driven through the real entry point against a stub
+  # `gh`, so the parsing under test is the parsing that runs.
+  local body want got
+  tmp=$(mktemp -d)
+  cp "${BASH_SOURCE[0]}" "$tmp/watch-prs.sh"
+  while IFS='|' read -r body want; do
+    [ -n "$body" ] || continue
+    printf '#!/usr/bin/env bash\ncat <<'\''J'\''\n%s\nJ\n' "$body" > "$tmp/gh"; chmod +x "$tmp/gh"
+    got=$(PATH="$tmp:$PATH" REPO=x/y bash "$tmp/watch-prs.sh" --main-state 2>/dev/null || echo "")
+    case "$got" in
+      *"$want"*) : ;;
+      *) echo "SELF-TEST FAIL: main_state said '$got' — expected it to contain '$want'" >&2; rc=1 ;;
+    esac
+  done <<'CASES'
+{"workflow_runs":[{"status":"completed","conclusion":"success","head_sha":"abcdef1234"}]}|main is GREEN
+{"workflow_runs":[{"status":"completed","conclusion":"failure","head_sha":"abcdef1234"}]}|MAIN IS RED
+{"workflow_runs":[{"status":"in_progress","conclusion":null,"head_sha":"abcdef1234"}]}|still running
+{"workflow_runs":[]}|MAIN STATE UNKNOWN
+CASES
+  # AND WHEN THE LOOKUP ITSELF FAILS. An outage must not be spelled the same way as a green main.
+  printf '#!/usr/bin/env bash\necho boom >&2\nexit 1\n' > "$tmp/gh"; chmod +x "$tmp/gh"
+  got=$(PATH="$tmp:$PATH" REPO=x/y bash "$tmp/watch-prs.sh" --main-state 2>/dev/null || echo "")
+  case "$got" in
+    *"MAIN STATE UNKNOWN"*) : ;;
+    *) echo "SELF-TEST FAIL: a failed lookup of main said '$got' — an outage must not read as a colour" >&2; rc=1 ;;
+  esac
+  rm -rf "$tmp"
+
+  [ "$rc" -eq 0 ] && echo "self-test passed: every outcome emits including the failing ones, main's colour has three answers plus an outage, unknown roles refuse, and a failed poll does not end the watch"
   return $rc
 }
 
@@ -85,7 +114,7 @@ self_test() {
 
 role=${1:?usage: watch-prs.sh <role> [interval-seconds] | --self-test}
 interval=${2:-60}
-case "$role" in dev|qa|product|ops|pm) : ;; *) echo "::error::'$role' is not a role." >&2; exit 2 ;; esac
+case "$role" in dev|qa|product|ops|pm|--main-state) : ;; *) echo "::error::'$role' is not a role." >&2; exit 2 ;; esac
 
 resolve_repo
 seen=""
@@ -96,6 +125,35 @@ emit() { # emit <state> <number> <title> [detail]
   seen="$seen[$key]"
   if [ -n "${4:-}" ]; then echo "$1 #$2  $3  —  $4"; else echo "$1 #$2  $3"; fi
 }
+
+# WHAT MAIN LOOKS LIKE, READ FROM THE PUSH RUN AND NOT FROM ITS CHECK RUNS. `issue_comment` fires
+# from the default branch, so its jobs — conditioned out for anything but a pull request — file
+# themselves as **skipped check runs against main's head sha**, timestamped after the real push run.
+# Reading check runs therefore returns "skipped" for a build that actually passed, and would return
+# "skipped" just the same for one that actually failed. The push run is the only place main's real
+# colour survives.
+#
+# THREE ANSWERS, NEVER TWO. A run still going is not a pass, and a lookup that failed is not a pass
+# either; both would otherwise be spelled the same way as green and a red main would go unmentioned.
+main_state() {
+  local run concl st sha
+  run=$(gh api "repos/$REPO/actions/runs?branch=main&event=push&per_page=1" 2>/dev/null) || {
+    echo "MAIN STATE UNKNOWN (could not read the push run — check main yourself before merging more)"
+    return 0
+  }
+  st=$(printf '%s' "$run" | jq -r '.workflow_runs[0].status // ""' 2>/dev/null || echo "")
+  concl=$(printf '%s' "$run" | jq -r '.workflow_runs[0].conclusion // ""' 2>/dev/null || echo "")
+  sha=$(printf '%s' "$run" | jq -r '.workflow_runs[0].head_sha // "" | .[0:8]' 2>/dev/null || echo "")
+  case "$st|$concl" in
+    "|"|"")        echo "MAIN STATE UNKNOWN (no push run found on main — check main yourself)" ;;
+    *"|success")   echo "main is GREEN at ${sha:-?}" ;;
+    completed"|"*) echo "MAIN IS RED at ${sha:-?} (${concl:-no conclusion}) — YOU merged into it, so this is yours to fix before merging anything else" ;;
+    *)             echo "main's build is still running at ${sha:-?} — not green yet, watch it out" ;;
+  esac
+}
+
+# The self-test drives main's colour through this, so what it asserts is what the watch runs.
+[ "$role" = "--main-state" ] && { main_state; exit 0; }
 
 while true; do
   # REST, not GraphQL: `gh pr list` is a GraphQL call and that quota runs out on its own schedule,
@@ -192,10 +250,27 @@ while true; do
   done < <(printf '%s' "$prs" | jq -r '.[] | [.number, .title, .head.ref, .head.sha] | @tsv' 2>/dev/null || true)
 
   # Recently merged ones, so an agent learns its work landed rather than polling for it.
+  #
+  # TWO ROLES HEAR ABOUT ONE MERGE, AND THEY HEAR DIFFERENT THINGS. The author learns its work
+  # landed. **The role that merged learns what main looks like afterwards** — which nothing told it
+  # before, so a merge was performed and its result was observed by nobody. The loop was declared
+  # closed at "merged and the Issue closed"; a merge produces a new state that no one consumed.
+  #
+  # THE MERGER IS DERIVED FROM THE BRANCH TYPE, NOT FROM `merged_by`. Every role authenticates as
+  # the same GitHub account, so `merged_by.login` is identical for all of them and carries no role.
+  # What does carry it is the rule that put the pull request in somebody's merge queue in the first
+  # place — `queue.sh` routes `feat`/`spec` to product and everything else to qa. Same rule here, so
+  # the role told to merge it is the role told how it went.
   if merged=$(gh api "repos/$REPO/pulls?state=closed&per_page=20&sort=updated&direction=desc" 2>/dev/null); then
+    mainstate=""
     while IFS=$'\t' read -r num title branch; do
       [ -n "$num" ] || continue
       case "$branch" in "$role"/*) emit MERGED "$num" "$title" ;; esac
+
+      case "$branch" in */feat/*|*/spec/*) merger=product ;; *) merger=qa ;; esac
+      [ "$merger" = "$role" ] || continue
+      [ -n "$mainstate" ] || mainstate=$(main_state)
+      emit MERGED "$num" "$title" "you merged this — $mainstate"
     done < <(printf '%s' "$merged" | jq -r '.[] | select(.merged_at != null) | [.number, .title, .head.ref] | @tsv' 2>/dev/null || true)
   fi
 
