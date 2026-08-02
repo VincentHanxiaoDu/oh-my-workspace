@@ -76,3 +76,17 @@
       when Go's zero time is year 0001, so it could not fail for the reason it was named for
 - [x] Make every declared acknowledgement reachable — `"+1"` was declared and never matched — and
       add a test over the whole list so a dead entry fails on the commit that adds it
+
+## Review round 2 — `main` moved: Issue #41's one liveness answer
+
+- [x] Merge `origin/main`, which now carries Issue #41 (PR #43): one answer to whether the daemon is
+      running, and one place that derives a control-socket path
+- [x] Delete `internal/inbox/presence.go` and the socket knowledge in it, rather than updating it —
+      the path is `internal/daemon`'s, and a second copy is wrong on the runtime-directory fallback
+- [x] Ask `daemonLiveness` for the daemon's state, and render all three of its values
+- [x] Print the "read from the store on disk" sentence only where an absence has been ESTABLISHED,
+      never where liveness could not be determined
+- [x] Stop answering the control API's state from the inbox and point at the surface that owns it,
+      recording on the pull request that this is a criterion of #8 reassigned by #41
+- [x] Drive the merged tree — `main` + this branch — rather than only this branch, since CI tests
+      each head against its own base and cannot see this class of break

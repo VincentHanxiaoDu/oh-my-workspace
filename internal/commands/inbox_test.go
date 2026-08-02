@@ -2,7 +2,6 @@ package commands
 
 import (
 	"bytes"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +14,7 @@ import (
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/cli"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/inbox"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/store"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri"
 )
 
 // runInboxCmd drives `omw inbox ...` the way a person does, through the real registry, and returns
@@ -38,42 +38,6 @@ func inboxEnv(t *testing.T) (map[string]string, string, *store.Store) {
 		t.Fatalf("creating a store to test against: %v", err)
 	}
 	return map[string]string{store.PathEnv: root, "HOME": t.TempDir()}, root, s
-}
-
-// shortPathInboxEnv is inboxEnv for the one test that needs to bind a unix socket inside the store.
-//
-// WHY IT EXISTS. A unix socket path has a hard length limit of about a hundred bytes, and the
-// default temporary directory on at least one of the two platforms this product ships for is long
-// enough on its own — with the test's name embedded in it, as t.TempDir does — that the bind fails
-// before the criterion has been staged. The first version of criterion 15's test SKIPPED for that
-// reason, and a skipped test is not a test.
-//
-// The shorter location is FOUND, not named: each candidate is tried by actually binding a socket in
-// it, and the first that works is used. Nothing here asks which operating system this is.
-func shortPathInboxEnv(t *testing.T) (map[string]string, string) {
-	t.Helper()
-	for _, base := range []string{os.TempDir(), "/tmp", ""} {
-		dir, err := os.MkdirTemp(base, "omw")
-		if err != nil {
-			continue
-		}
-		probe := filepath.Join(dir, "probe.sock")
-		l, err := net.Listen("unix", probe)
-		if err != nil {
-			_ = os.RemoveAll(dir)
-			continue
-		}
-		_ = l.Close()
-		_ = os.Remove(probe)
-		t.Cleanup(func() { _ = os.RemoveAll(dir) })
-		root := filepath.Join(dir, "s")
-		if _, err := store.Create(root); err != nil {
-			t.Fatalf("creating a store at %s: %v", root, err)
-		}
-		return map[string]string{store.PathEnv: root, "HOME": t.TempDir()}, root
-	}
-	t.Skip("no directory on this machine will hold a bindable unix socket, so this cannot be staged")
-	return nil, ""
 }
 
 func seed(t *testing.T, s *store.Store, tickets ...inbox.Ticket) {
@@ -610,10 +574,8 @@ func TestCouldNotDetermineAndDeterminedToBeNothingNeverShareAnExitCode(t *testin
 func TestAnInboxCommandSaysTheDaemonIsNotRunningAndDoesNotStartIt(t *testing.T) {
 	env, root, s := inboxEnv(t)
 	seed(t, s, inbox.Ticket{ID: "t1", Title: inbox.Text("an obligation"), Summary: inbox.Text("...")})
-	sock := filepath.Join(root, inbox.ControlSocketName)
-	if _, err := os.Stat(sock); err == nil {
-		t.Fatalf("a control socket exists before anything ran, so this asserts nothing")
-	}
+	before := treeSnapshot(t, root)
+
 	for _, args := range [][]string{{"list"}, {"read", "t1"}, {"delete", "t1"}} {
 		code, stdout, errOut := runInboxCmd(t, env, args...)
 		if code != cli.Success {
@@ -625,66 +587,123 @@ func TestAnInboxCommandSaysTheDaemonIsNotRunningAndDoesNotStartIt(t *testing.T) 
 		if !strings.Contains(stdout, "not running") {
 			t.Errorf("the listing does not say the daemon is not running:\n%s", stdout)
 		}
-		if !strings.Contains(stdout, "not a live inbox") {
-			t.Errorf("the listing does not say it read the store rather than a live inbox:\n%s", stdout)
+		if !strings.Contains(stdout, "read from the store on disk") {
+			t.Errorf("the listing does not say what it read instead:\n%s", stdout)
 		}
 	}
-	if _, err := os.Stat(sock); err == nil {
-		t.Errorf("an inbox command started the daemon; nothing is implicit (PRD §4.2)")
+	// NOTHING WAS STARTED, asked of the store rather than of a socket path this package is no
+	// longer allowed to know (Issue #41). A daemon that started would leave its lock and run record
+	// here; the delete above is the only difference the tree is permitted to show.
+	after := treeSnapshot(t, root)
+	for path := range after {
+		if _, existed := before[path]; !existed {
+			t.Errorf("an inbox command created %s — nothing is implicit (PRD §4.2)", path)
+		}
+	}
+}
+
+// THE THREE LIVENESS ANSWERS RENDER DISTINGUISHABLY, AND ONLY ONE OF THEM MAY CLAIM AN ABSENCE.
+//
+// daemonLiveness is stubbed here BECAUSE THIS IS ABOUT THE RENDERING. Whether the inbox's answer
+// AGREES with `omw daemon status` is not asserted here and must not be: it is driven against a
+// really-started daemon by TestEveryDaemonReportingSurfaceAgreesWithDaemonStatus, which walks every
+// registered command and therefore already covers `omw inbox`. A stub proves the rendering; only a
+// started daemon proves the answer, and conflating the two is how #29 passed its own tests while
+// printing a confident false negative.
+func TestTheInboxRendersTheThreeLivenessAnswersAndClaimsAnAbsenceOnlyForNo(t *testing.T) {
+	env, _, s := inboxEnv(t)
+	seed(t, s, inbox.Ticket{ID: "t1", Title: inbox.Text("an obligation"), Summary: inbox.Text("...")})
+
+	prev := daemonLiveness
+	t.Cleanup(func() { daemonLiveness = prev })
+
+	out := map[tri.Value]string{}
+	for _, c := range []struct {
+		live tri.Value
+		why  string
+	}{
+		{tri.Yes, ""},
+		{tri.No, ""},
+		{tri.Undetermined, "the lock could not be opened"},
+	} {
+		daemonLiveness = func(cli.Env) (tri.Value, string) { return c.live, c.why }
+		code, stdout, errOut := runInboxCmd(t, env, "list")
+		if code != cli.Success {
+			t.Fatalf("listing with liveness %v exited %d: %s", c.live, code, errOut)
+		}
+		out[c.live] = strings.TrimSpace(lineWith(stdout, "daemon:"))
+		if out[c.live] == "" {
+			t.Fatalf("liveness %v is not reported at all:\n%s", c.live, stdout)
+		}
+
+		// THE CLAIM THAT DEPENDS ON A "NO" IS MADE ONLY FOR A "NO". This is Issue #41's criterion 5
+		// and the reason this branch was refused: the old probe printed it unconditionally.
+		claimsAbsence := strings.Contains(stdout, "read from the store on disk")
+		if c.live == tri.No && !claimsAbsence {
+			t.Errorf("with the daemon established as stopped, the listing does not say what it read:\n%s", stdout)
+		}
+		if c.live != tri.No && claimsAbsence {
+			t.Errorf("with liveness %v, the listing explains itself by an absence that has not been "+
+				"established (Issue #41 criterion 5):\n%s", c.live, stdout)
+		}
+		if c.live == tri.Undetermined {
+			if !strings.Contains(stdout, "not a report that the daemon is stopped") {
+				t.Errorf("an undetermined liveness is not distinguished from a stopped daemon:\n%s", stdout)
+			}
+			if !strings.Contains(stdout, c.why) {
+				t.Errorf("an undetermined liveness does not say why:\n%s", stdout)
+			}
+		}
+	}
+	// Pairwise, never against a literal.
+	for _, pair := range [][2]tri.Value{{tri.Yes, tri.No}, {tri.Yes, tri.Undetermined}, {tri.No, tri.Undetermined}} {
+		if out[pair[0]] == out[pair[1]] {
+			t.Errorf("liveness %v and %v render identically as %q", pair[0], pair[1], out[pair[0]])
+		}
 	}
 }
 
 // ---------------------------------------------------------------------------
-// CRITERION 15 — the control API, and what it says when it will not open.
+// CRITERION 15 — the control API, which the inbox no longer answers.
 // ---------------------------------------------------------------------------
 
-// PROBED, NOT NAMED. Whether this environment can hold a unix socket at this path is discovered by
-// trying to make one; the test does not ask which operating system it is on, because PRD §5.1 ships
-// two of them and an assertion that names one says nothing about the other.
-func TestWhenOwnerOnlyPermissionsCannotBeConfirmedTheControlAPIDoesNotOpenAndSaysSo(t *testing.T) {
-	env, root := shortPathInboxEnv(t)
-	sock := filepath.Join(root, inbox.ControlSocketName)
-	l, err := net.Listen("unix", sock)
-	if err != nil {
-		t.Skipf("a unix socket cannot be created at %s here, so this criterion cannot be staged: %v", sock, err)
-	}
-	defer l.Close()
+// ISSUE #8's CRITERION 15 HAS BEEN REASSIGNED BY ISSUE #41, AND THIS TEST RECORDS THAT RATHER THAN
+// PRETENDING EITHER WAY.
+//
+// #8 asks that the inbox command say when the control API did not open because owner-only socket
+// permissions could not be confirmed. It did — from a probe that named the control socket's file
+// name itself, which #41 then ruled out: exactly one place in the product derives a control-socket
+// path, because `internal/daemon` falls back to a per-user runtime directory above the kernel's
+// sun_path limit and any second copy is wrong on the fallback path. The old answer was also simply
+// wrong, which is how this branch was refused the first time.
+//
+// So what is asserted is what remains true: the inbox does not answer, it does not stay silent
+// either, and the pointer it prints is not confusable with an empty inbox or with a hub error.
+func TestTheInboxDoesNotAnswerTheControlAPIItselfAndPointsAtTheOneSurface(t *testing.T) {
+	env, _, _ := inboxEnv(t)
+	_, stdout, _ := runInboxCmd(t, env, "list")
 
-	// Owner-only: the control API may open.
-	if err := os.Chmod(sock, 0o600); err != nil {
-		t.Fatalf("setting owner-only permissions: %v", err)
+	line := strings.TrimSpace(lineWith(stdout, "control api:"))
+	if line == "" {
+		t.Fatalf("the control API is not mentioned at all; silence is not an answer (PRD §4.3):\n%s", stdout)
 	}
-	_, ownerOnly, _ := runInboxCmd(t, env, "list")
-
-	// Not owner-only: it must NOT open, and must say which.
-	if err := os.Chmod(sock, 0o666); err != nil {
-		t.Skipf("this filesystem does not honour a permission change on a socket: %v", err)
+	if !strings.Contains(line, "omw daemon status") {
+		t.Errorf("the control API line does not name the surface that answers it: %q", line)
 	}
-	if info, serr := os.Stat(sock); serr != nil || info.Mode().Perm()&0o077 == 0 {
-		t.Skipf("the permission change did not take on this filesystem, so nothing would be asserted")
+	// Not confusable with the two things criterion 15 names.
+	if strings.Contains(strings.ToLower(line), "hub") {
+		t.Errorf("the control API line is worded as a hub error: %q", line)
 	}
-	_, wideOpen, _ := runInboxCmd(t, env, "list")
-
-	// And an empty inbox with no socket at all, to compare all three against.
-	emptyEnv, _, _ := inboxEnv(t)
-	_, emptyInbox, _ := runInboxCmd(t, emptyEnv, "list")
-
-	line := func(s string) string { return strings.TrimSpace(lineWith(s, "control api:")) }
-	if line(ownerOnly) == "" || line(wideOpen) == "" || line(emptyInbox) == "" {
-		t.Fatalf("the control API is not reported at all:\n%s", emptyInbox)
+	if strings.Contains(strings.ToLower(line), "empty") {
+		t.Errorf("the control API line is worded like an empty inbox: %q", line)
 	}
-	if line(ownerOnly) == line(wideOpen) {
-		t.Errorf("an owner-only socket and one anybody can reach report the same control API state: %q", line(ownerOnly))
-	}
-	if !strings.Contains(wideOpen, "owner-only") && !strings.Contains(wideOpen, "not open") {
-		t.Errorf("the command does not say why the control API did not open:\n%s", wideOpen)
-	}
-	// Distinguishable from an empty inbox, which is the confusion criterion 15 names.
-	if wideOpen == emptyInbox {
-		t.Errorf("a control API that would not open renders identically to an empty inbox")
-	}
-	if strings.Contains(strings.ToLower(line(wideOpen)), "hub") {
-		t.Errorf("the control API's refusal is worded as a hub error: %q", line(wideOpen))
+	// AND IT MUST NOT CLAIM A STATE. The defect was a confident answer from a probe that could not
+	// support one; a pointer that says "not open" would be the same defect with fewer words.
+	for _, claim := range []string{"not open", "is open", "could not be confirmed"} {
+		if strings.Contains(line, claim) {
+			t.Errorf("the inbox claims the control API is %q; it no longer has the standing to "+
+				"answer that, and `omw daemon status` does: %q", claim, line)
+		}
 	}
 }
 

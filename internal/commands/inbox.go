@@ -14,9 +14,11 @@
 //  3. NOTHING HERE REACHES A HUB, and there is no configuration under which it would (criterion 6,
 //     7, 8). There is no hub client imported, no address read, no connection opened. The header
 //     says so rather than leaving its absence to be inferred from silence.
-//  4. NOTHING HERE STARTS THE DAEMON (§4.2, criterion 13). It stats a socket and reports what it
-//     found, including that it could not tell — and it says which of the two it is looking at, so a
-//     listing off the disk is never mistaken for a live one.
+//  4. NOTHING HERE STARTS THE DAEMON (§4.2, criterion 13), AND NOTHING HERE WORKS OUT WHETHER ONE
+//     IS RUNNING. It asks daemonLiveness, which is the same answer `omw daemon status` gives, and
+//     it reports all three of that answer's values. It used to stat a socket whose name this
+//     package had guessed, and printed a confident "not running" whatever the daemon was doing —
+//     see the note on header, and Issue #41.
 //
 // (Detached from the package clause on purpose: doc.go carries this package's doc comment, and
 // several Issues add files here concurrently.)
@@ -163,22 +165,47 @@ func openInbox(env cli.Env) (*store.Store, string, int) {
 
 // header states what the person is looking at BEFORE the tickets, because two of the criteria are
 // about not being misled by a listing that looks live, or that looks like it consulted a hub.
+//
+// THE DAEMON ANSWER IS NOT THIS FILE'S TO WORK OUT (Issue #41). It used to be: this command asked
+// an inbox-local probe that stat'ed a control socket whose name the inbox package had guessed, and
+// it therefore printed a confident "not running" whatever the daemon was doing. Three surfaces made
+// the same locally-reasonable mistake on the same day. The answer now comes from daemonLiveness,
+// which asks daemon.Inspect — the same function `omw daemon status` answers from, which is the only
+// construction under which the two cannot disagree.
+//
+// IT IS THREE-VALUED, AND THE THIRD VALUE CHANGES WHAT MAY BE SAID. The "read from the store on
+// disk" sentence is printed ONLY when it is ESTABLISHED that no daemon is running. Where liveness
+// could not be determined, the inbox has not established an absence and may not explain itself by
+// one — that is #41's criterion 5, and it is the same rule as §4.3 read one level up: a claim that
+// rests on a "no" must not be made on an "I could not tell".
 func header(env cli.Env, root string) {
-	p := inbox.Probe(root)
 	fmt.Fprintf(env.Stdout, "inbox:       %s\n", root)
 
 	// §4.2 / criterion 13. Said, in three values, and never by starting anything.
-	fmt.Fprintf(env.Stdout, "daemon:      %s\n", p.Running.Render("running", "not running"))
-	fmt.Fprintf(env.Stdout, "             %s\n", p.RunningWhy)
-	if p.Running != tri.Yes {
-		fmt.Fprintf(env.Stdout, "             this listing is the store on disk, not a live inbox, and this\n")
-		fmt.Fprintf(env.Stdout, "             command has not started anything\n")
+	live, why := daemonLiveness(env)
+	fmt.Fprintf(env.Stdout, "daemon:      %s\n", live.Render("running", "not running"))
+	if why != "" {
+		fmt.Fprintf(env.Stdout, "             %s\n", why)
+	}
+	switch live {
+	case tri.No:
+		fmt.Fprintf(env.Stdout, "             these tickets were read from the store on disk, and this command\n")
+		fmt.Fprintf(env.Stdout, "             has not started anything (PRD §4.2)\n")
+	case tri.Undetermined:
+		// NOT AN ABSENCE, AND SAID SO. Without this the reader takes the line above for a stopped
+		// daemon, which is the exact collapse §4.3 forbids.
+		fmt.Fprintf(env.Stdout, "             this is not a report that the daemon is stopped; nothing about it\n")
+		fmt.Fprintf(env.Stdout, "             has been established. 'omw daemon status' reports the same state.\n")
 	}
 
-	// §4.6 / §5.1 / criterion 15. Its own line, distinguishable from an empty inbox and from any
-	// hub wording, because "the control API declined to open" is a third thing and not either.
-	fmt.Fprintf(env.Stdout, "control api: %s\n", p.ControlAPIOpen.Render("open", "not open"))
-	fmt.Fprintf(env.Stdout, "             %s\n", p.ControlWhy)
+	// §4.6 / §5.1 / Issue #8 criterion 15. THE INBOX NO LONGER ANSWERS THIS, and the pointer is
+	// what is left of it. Whether the control API is open — including the case where owner-only
+	// socket permissions could not be confirmed and it therefore did not open — is reported by
+	// `omw daemon status`, which reads it from the daemon that owns the socket. The inbox restating
+	// it from its own probe is precisely the four-answers defect Issue #41 removed, and the answer
+	// it used to give was wrong. See the pull request: this is a criterion of #8 that #41 has
+	// reassigned to another surface, and it is flagged rather than quietly dropped.
+	fmt.Fprintf(env.Stdout, "control api: reported by 'omw daemon status', which is the one surface for it\n")
 
 	// §2.3 / criteria 6-8. Stated, not left to be inferred from an absence of output.
 	fmt.Fprintf(env.Stdout, "hub:         not contacted, and there is no operation here that would.\n")
