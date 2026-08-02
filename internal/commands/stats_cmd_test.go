@@ -289,7 +289,7 @@ func TestStatsHubUnreachableIsNotTheHubReportingNothing(t *testing.T) {
 	if !strings.Contains(statLine(t, unreachable.out(), "hub", "notes"), hub.ErrHubUnreachable.Code) {
 		t.Fatalf("the unreachable hub did not name its reason:\n%s", unreachable.out())
 	}
-	if statLine(t, nothing.out(), "hub", "recency") == hub.UndeterminedToken {
+	if strings.Contains(statLine(t, nothing.out(), "hub", "recency"), hub.UndeterminedToken) {
 		t.Fatalf("a hub that answered with nothing readable reported undetermined recency; criterion 13 wants a determined none:\n%s", nothing.out())
 	}
 }
