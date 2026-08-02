@@ -26,7 +26,6 @@ package commands
 import (
 	"fmt"
 	"io"
-	"os"
 	"strings"
 
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/cli"
@@ -46,7 +45,6 @@ func init() {
 // Environment this command reads. Its own constants, not shared with another command file.
 const (
 	statsEnvHub      = "OMW_HUB"
-	statsEnvSocket   = "OMW_CONTROL_SOCKET"
 	statsEnvIdentity = "OMW_IDENTITY"
 	statsEnvScopes   = "OMW_SCOPES"
 	statsEnvOutbox   = "OMW_OUTBOX"
@@ -65,20 +63,16 @@ var statsSource = func(env cli.Env) (*hub.Store, error) {
 	return nil, hub.ErrHubUnreachable
 }
 
-// statsDaemonRunning reports whether the daemon is up.
+// THIS COMMAND ASKS NOTHING OF ITS OWN ABOUT THE DAEMON. Whether one is running against this store
+// has exactly one definition — `daemonLiveness` in liveness.go, which wraps `daemon.Inspect`, the
+// same call `omw daemon status` makes (Issue #41). This file derives no socket path and names no
+// socket variable: a second copy of that rule is not merely duplicated, it is wrong on the
+// runtime-directory fallback, so the two would disagree about the same running daemon.
 //
-// IT PROBES, IT DOES NOT NAME. The socket path comes from the environment and its existence is the
-// answer; nothing here assumes a platform's convention for where a socket lives. PRD §4.2 and
-// criterion 10: the daemon is never started on the person's behalf, and this command contains no
-// code that could start one.
-var statsDaemonRunning = func(env cli.Env) bool {
-	p := strings.TrimSpace(env.Getenv(statsEnvSocket))
-	if p == "" {
-		return false
-	}
-	_, err := os.Stat(p)
-	return err == nil
-}
+// It is three-valued, and that fits this Issue exactly. A statistic computed while liveness is
+// unknown is UNDETERMINED, not zero — the same distinction this whole file draws between
+// `count: 0` and a count that could not be worked out. A confident "the daemon is not running" is
+// itself a determined claim, and it must not be made from an undetermined answer.
 
 // statsGrant builds the grant this request is issued under. Sign-in and token material are Issue
 // #19's; until they exist the identity and held scopes come from the environment.
@@ -207,8 +201,19 @@ func statsHub(env cli.Env, scope hub.SearchScope, as hub.PersonID) (hub.Statisti
 	if strings.TrimSpace(env.Getenv(statsEnvHub)) == "" {
 		return hub.UndeterminedStatistics(scope, as, hub.ErrNoHubConfigured), nil
 	}
-	if !statsDaemonRunning(env) {
+	switch live, why := daemonLiveness(env); live {
+	case tri.Yes:
+		// the daemon is up; carry on to the hub
+	case tri.No:
 		return hub.UndeterminedStatistics(scope, as, hub.ErrDaemonNotRunning), nil
+	default:
+		// NOT A NEGATIVE. Nothing established that the daemon is stopped, so the statistics are
+		// undetermined for a reason of their own, with its own code.
+		if why != "" {
+			fmt.Fprintf(env.Stderr, "omw stats: %s\n", why)
+		}
+		fmt.Fprintf(env.Stderr, "omw stats: this is not a report that the daemon is stopped; nothing about it has been established.\n")
+		return hub.UndeterminedStatistics(scope, as, hub.ErrDaemonLivenessUndetermined), nil
 	}
 	grant, err := statsGrant(env)
 	if err != nil {
@@ -238,7 +243,7 @@ func statsHub(env cli.Env, scope hub.SearchScope, as hub.PersonID) (hub.Statisti
 // arrived as prose would make criterion 12's distinction unreadable by a script.
 func statsErrorOf(err error) *hub.Error {
 	for _, candidate := range []*hub.Error{
-		hub.ErrNotSignedIn, hub.ErrUnknownScope, hub.ErrReadScopeRequired,
+		hub.ErrDaemonLivenessUndetermined, hub.ErrNotSignedIn, hub.ErrUnknownScope, hub.ErrReadScopeRequired,
 		hub.ErrGrantWiderThanHolder, hub.ErrHubUnreachable, hub.ErrNoHubConfigured,
 		hub.ErrDaemonNotRunning, hub.ErrUndetermined,
 	} {

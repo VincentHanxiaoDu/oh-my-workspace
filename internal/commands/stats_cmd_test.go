@@ -12,23 +12,29 @@ import (
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/cli"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/drafts"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/hub"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri"
 )
 
 // --- harness --------------------------------------------------------------------------------
 
 // statsWorld is one run of `omw stats`.
 //
-// THE ENVIRONMENT IS PROBED, NOT NAMED. The control-socket path is a file inside t.TempDir() whose
-// existence this test controls, and the outbox is a directory this test creates with the real
-// constructor. Nothing here assumes a platform's convention for where a socket or a store lives,
-// and nothing branches on runtime.GOOS: a test that named a path would pass or fail for reasons
-// belonging to the machine rather than to the code.
+// THE ENVIRONMENT IS PROBED, NOT NAMED. Whether the daemon is running comes from the product's ONE
+// answer, `daemonLiveness`, which this harness drives through its three values; this file names no
+// socket path and no socket variable, because `internal/daemon` owns that rule and a second copy of
+// it is wrong on the runtime-directory fallback. The outbox is a directory created with the real
+// `drafts.Create`. Nothing branches on runtime.GOOS: a test that named a path would pass or fail
+// for reasons belonging to the machine rather than to the code.
 type statsWorld struct {
-	env    map[string]string
-	socket string
-	stdout bytes.Buffer
-	stderr bytes.Buffer
-	code   int
+	env map[string]string
+	// live is what the ONE liveness answer says for this run. It is a tri.Value, not a bool: a
+	// liveness that could not be established is a third state and this command must not render it
+	// as a stopped daemon (Issue #41).
+	live    tri.Value
+	liveWhy string
+	stdout  bytes.Buffer
+	stderr  bytes.Buffer
+	code    int
 	// sourceCalled records whether the command tried to reach a hub. Criterion 11 is asserted on
 	// it: with no hub configured, the function that would open a connection is never entered.
 	sourceCalled bool
@@ -36,16 +42,24 @@ type statsWorld struct {
 
 func newStatsWorld(t *testing.T) *statsWorld {
 	t.Helper()
-	return &statsWorld{env: map[string]string{}, socket: filepath.Join(t.TempDir(), "omw.sock")}
+	// tri.No is the default because it is the state a machine is in before anything is started,
+	// and because the ZERO value of tri is Undetermined — which would silently make every run of
+	// this harness the third case if it were left unset.
+	return &statsWorld{env: map[string]string{}, live: tri.No}
 }
 
-// withDaemon creates the socket file so the command's PROBE finds one.
+// withDaemon says the one liveness answer reports a running daemon.
 func (w *statsWorld) withDaemon(t *testing.T) *statsWorld {
 	t.Helper()
-	if err := os.WriteFile(w.socket, nil, 0o600); err != nil {
-		t.Fatalf("create socket stand-in: %v", err)
-	}
-	w.env[statsEnvSocket] = w.socket
+	w.live = tri.Yes
+	return w
+}
+
+// withUndeterminedLiveness says the one liveness answer could not be established — a lock that
+// cannot be read, a store that cannot be resolved. It is NOT a stopped daemon.
+func (w *statsWorld) withUndeterminedLiveness(why string) *statsWorld {
+	w.live = tri.Undetermined
+	w.liveWhy = why
 	return w
 }
 
@@ -72,8 +86,9 @@ func (w *statsWorld) withOutbox(t *testing.T, draftNames ...string) *statsWorld 
 
 func (w *statsWorld) run(t *testing.T, store *hub.Store, args ...string) *statsWorld {
 	t.Helper()
-	orig := statsSource
-	t.Cleanup(func() { statsSource = orig })
+	orig, origLive := statsSource, daemonLiveness
+	t.Cleanup(func() { statsSource, daemonLiveness = orig, origLive })
+	daemonLiveness = func(cli.Env) (tri.Value, string) { return w.live, w.liveWhy }
 	statsSource = func(cli.Env) (*hub.Store, error) {
 		w.sourceCalled = true
 		if store == nil {
@@ -300,9 +315,6 @@ func TestStatsStartsNoDaemon(t *testing.T) {
 	w := newStatsWorld(t).withHub().as("searcher").scopes("read")
 	w.run(t, statsHubCorpus(t))
 
-	if _, err := os.Stat(w.socket); err == nil {
-		t.Fatalf("omw stats created the daemon's socket — PRD §4.2: no command starts the daemon on a person's behalf")
-	}
 	if w.sourceCalled {
 		t.Fatalf("with no daemon running the command reached for a hub anyway:\n%s", w.all())
 	}
@@ -311,15 +323,60 @@ func TestStatsStartsNoDaemon(t *testing.T) {
 	}
 
 	// STRUCTURAL, and honestly labelled as such: this asserts the command has no code that could
-	// start a process, which is stronger than observing that this one run did not.
+	// start a process, and no code that reconstructs the daemon's socket path — the second is
+	// Issue #41's rule, that whether a daemon is running has exactly one definition.
 	src, err := os.ReadFile("stats_cmd.go")
 	if err != nil {
 		t.Fatalf("read own source: %v", err)
 	}
-	for _, banned := range []string{"exec.Command", "os/exec", "syscall.ForkExec", "cmd.Start("} {
+	for _, banned := range []string{"exec.Command", "os/exec", "syscall.ForkExec", "cmd.Start(", "OMW_CONTROL_SOCKET", "control.sock"} {
 		if strings.Contains(string(src), banned) {
-			t.Fatalf("stats_cmd.go contains %q — a statistics request must have no way to start a daemon", banned)
+			t.Fatalf("stats_cmd.go contains %q — a statistics request must neither start a daemon nor guess at whether one is running", banned)
 		}
+	}
+	if !strings.Contains(string(src), "daemonLiveness(env)") {
+		t.Fatalf("stats_cmd.go does not route its daemon question through daemonLiveness; Issue #41 says there is exactly one answer")
+	}
+}
+
+// TestStatsUndeterminedLivenessIsNotAStoppedDaemon is Issue #41's criterion 4 read across to this
+// Issue: a statistic computed while liveness is unknown is undetermined, and the reason is NOT that
+// the daemon is stopped. A confident false negative is what #41 exists to remove.
+func TestStatsUndeterminedLivenessIsNotAStoppedDaemon(t *testing.T) {
+	w := newStatsWorld(t).withHub().as("searcher").scopes("read").
+		withUndeterminedLiveness("the daemon lock could not be opened")
+	w.run(t, statsHubCorpus(t))
+
+	got := statLine(t, w.out(), "hub", "notes")
+	if strings.Contains(got, hub.ErrDaemonNotRunning.Code) {
+		t.Fatalf("hub notes = %q — nothing established that the daemon is stopped", got)
+	}
+	if !strings.Contains(got, hub.ErrDaemonLivenessUndetermined.Code) {
+		t.Fatalf("hub notes = %q, want the reason %q", got, hub.ErrDaemonLivenessUndetermined.Code)
+	}
+	if got == "0" {
+		t.Fatalf("a statistic computed while liveness was unknown printed as a zero")
+	}
+	if !strings.Contains(w.all(), "the daemon lock could not be opened") {
+		t.Fatalf("the reason liveness could not be established was dropped:\n%s", w.all())
+	}
+	if !strings.Contains(w.all(), "this is not a report that the daemon is stopped") {
+		t.Fatalf("the reader is not told that this is not a negative:\n%s", w.all())
+	}
+	if w.code != cli.ExitUndetermined {
+		t.Fatalf("exit %d, want %d", w.code, cli.ExitUndetermined)
+	}
+	if w.sourceCalled {
+		t.Fatalf("the command reached for a hub without establishing that a daemon was there")
+	}
+}
+
+// TestStatsAndTheDaemonSurfacesSpellTheThirdAnswerTheSameWay stops the hub's error code and package
+// commands' own constant for the third answer from drifting into two spellings of one state.
+func TestStatsAndTheDaemonSurfacesSpellTheThirdAnswerTheSameWay(t *testing.T) {
+	if hub.ErrDaemonLivenessUndetermined.Code != codeDaemonUndetermined {
+		t.Fatalf("the statistics surface says %q and the daemon surfaces say %q for the same state",
+			hub.ErrDaemonLivenessUndetermined.Code, codeDaemonUndetermined)
 	}
 }
 

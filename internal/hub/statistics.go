@@ -87,10 +87,20 @@ var (
 	// — so it appears as the REASON on an undetermined statistic rather than as a count of 0. PRD
 	// §4.2: omw does not conjure a store, so the honest answer is that local material is unknown.
 	ErrNoLocalStore = &Error{Code: "no-local-store", Msg: "no local outbox on this machine, so local corpus statistics could not be computed"}
+
+	// ErrDaemonLivenessUndetermined — whether the daemon is running could not be established, so
+	// nothing was established about the hub corpus either.
+	//
+	// IT IS NOT ErrDaemonNotRunning AND THAT IS THE WHOLE POINT (Issue #41, PRD §4.3). "The daemon
+	// is not running" is a determined fact a person can act on by starting it; "I could not tell"
+	// is not, and a surface that renders the second as the first has made a confident false
+	// negative. Its Code is asserted equal to package commands' own constant for the third answer,
+	// so the two surfaces cannot drift into two spellings of one state.
+	ErrDaemonLivenessUndetermined = &Error{Code: "daemon-liveness-undetermined", Msg: "whether the daemon is running could not be determined, which is not a report that it is stopped"}
 )
 
 // statisticsErrors is this file's contribution to the pairwise-distinctness test.
-var statisticsErrors = []*Error{ErrNoLocalStore}
+var statisticsErrors = []*Error{ErrNoLocalStore, ErrDaemonLivenessUndetermined}
 
 // Count is how much: either a determined number or an explicit undetermined.
 //
