@@ -63,5 +63,12 @@ Four sentences decide the shape of this, and each is a way the obvious implement
   distinctions: a merge that could not happen, a ticket that was never merged, and a store that
   could not be read are three answers on three codes, and `could not determine` never shares one
   with `determined to be nothing`.
+- **The daemon question goes through `daemonLiveness`, not through a socket path.** This surface
+  originally stat'd a control socket it named itself, which is Issue #41's defect: it printed a
+  confident "not running" over a live daemon, and a cross-surface regression test on `main` now
+  catches exactly that. The answer is three-valued — with liveness undetermined, merge and unmerge
+  report the third answer on `ExitUndetermined` and change nothing, because proceeding would be
+  treating "I could not tell" as "there is no daemon". The control API's state comes from the same
+  `daemon.Inspect` report. No package outside `internal/daemon` derives that path.
 - **Nothing consults the clock to decide what exists** (§5.4). A merge from 2009 is listed and is
   still reversible; asserted by backdating and by a scan over the source.

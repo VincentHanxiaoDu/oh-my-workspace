@@ -135,6 +135,16 @@ proceed by another path when the control API cannot be opened.
 - **WHEN** a person merges or unmerges with no daemon running
 - **THEN** the command says the daemon is not running, does not start it, and does the local work
 
+#### Scenario: Whether a daemon is running could not be established
+- **WHEN** a person merges or unmerges and whether a daemon holds the store could not be determined
+- **THEN** the command reports the third answer, does not change anything, and exits on a code no
+  determined answer uses — an unestablished state is never treated as an absent daemon
+
+#### Scenario: The surface agrees with the daemon's own report
+- **WHEN** a daemon is running and a person runs a merge surface
+- **THEN** nothing it prints claims the daemon is absent, and it does not justify what it shows by
+  an absence the daemon's own status contradicts
+
 #### Scenario: No hub is configured
 - **WHEN** a person merges, unmerges and inspects a merge's working with no hub configured
 - **THEN** all of it works fully, and nothing is sent anywhere

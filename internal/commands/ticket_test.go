@@ -2,7 +2,6 @@ package commands
 
 import (
 	"bytes"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,8 +12,11 @@ import (
 	"time"
 
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/cli"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/daemon"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/hub"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/inbox"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/store"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri"
 )
 
 // Issue #7 as a person meets it. The package-level facts about merging are driven in
@@ -509,9 +511,12 @@ func TestOnTicketsCouldNotDetermineAndDeterminedToBeNothingNeverShareAnExitCode(
 func TestMergingAndUnmergingNeverStartTheDaemonAndSayItIsNotRunning(t *testing.T) {
 	env, root, s := inboxEnv(t)
 	theScatteredLogin(t, s)
-	sock := filepath.Join(root, inbox.ControlSocketName)
-	if _, err := os.Stat(sock); err == nil {
-		t.Fatalf("a control socket exists before anything ran, so this asserts nothing")
+
+	// WHETHER A DAEMON IS RUNNING IS ASKED OF daemon.Inspect, NOT OF A PATH THIS TEST NAMES. The
+	// first version of this test stat'd a socket it had derived itself, which is the guess Issue
+	// #41 removed from four surfaces — and a fixture that reproduces the defect cannot detect it.
+	if got := daemon.Inspect(root).Running; got != tri.No {
+		t.Fatalf("a daemon holds this store before anything ran (%v), so this asserts nothing", got)
 	}
 	for _, args := range [][]string{mergeInvocation("mail1", "mail2", "chat1"), {"unmerge", "login"}} {
 		code, out, errOut := runTicketCmd(t, env, args...)
@@ -524,9 +529,50 @@ func TestMergingAndUnmergingNeverStartTheDaemonAndSayItIsNotRunning(t *testing.T
 		if !strings.Contains(out, "has not started anything") {
 			t.Errorf("`omw ticket %s` does not say it started nothing:\n%s", args[0], out)
 		}
-		if _, err := os.Stat(sock); err == nil {
-			t.Fatalf("`omw ticket %s` created a control socket — it started the daemon", args[0])
+		if got := daemon.Inspect(root).Running; got != tri.No {
+			t.Fatalf("after `omw ticket %s` a daemon holds the store (%v) — it started one", args[0], got)
 		}
+	}
+}
+
+// CRITERION 13's THIRD CASE, which the Issue does not spell out and §4.3 does: "could not tell"
+// is not "not running". Merging must not proceed on it — that would be treating an unestablished
+// state as an absent daemon — and must not print the negative's sentence.
+//
+// STAGED FOR REAL, NOT STUBBED. The lock internal/daemon reads is replaced by a directory, so
+// opening it genuinely fails and the answer is genuinely undetermined, reaching this surface
+// through the same call `omw daemon status` makes.
+func TestWhereDaemonLivenessCannotBeEstablishedMergingSaysSoAndChangesNothing(t *testing.T) {
+	env, root, s := inboxEnv(t)
+	theScatteredLogin(t, s)
+	lock := filepath.Join(root, daemon.RunDir, "daemon.lock")
+	if err := os.MkdirAll(lock, 0o700); err != nil {
+		t.Fatalf("could not stage an unreadable lock: %v", err)
+	}
+	if got := daemon.Inspect(root).Running; got != tri.Undetermined {
+		t.Fatalf("the fixture did not make liveness undetermined (%v), so this test is not staging what it claims", got)
+	}
+	before := inboxListing(t, env)
+
+	for _, args := range [][]string{mergeInvocation("mail1", "mail2"), {"unmerge", "login"}} {
+		code, out, errOut := runTicketCmd(t, env, args...)
+		all := out + errOut
+		if code != cli.ExitUndetermined {
+			t.Errorf("`omw ticket %s` exited %d where liveness could not be established; want %d\n%s",
+				args[0], code, cli.ExitUndetermined, all)
+		}
+		if !strings.Contains(all, tri.Undetermined.String()) {
+			t.Errorf("`omw ticket %s` does not render the third answer in words:\n%s", args[0], all)
+		}
+		if strings.Contains(all, hub.ErrDaemonNotRunning.Error()) {
+			t.Errorf("`omw ticket %s` says the daemon is not running when nothing established that:\n%s", args[0], all)
+		}
+		if !strings.Contains(all, "this is not a report that the daemon is stopped") {
+			t.Errorf("`omw ticket %s` does not tell the reader this is not a negative:\n%s", args[0], all)
+		}
+	}
+	if after := inboxListing(t, env); after != before {
+		t.Errorf("an undetermined daemon state let a merge change the inbox")
 	}
 }
 
@@ -601,46 +647,53 @@ func TestWithNoHubConfiguredMergingUnmergingAndInspectingAllWorkFully(t *testing
 // CRITERION 15 — an unconfirmed control API is said, not gone round.
 // ---------------------------------------------------------------------------
 
-// PROBED, NOT NAMED. Whether this environment can hold a unix socket is discovered by trying, not by
-// asking which operating system this is: §5.1 ships two and a test naming one says nothing about the
-// other.
-func TestWhenOwnerOnlyPermissionsCannotBeConfirmedMergeSaysSoRatherThanProceeding(t *testing.T) {
-	env, root := shortPathInboxEnv(t)
-	s, err := store.Open(root)
-	if err != nil {
-		t.Fatal(err)
-	}
+// STUBBED, AND SAYING SO. A control API that is open-but-not-owner-only cannot be staged without
+// deriving the socket's path, and deriving it is exactly what Issue #41 forbids every package
+// outside internal/daemon from doing — internal/daemon falls back to a per-user runtime directory
+// above the sun_path limit, so a path this test built would be wrong on some machines rather than
+// merely duplicated.
+//
+// So this drives the RENDERING and the EXIT CODES of that state, and it proves nothing about
+// whether daemon.Inspect reports it correctly — that is internal/daemon's own test's job, and
+// ticketControlAPI is three lines with no logic between Inspect and this surface. The real,
+// unstubbed daemon answers are driven in the two tests above and in liveness_test.go.
+func TestWhenTheControlAPIIsNotOpenMergeSaysSoRatherThanProceeding(t *testing.T) {
+	env, _, s := inboxEnv(t)
 	theScatteredLogin(t, s)
 
-	sock := filepath.Join(root, inbox.ControlSocketName)
-	l, err := net.Listen("unix", sock)
-	if err != nil {
-		t.Skipf("a unix socket cannot be created at %s here, so this criterion cannot be staged: %v", sock, err)
-	}
-	defer l.Close()
-	if err := os.Chmod(sock, 0o666); err != nil {
-		t.Skipf("this filesystem does not honour a permission change on a socket: %v", err)
-	}
-	if info, serr := os.Stat(sock); serr != nil || info.Mode().Perm()&0o077 == 0 {
-		t.Skipf("the permission change did not take on this filesystem, so nothing would be asserted")
+	restoreLive, restoreControl := daemonLiveness, ticketControlAPI
+	t.Cleanup(func() { daemonLiveness, ticketControlAPI = restoreLive, restoreControl })
+	daemonLiveness = func(cli.Env) (tri.Value, string) { return tri.Yes, "" }
+	ticketControlAPI = func(string) (tri.Value, string) {
+		return tri.No, "the control API is not open: owner-only permissions could not be confirmed"
 	}
 
 	before := inboxListing(t, env)
 	code, out, errOut := runTicketCmd(t, env, mergeInvocation("mail1", "mail2")...)
 	if code == cli.Success {
-		t.Fatalf("the merge proceeded although owner-only permissions could not be confirmed:\n%s", out)
+		t.Fatalf("the merge proceeded although the control API would not open:\n%s", out)
 	}
 	if !strings.Contains(errOut, "control API") {
 		t.Errorf("the refusal does not name the control API:\n%s", errOut)
 	}
 	if !strings.Contains(errOut, "owner-only") {
-		t.Errorf("the refusal does not say why the control API did not open:\n%s", errOut)
+		t.Errorf("the refusal does not carry the reason it was given:\n%s", errOut)
+	}
+	if !strings.Contains(errOut, "has not gone round it by another path") {
+		t.Errorf("the refusal does not say it did not proceed another way:\n%s", errOut)
 	}
 	if inboxListing(t, env) != before {
 		t.Errorf("the refused merge changed the inbox")
 	}
+	if unmergeCode, _, unmergeErr := runTicketCmd(t, env, "unmerge", "mail1"); unmergeCode == cli.Success {
+		t.Errorf("unmerge proceeded although the control API would not open")
+	} else if !strings.Contains(unmergeErr, "control API") {
+		t.Errorf("unmerge's refusal does not name the control API:\n%s", unmergeErr)
+	}
 
-	// DISTINGUISHABLE FROM "NO TICKETS TO MERGE", which is the confusion criterion 15 names.
+	// DISTINGUISHABLE FROM "NO TICKETS TO MERGE", which is the confusion criterion 15 names. The
+	// comparison is made with the stubs restored, so the empty-inbox run is a real one.
+	daemonLiveness, ticketControlAPI = restoreLive, restoreControl
 	emptyEnv, _, _ := inboxEnv(t)
 	emptyCode, emptyOut, emptyErr := runTicketCmd(t, emptyEnv, "list")
 	if errOut == emptyErr && out == emptyOut {
@@ -649,11 +702,96 @@ func TestWhenOwnerOnlyPermissionsCannotBeConfirmedMergeSaysSoRatherThanProceedin
 	if emptyCode == code {
 		t.Errorf("an unavailable control API shares exit code %d with 'there is nothing to merge'", code)
 	}
-	// And unmerge refuses on the same terms.
-	if unmergeCode, _, unmergeErr := runTicketCmd(t, env, "unmerge", "mail1"); unmergeCode == cli.Success {
-		t.Errorf("unmerge proceeded although the control API is unavailable")
-	} else if !strings.Contains(unmergeErr, "control API") {
-		t.Errorf("unmerge's refusal does not name the control API:\n%s", unmergeErr)
+}
+
+// THE HEADER MAY SAY ONLY WHAT THE DAEMON ANSWER SUPPORTS.
+//
+// WHY THIS EXISTS SEPARATELY. liveness_test.go's shared guard catches a stale-because-nothing-is-
+// watching claim by matching the exact phrases two refused pull requests printed — including
+// "not a live". Rewording this surface's sentence moved it out of that net: I reintroduced the
+// unconditional claim as a mutation and the shared guard stayed GREEN. A guard that a rewording
+// walks out of is not covering this file, so the property is asserted here directly, against the
+// three answers rather than against a list of yesterday's phrasings.
+func TestTheHeaderSaysOnlyWhatTheDaemonAnswerSupports(t *testing.T) {
+	env, _, s := inboxEnv(t)
+	theScatteredLogin(t, s)
+
+	restoreLive, restoreControl := daemonLiveness, ticketControlAPI
+	t.Cleanup(func() { daemonLiveness, ticketControlAPI = restoreLive, restoreControl })
+	ticketControlAPI = func(string) (tri.Value, string) { return tri.Yes, "the control API is open" }
+
+	headers := map[tri.Value]string{}
+	for _, live := range []tri.Value{tri.Yes, tri.No, tri.Undetermined} {
+		answer := live
+		daemonLiveness = func(cli.Env) (tri.Value, string) { return answer, "why-" + answer.String() }
+		code, out, errOut := runTicketCmd(t, env, "list")
+		if code != cli.Success {
+			t.Fatalf("`omw ticket list` exited %d with the daemon %v: %s", code, live, errOut)
+		}
+		headers[live] = out
+	}
+
+	// THE CLAIM IS ONLY MADE WHERE IT IS ESTABLISHED. This is the mutation that got past the
+	// shared guard: printing it unconditionally.
+	const stale = "this is the store on disk"
+	if !strings.Contains(headers[tri.No], stale) {
+		t.Errorf("with the daemon established as not running, the header does not say what it is showing:\n%s", headers[tri.No])
+	}
+	for _, live := range []tri.Value{tri.Yes, tri.Undetermined} {
+		if strings.Contains(headers[live], stale) {
+			t.Errorf("with the daemon %v, the header still claims %q — a claim nothing established:\n%s",
+				live, stale, headers[live])
+		}
+	}
+	// AND THE THIRD ANSWER IS NOT THE NEGATIVE. Compared pairwise, never against a literal.
+	for _, pair := range [][2]tri.Value{{tri.Yes, tri.No}, {tri.Yes, tri.Undetermined}, {tri.No, tri.Undetermined}} {
+		a := strings.TrimSpace(lineWith(headers[pair[0]], "daemon:"))
+		b := strings.TrimSpace(lineWith(headers[pair[1]], "daemon:"))
+		if a == b {
+			t.Errorf("the header renders %v and %v identically: %q", pair[0], pair[1], a)
+		}
+		if a == "" || b == "" {
+			t.Errorf("the header does not report the daemon at all for %v/%v", pair[0], pair[1])
+		}
+	}
+	if !strings.Contains(headers[tri.Undetermined], "not a report that the daemon is stopped") {
+		t.Errorf("an undetermined daemon state is not distinguished from a stopped one:\n%s", headers[tri.Undetermined])
+	}
+	// Whatever the answer, the header never claims the command started something.
+	for live, out := range headers {
+		if !strings.Contains(out, "has not started anything") && live != tri.Yes {
+			t.Errorf("with the daemon %v the header does not say it started nothing:\n%s", live, out)
+		}
+	}
+}
+
+// A control API whose state could not be determined is the third answer again: its own exit code,
+// and never rendered as "not open". Stubbed for the same reason as the test above.
+func TestAnUndeterminedControlAPIIsNotAClosedOne(t *testing.T) {
+	env, _, s := inboxEnv(t)
+	theScatteredLogin(t, s)
+
+	restoreLive, restoreControl := daemonLiveness, ticketControlAPI
+	t.Cleanup(func() { daemonLiveness, ticketControlAPI = restoreLive, restoreControl })
+	daemonLiveness = func(cli.Env) (tri.Value, string) { return tri.Yes, "" }
+
+	ticketControlAPI = func(string) (tri.Value, string) { return tri.No, "it is not open" }
+	closedCode, _, closedErr := runTicketCmd(t, env, mergeInvocation("mail1", "mail2")...)
+
+	ticketControlAPI = func(string) (tri.Value, string) { return tri.Undetermined, "the daemon did not answer" }
+	undCode, _, undErr := runTicketCmd(t, env, mergeInvocation("mail1", "mail2")...)
+
+	if closedCode == undCode {
+		t.Errorf("'the control API is not open' and 'that could not be determined' share exit code %d", closedCode)
+	}
+	if undCode != cli.ExitUndetermined {
+		t.Errorf("an undetermined control API exited %d; want %d", undCode, cli.ExitUndetermined)
+	}
+	if closedErr == undErr {
+		t.Errorf("the two answers render identically:\n%s", undErr)
+	}
+	if !strings.Contains(undErr, "not a report that it is closed") {
+		t.Errorf("the undetermined answer does not say it is not a negative:\n%s", undErr)
 	}
 }
 

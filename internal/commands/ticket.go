@@ -16,8 +16,13 @@
 //  3. NOTHING HERE REACHES A HUB, and there is no configuration under which it would (§2.3,
 //     criterion 13). Tickets are never published, so a merge has nothing to say to a hub. There is
 //     no hub client imported, no address read, no connection opened.
-//  4. NOTHING HERE STARTS THE DAEMON (§4.2, criterion 13). It stats a socket and reports what it
-//     found, including that it could not tell.
+//  4. NOTHING HERE STARTS THE DAEMON (§4.2, criterion 13), AND IT DOES NOT GUESS WHETHER ONE IS
+//     RUNNING. The answer comes from [daemonLiveness] — the one definition in liveness.go, wrapping
+//     daemon.Inspect — and it is THREE-VALUED. This surface originally stat'd a socket path of its
+//     own, which is Issue #41's defect: it printed a confident "not running" over a live daemon.
+//     No path is derived or named here; internal/daemon owns it and falls back to a per-user
+//     runtime directory above the sun_path limit, so any second copy of that rule is wrong rather
+//     than merely duplicated.
 //
 // (Detached from the package clause on purpose: doc.go carries this package's doc comment, and
 // several Issues add files here concurrently.)
@@ -31,6 +36,7 @@ import (
 	"time"
 
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/cli"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/daemon"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/inbox"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/store"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri"
@@ -125,40 +131,81 @@ func openTickets(env cli.Env, op string) (*store.Store, string, int) {
 	return s, root, cli.Success
 }
 
+// ticketControlAPI answers whether the control API is open for the store at root, in three values,
+// with the reason when it is not.
+//
+// IT ASKS daemon.Inspect, WHICH IS THE SAME CALL `omw daemon status` MAKES. It does not derive,
+// name or stat a socket path: that path is chosen by internal/daemon's socketFor, which falls back
+// to a per-user runtime directory whenever the in-store path would exceed the kernel's sun_path
+// limit, and a caller reproducing that rule is one release away from reproducing an older version
+// of it (Issue #41). There is no `daemonLiveness` equivalent for the control question, so the
+// report is read directly — the same source, not a second opinion.
+//
+// It is a var so a test can drive this surface's RENDERING of a control API that would not open,
+// which is a state no test can stage without reaching for the path this rule forbids. The tests
+// that use it say so; the daemon's own liveness is never stubbed.
+var ticketControlAPI = func(root string) (tri.Value, string) {
+	rep := daemon.Inspect(root)
+	why := rep.ControlDetail
+	if why == "" {
+		switch rep.Control {
+		case tri.Yes:
+			why = "the control API is open"
+		case tri.No:
+			why = "the control API is not open"
+		default:
+			why = "whether the control API is open could not be determined"
+		}
+	}
+	return rep.Control, why
+}
+
 // controlGate is §4.6 / §5.1 / criterion 15, and the reading it takes is worth stating because the
 // criteria pull three ways and only one arrangement satisfies all of them.
 //
-//   - NO CONTROL SOCKET AT ALL. The daemon is not running, which criterion 13 requires be SAID and
-//     not fixed: this command does not start it. Merging is local work against the local store, and
-//     criterion 14 requires that local half work fully with no hub and no daemon — so it proceeds.
-//   - A SOCKET IS THERE AND OWNER-ONLY PERMISSIONS COULD NOT BE CONFIRMED. §4.6 read literally: the
-//     control API does not open. Criterion 15 requires merge and unmerge to SAY SO "rather than
-//     proceeding through some other path", so this refuses, and the refusal names an unavailable
-//     control API in wording that cannot be read as "there is nothing to merge".
-//   - WHETHER ANY OF THAT IS SO COULD NOT BE DETERMINED. Undetermined is not a "no": its own exit
-//     code, and nothing is changed.
+//   - NO DAEMON RUNNING. Criterion 13 requires that be SAID and not fixed: this command does not
+//     start one. Merging is local work against the local store, and criterion 14 requires that
+//     local half work fully with no hub and no daemon — so it proceeds.
+//   - A DAEMON IS RUNNING AND ITS CONTROL API IS NOT OPEN. §4.6 read literally. Criterion 15
+//     requires merge and unmerge to SAY SO "rather than proceeding through some other path", so
+//     this refuses, and the refusal names an unavailable control API in wording that cannot be read
+//     as "there is nothing to merge".
+//   - WHETHER A DAEMON IS RUNNING COULD NOT BE ESTABLISHED. THE THIRD ANSWER, and it is not a "no"
+//     (PRD §4.3, Issue #41). Proceeding here would be treating "I could not tell" as "there is no
+//     daemon", which is the confident false negative #41 removed from four surfaces at once. It is
+//     reported through reportDaemonNotLive — the shared rendering, on ExitUndetermined, whose
+//     sentence never contains the negative's — and nothing is changed.
+//   - THE CONTROL API'S STATE COULD NOT BE DETERMINED, with a daemon running. Undetermined again,
+//     its own exit code, nothing changed.
 //
-// The distinction that makes this coherent is between an absent control API and an unconfirmed one.
+// The distinction that makes this coherent is between an ABSENT control API and an UNCONFIRMED one.
 // Refusing on the first would make merging impossible on every machine with no daemon, which
 // criterion 14 forbids; proceeding on the second would be the "some other path" criterion 15 names.
 func controlGate(env cli.Env, op, root string) int {
-	p := inbox.Probe(root)
-	switch {
-	case p.Running == tri.No:
+	live, why := daemonLiveness(env)
+	switch live {
+	case tri.No:
+		// Determined: nothing holds this store. The local work is this command's to do.
 		return cli.Success
-	case p.ControlAPIOpen == tri.Yes:
+	case tri.Undetermined:
+		return reportDaemonNotLive(env, "omw ticket "+op, live, why)
+	}
+
+	control, controlWhy := ticketControlAPI(root)
+	switch control {
+	case tri.Yes:
 		return cli.Success
-	case p.ControlAPIOpen == tri.No:
+	case tri.No:
 		fmt.Fprintf(env.Stderr, "omw ticket %s: the control API is not open, so this has not been done.\n", op)
-		fmt.Fprintf(env.Stderr, "  %s\n", p.ControlWhy)
+		fmt.Fprintf(env.Stderr, "  %s\n", controlWhy)
 		fmt.Fprintf(env.Stderr, "  This is NOT 'there are no tickets to merge' and NOT 'the merge failed' —\n")
 		fmt.Fprintf(env.Stderr, "  the control API is unavailable and nothing has been changed. This command\n")
 		fmt.Fprintf(env.Stderr, "  has not gone round it by another path.\n")
 		return cli.ExitFailure
 	default:
 		fmt.Fprintf(env.Stderr, "omw ticket %s: whether the control API is open %s.\n", op, tri.Undetermined)
-		fmt.Fprintf(env.Stderr, "  %s\n", p.ControlWhy)
-		fmt.Fprintf(env.Stderr, "  Nothing has been changed.\n")
+		fmt.Fprintf(env.Stderr, "  %s\n", controlWhy)
+		fmt.Fprintf(env.Stderr, "  This is not a report that it is closed. Nothing has been changed.\n")
 		return cli.ExitUndetermined
 	}
 }
@@ -168,16 +215,33 @@ func controlGate(env cli.Env, op, root string) int {
 // hub. It is the same shape as the inbox command's header and says the same things, deliberately:
 // two commands over the same store that describe it differently are two answers to one question.
 func ticketHeader(env cli.Env, root string) {
-	p := inbox.Probe(root)
 	fmt.Fprintf(env.Stdout, "inbox:       %s\n", root)
-	fmt.Fprintf(env.Stdout, "daemon:      %s\n", p.Running.Render("running", "not running"))
-	fmt.Fprintf(env.Stdout, "             %s\n", p.RunningWhy)
-	if p.Running != tri.Yes {
-		fmt.Fprintf(env.Stdout, "             this is the store on disk, not a live inbox, and this command\n")
-		fmt.Fprintf(env.Stdout, "             has not started anything\n")
+
+	// §4.2 / criterion 13, IN THREE VALUES AND FROM THE ONE DEFINITION. Never by starting anything,
+	// and never by this file forming its own opinion — see the note on ticketControlAPI.
+	live, why := daemonLiveness(env)
+	fmt.Fprintf(env.Stdout, "daemon:      %s\n", live.Render("running", "not running"))
+	if why != "" {
+		fmt.Fprintf(env.Stdout, "             %s\n", why)
 	}
-	fmt.Fprintf(env.Stdout, "control api: %s\n", p.ControlAPIOpen.Render("open", "not open"))
-	fmt.Fprintf(env.Stdout, "             %s\n", p.ControlWhy)
+	switch live {
+	case tri.No:
+		// SAID ONLY WHERE IT IS TRUE. This sentence used to be printed unconditionally, off a probe
+		// that always answered "not running" — so it appeared over a running daemon, which is
+		// Issue #41 criterion 5. It is now gated on the established negative.
+		fmt.Fprintf(env.Stdout, "             this is the store on disk, and this command has not started anything\n")
+	case tri.Undetermined:
+		fmt.Fprintf(env.Stdout, "             this is not a report that the daemon is stopped; nothing about it\n")
+		fmt.Fprintf(env.Stdout, "             has been established, and this command has not started anything\n")
+	}
+
+	// §4.6 / §5.1 / criterion 15. Its own line, distinguishable from an empty inbox and from any
+	// hub wording, because "the control API declined to open" is a third thing and not either.
+	control, controlWhy := ticketControlAPI(root)
+	fmt.Fprintf(env.Stdout, "control api: %s\n", control.Render("open", "not open"))
+	fmt.Fprintf(env.Stdout, "             %s\n", controlWhy)
+
+	// §2.3 / criteria 13, 14. Stated, not left to be inferred from an absence of output.
 	fmt.Fprintf(env.Stdout, "hub:         not contacted, and there is no operation here that would.\n")
 	fmt.Fprintf(env.Stdout, "             A merged ticket is a ticket: it lives on this machine and is never\n")
 	fmt.Fprintf(env.Stdout, "             published, so no merge has anything to send.\n")

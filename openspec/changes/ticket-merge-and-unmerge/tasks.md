@@ -46,10 +46,15 @@
 
 - [x] Add `internal/commands/ticket.go` as a new file, registering from an init
 - [x] `merge`, `unmerge`, `show` and `list`, with every field rendered through `Field.Render`
-- [x] Say the daemon is not running and start nothing; say the hub was not contacted and that no
-      operation here would
-- [x] Refuse when a control socket is present and owner-only permissions could not be confirmed,
-      distinguishably from "there is nothing to merge"
+- [x] Ask `daemonLiveness` whether the daemon is running, never a socket path this file derives,
+      and start nothing
+- [x] Render the daemon answer in three values, and say the "store on disk" sentence only where the
+      negative was established
+- [x] Refuse merge and unmerge on an undetermined liveness, on `ExitUndetermined`, changing nothing
+- [x] Say the hub was not contacted and that no operation here would
+- [x] Take the control API's state from the same `daemon.Inspect` report, and refuse when it is not
+      open, distinguishably from "there is nothing to merge"
+- [x] Keep the third answer about the control API off the negative's exit code
 - [x] Turn each distinct failure into its own sentence and its own exit code
 - [x] Refuse an unknown flag rather than taking it as a ticket identifier
 
@@ -61,4 +66,6 @@
 - [x] Compare the three renderings of an origin pairwise, never against a literal
 - [x] Kill a real subprocess partway through a real merge, at kill times measured from the machine
       rather than written down, and assert both endpoints are reached and neither is half
+- [x] Assert the header's stale-state sentence directly rather than relying on the shared guard's
+      list of phrasings — a rewording walked out of that net, proved by mutation
 - [x] Break each guarantee in turn, watch the tests go red naming the defect, and revert
