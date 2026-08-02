@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/extension"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/model"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri"
 )
@@ -376,6 +377,20 @@ type Report struct {
 	// property of the type rather than of anybody remembering. Its three-valued fields cross the
 	// wire as their own rendering, for the reason RunningText does.
 	Model model.View `json:"model"`
+
+	// Extensions is the whole extension inventory — both of §2.5's interfaces, the built-in
+	// channels included, every registered extension present whatever its state (Issue #21
+	// criterion 20).
+	//
+	// IT IS THE SAME []extension.Entry THE CLI PRINTS, not a projection of it. See
+	// extension_report.go: two surfaces agree because there is one renderer, not because two were
+	// written carefully on the same afternoon. An Entry has no field a credential could occupy
+	// (criterion 22).
+	//
+	// It is `omitempty`-free ON PURPOSE. A machine with no extensions at all sends `[]`, and a
+	// reader can tell that from a field the sender did not fill; dropping the key would make "this
+	// build ships nothing" and "this daemon predates extensions" the same wire.
+	Extensions []extension.Entry `json:"extensions"`
 }
 
 // wire fills the text fields from the tri values. Called on every path that produces a Report, so
@@ -498,6 +513,15 @@ func (r Report) WriteTo(w io.Writer) (int64, error) {
 	if err != nil {
 		return total, err
 	}
+	// THE EXTENSIONS, RENDERED BY extension.Render ITSELF (Issue #21 criterion 20). Same discipline
+	// as the model line above and for the same reason: this does not word a state here, it calls
+	// the one renderer `omw ext list` calls, so the CLI and the control API cannot describe one
+	// machine two ways. An extension.Entry has no field a credential could occupy (criterion 22).
+	n, err = fmt.Fprint(w, extension.Render(r.Extensions))
+	total += int64(n)
+	if err != nil {
+		return total, err
+	}
 	return total, nil
 }
 
@@ -555,6 +579,7 @@ func Inspect(storeRoot string) Report {
 	}
 
 	rep.Model = modelViewFor(storeRoot)
+	rep.Extensions = extensionsFor(storeRoot)
 	rep.Healthy, rep.HealthDetail = healthFromDisk(running, rep.HealthDetail)
 	rep.Control, rep.ControlDetail = controlFromDisk(p, running, rec, err)
 	rep.wire()

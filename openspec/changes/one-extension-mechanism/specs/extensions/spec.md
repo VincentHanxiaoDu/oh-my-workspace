@@ -1,0 +1,193 @@
+# Extensions
+
+## ADDED Requirements
+
+### Requirement: A channel adapter and a model provider are registered by the same act
+The product SHALL register a channel adapter and a model provider through one command taking the
+same arguments in the same order, differing only in the extension being registered. The interface an
+extension implements SHALL come from the extension itself and SHALL NOT be an argument a person
+supplies.
+
+#### Scenario: A person registers one of each
+- **WHEN** a person registers a channel adapter and then registers a model provider, changing only
+  the extension identifier
+- **THEN** both registrations succeed, and the two invocations differ in exactly one argument
+
+#### Scenario: Registration is attempted for an extension this machine does not have
+- **WHEN** a person registers a name nothing on the machine offers
+- **THEN** the registration is refused, and no record of it is left behind
+
+### Requirement: There is one listing of extensions
+The product SHALL report every extension through a single listing that covers both interfaces, and
+each entry SHALL state which interface it implements. There SHALL NOT be a channel-only listing or a
+model-only listing that shows anything the shared one does not.
+
+#### Scenario: Both interfaces are registered
+- **WHEN** a person lists extensions on a machine with a registered channel adapter and a registered
+  model provider
+- **THEN** both appear in the one listing, each stating its interface
+
+#### Scenario: The built-in channels are listed
+- **WHEN** a person lists extensions
+- **THEN** the built-in channels appear in the same listing as anything registered through the
+  extension point, in the same form, and not as a separate section
+
+### Requirement: The state vocabulary is identical across the two interfaces
+The product SHALL use one set of states for both interfaces — registered-and-loaded, failed-to-load,
+not-registered and undetermined — and SHALL render a given state identically whichever interface the
+extension implements, apart from the extension's own name and interface.
+
+#### Scenario: A failed channel adapter and a failed model provider are compared
+- **WHEN** a failed-to-load channel adapter entry and a failed-to-load model provider entry are
+  rendered and compared with their names and interfaces normalised
+- **THEN** the two renderings are identical
+
+#### Scenario: A state is rendered
+- **WHEN** any state is rendered for either interface
+- **THEN** the rendering is non-empty, and no two of the four states render alike
+
+### Requirement: Configuration is the same shape for both interfaces
+The product SHALL accept an extension's settings through one command form for both interfaces.
+
+#### Scenario: A person configures one of each
+- **WHEN** a person configures a channel adapter and then a model provider using the same command
+  form, changing only the extension identifier
+- **THEN** both succeed and both record the settings supplied
+
+### Requirement: Failed to load is its own answer
+The product SHALL report a registered extension that raises on load as failed to load, distinguishably
+from an extension that is not registered and from one that is registered and loaded, and SHALL carry
+the reason for the failure attributable to that extension by name.
+
+#### Scenario: A registered extension raises on load
+- **WHEN** a person lists extensions with one registered extension that raises on load
+- **THEN** it is reported as failed to load, with non-empty failure detail naming it, and its
+  rendering differs from both the not-registered and the registered-and-loaded renderings
+
+#### Scenario: A broken extension sits alongside a working one
+- **WHEN** one registered extension fails to load and another loads
+- **THEN** both are reported, each with its own state
+
+### Requirement: A failed load is never reported as absence or as quiet
+The product SHALL NOT report a channel whose adapter failed to load as a channel on which nothing
+arrived, and SHALL NOT report a chosen model provider whose extension failed to load as a machine
+with no model configured.
+
+#### Scenario: Ingestion runs against a channel whose adapter failed to load
+- **WHEN** ingestion runs for a channel whose registered adapter failed to load
+- **THEN** the channel is reported as not reached, with the load failure as the reason, and it is
+  not reported as reached with nothing on it
+
+#### Scenario: A capability that needs a model runs with a broken provider extension
+- **WHEN** a capability that needs a model runs with a provider chosen whose extension failed to
+  load
+- **THEN** it reports that the extension failed to load, with a code distinct from the
+  no-model-configured code, and it does not report that no model is configured
+
+### Requirement: Whether an extension loaded may be undetermined
+The product SHALL render an extension whose load result could not be established as undetermined,
+distinguishably from loaded, from failed-to-load and from not-registered, and SHALL NOT omit it from
+the listing.
+
+#### Scenario: A load result cannot be established
+- **WHEN** a registered extension's load result cannot be established
+- **THEN** it is listed with an undetermined state, its rendering is non-empty, and it differs from
+  the other three renderings
+
+#### Scenario: A registration record cannot be read
+- **WHEN** a registration record is present and cannot be read
+- **THEN** the extension is present in the listing with an undetermined state, and the other
+  extensions are still reported
+
+### Requirement: Exit status distinguishes loaded from failed from undetermined
+The product SHALL exit with one status when every registered extension loaded, a different status
+when at least one failed to load, and a third when at least one could not be determined, each
+distinguishable without parsing output.
+
+#### Scenario: Every registered extension loaded
+- **WHEN** a person lists extensions and every registered one loaded
+- **THEN** the command exits with the success status
+
+#### Scenario: At least one failed and at least one could not be determined
+- **WHEN** a person lists extensions with a failed one, and separately with an undetermined one
+- **THEN** the two runs exit with statuses that differ from each other and from success
+
+### Requirement: Nothing about an extension is implicit
+The product SHALL NOT start the daemon, open a network connection, or contact a provider's endpoint
+as a side effect of registering, listing or configuring an extension, and SHALL treat an extension
+present on the machine but not registered by a deliberate act as not registered.
+
+#### Scenario: Extension commands are run with the daemon stopped
+- **WHEN** a person registers, lists and configures extensions with the daemon not running
+- **THEN** each command reports that the daemon is not running, and no daemon is running afterwards
+
+#### Scenario: A model provider is registered
+- **WHEN** a person registers a model provider
+- **THEN** the provider's endpoint is not contacted and the extension is not loaded
+
+#### Scenario: An extension is present and unregistered
+- **WHEN** a person lists extensions on a machine offering an extension no deliberate act registered
+- **THEN** it is reported as not registered, it is not ingesting and not serving a model, and the
+  command does not treat it as a failure
+
+### Requirement: The extension mechanism works with no hub
+The product SHALL allow registering, listing, configuring and diagnosing extensions with no hub
+configured, and SHALL leave no partially-completed registration behind when a registration is
+refused.
+
+#### Scenario: The whole sequence is run with no hub
+- **WHEN** a person registers, lists, configures and inspects an extension with no hub configured
+- **THEN** every step completes without a hub-related error
+
+#### Scenario: A registration is refused
+- **WHEN** a registration is refused for any reason
+- **THEN** no record of it exists afterwards
+
+### Requirement: The CLI and the control API report the same extension state
+The product SHALL report extension state identically through the command line and through the
+control API.
+
+#### Scenario: A failed-to-load extension is read through both surfaces
+- **WHEN** the same machine's extension state is read through the CLI and through the control API
+- **THEN** both report the same state and the same failure reason
+
+### Requirement: No extension state is silence
+The product SHALL render every extension in the listing as exactly one non-empty entry, in every
+state including undetermined.
+
+#### Scenario: Every state is present in one listing
+- **WHEN** a person lists extensions on a machine holding one extension in each of the four states
+- **THEN** each produces exactly one entry, and no entry and no line within an entry is empty
+
+### Requirement: An extension's credentials are never recorded or shown
+The product SHALL NOT record a credential supplied as an extension setting, and SHALL NOT include a
+credential in the extension listing, in a failure reason, or in a diagnostics bundle. A setting that
+names a location rather than a value SHALL be recorded.
+
+#### Scenario: A credential is supplied as a setting
+- **WHEN** a person supplies a setting whose name says it holds a credential
+- **THEN** the setting is refused, nothing else in that call is recorded, and the refusal does not
+  echo the value back
+
+#### Scenario: Extension output is inspected after a credential is configured
+- **WHEN** a person configures a provider with a credential in their environment and then reads
+  every extension-related output
+- **THEN** the credential appears in none of them
+
+#### Scenario: A setting names where a credential lives
+- **WHEN** a person supplies a setting naming the path of a file holding their credential
+- **THEN** the path is recorded and the file's contents are not read
+
+### Requirement: An extension is granted nothing wider than its person
+The product SHALL refuse a registration requesting a scope its person does not hold, rather than
+registering the extension with a narrower scope, and SHALL refuse a scope outside the scope
+vocabulary.
+
+#### Scenario: An extension requests a scope wider than its person holds
+- **WHEN** a person registers an extension requesting a scope they do not hold
+- **THEN** the registration is refused entirely, and the extension is not registered with a narrower
+  scope instead
+
+#### Scenario: An extension requests a scope outside the vocabulary
+- **WHEN** a person registers an extension requesting a scope that is not in the scope vocabulary
+- **THEN** the registration is refused and names the vocabulary

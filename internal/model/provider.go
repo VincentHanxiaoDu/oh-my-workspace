@@ -31,6 +31,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/extension"
 )
 
 // Provider is a model provider — an extension, in §2.5's sense.
@@ -85,11 +87,21 @@ func Register(p Provider) {
 		panic("model.Register: provider with no name")
 	}
 	registryMu.Lock()
-	defer registryMu.Unlock()
 	if _, dup := registry[name]; dup {
+		registryMu.Unlock()
 		panic("model.Register: duplicate provider " + name)
 	}
 	registry[name] = p
+	registryMu.Unlock()
+
+	// ONE REGISTRATION, NOT TWO (Issue #21, §2.5). A provider becomes known to the one extension
+	// mechanism here and nowhere else. The alternative — asking each provider's init to call
+	// `extension.Default.Offer` as well — is two registrations of one thing that can disagree, so
+	// that a provider is choosable by `omw model use` and invisible to `omw ext list`, or the other
+	// way round. That is the "two systems" §2.5 forbids, rebuilt inside the fix for it.
+	//
+	// It is outside the lock because Offer takes its own, and a provider is never registered twice.
+	extension.Default.Offer(Extension{P: p})
 }
 
 // Lookup returns the registered provider of that name.
@@ -127,6 +139,10 @@ func Names() []string {
 // different answer depending on when it was asked.
 func unregister(name string) {
 	registryMu.Lock()
-	defer registryMu.Unlock()
 	delete(registry, name)
+	registryMu.Unlock()
+	// BOTH, OR THE TWO DISAGREE. Register puts a provider in both places; a removal that only
+	// emptied one would leave `omw ext list` reporting a provider `omw model use` no longer has —
+	// and would make the very next Register of that name panic on a duplicate.
+	extension.Default.Withdraw(name)
 }

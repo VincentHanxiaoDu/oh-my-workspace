@@ -245,6 +245,7 @@ func (d *Daemon) Report() Report {
 		ControlDetail: d.controlDetail,
 		ControlSocket: d.control.Path(),
 		Model:         modelViewFor(d.opts.StorePath),
+		Extensions:    extensionsFor(d.opts.StorePath),
 	}
 	switch ph {
 	case phaseHealthy:
