@@ -141,3 +141,28 @@ returns it.
 - **WHEN** a colleague is deactivated and a search is scoped to them
 - **THEN** their notes remain findable exactly as their visibility allows, and the output says the
   colleague has been deactivated so that a thin result set is not read as a broken search
+
+### Requirement: Note ids are unguessable
+Note ids SHALL be random and non-sequential, so that the id space cannot be enumerated, while
+"not permitted to read this" and "there is no such note" SHALL remain distinguishable to someone
+holding a legitimate id.
+
+#### Scenario: Walking the id space
+- **WHEN** a caller guesses ids across a plausible range
+- **THEN** every guess answers "no such note", and no guess answers "refused", so the caller learns
+  neither the content nor the existence nor the number of notes hidden from them
+
+#### Scenario: Counting from an id you legitimately hold
+- **WHEN** a reader holds a note's id and derives nearby ids from it arithmetically
+- **THEN** none of them locates a note the reader may not read
+
+#### Scenario: A legitimate id still tells the two answers apart
+- **WHEN** a reader holds the id of a note they may not read, and the id of a note that does not
+  exist
+- **THEN** the first is refused and the second reports no such note, and the two remain
+  distinguishable
+
+#### Scenario: An id cannot be minted
+- **WHEN** the system's randomness cannot be read, or minting collides repeatedly
+- **THEN** the publication is refused with its own code, nothing is stored, and no note is
+  published under a guessable id or on top of an existing one

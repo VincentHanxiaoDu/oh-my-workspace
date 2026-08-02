@@ -38,7 +38,19 @@
 - [x] `omw search scopes` — the search subjects, and the unchanged capability vocabulary
 - [x] Found nothing exits 0 and says so; could not run exits 1; could not determine exits 3
 - [x] No hub configured is stated precisely and reaches nothing
+- [x] The daemon question routed through Issue #41's single answer; no socket knowledge in this package
+- [x] Liveness rendered three-valued: undetermined carries its own wording, code and exit status
 - [x] The daemon is said to be not running, never started
+
+## Unguessable note ids (the owner's ruling, amended into Issue #15)
+
+- [x] `mintNoteID` — 128 bits from `crypto/rand`, hex, never a counter and never a fallback
+- [x] Collision retried then REFUSED, never overwriting a published note
+- [x] `ErrIDUnavailable` — its own code, distinguishable from every other refusal
+- [x] Issue #12's criterion 12 kept intact: `refused` and `no such note` still differ
+- [x] The id space walked in a test and required to yield nothing — no reads and no refusals
+- [x] A held id's arithmetic neighbours required not to locate a note hidden from the reader
+- [x] Every literal `note-N` in this branch's tests replaced with the id the store actually minted
 
 ## Tests
 
@@ -50,3 +62,4 @@
 - [x] Six mutations driven to red, each naming the defect, recorded in the pull request body
 - [x] Merged current `main` and dropped this branch's duplicate `mustPublish` in favour of Issue #11's merged copy
 - [x] Every mutation re-driven on the merged tree, because a result from a tree that does not compile is not a result
+- [x] The counter restored as a mutation and both id tests watched go red, reproducing the owner's own demonstration

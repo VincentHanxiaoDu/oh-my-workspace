@@ -3,26 +3,33 @@ package commands
 import (
 	"bytes"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/cli"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/daemon"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/hub"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/store"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri"
 )
 
 // --- harness ---------------------------------------------------------------------------------
 
 // searchWorld is one run of `omw search`: the environment it sees and what it wrote.
 //
-// THE ENVIRONMENT IS PROBED, NOT NAMED. The control-socket path is a file inside t.TempDir() whose
-// existence the test controls; nothing here assumes a platform's convention for where a daemon
-// socket lives, and nothing branches on runtime.GOOS. A test that named a path would pass or fail
-// for reasons belonging to the machine.
+// LIVENESS IS STUBBED HERE, AND THAT IS ALL THESE TESTS CLAIM. Issue #41 gave the product one
+// answer to "is the daemon running" (daemonLiveness), and this file drives a surface's RENDERING of
+// that answer — including the third one. It does not claim the answer itself is right: only a real
+// started daemon proves that, and TestEveryDaemonReportingSurfaceAgreesWithDaemonStatus in
+// liveness_test.go does it for every surface at once, deliberately without a stub.
+//
+// Nothing here names a control socket. The old harness created one and set an OMW_CONTROL_SOCKET
+// variable the product never read, which is how this command shipped a confident false negative.
 type searchWorld struct {
 	env    map[string]string
-	socket string
+	live   tri.Value
+	why    string
 	stdout bytes.Buffer
 	stderr bytes.Buffer
 	code   int
@@ -33,19 +40,21 @@ type searchWorld struct {
 
 func newSearchWorld(t *testing.T) *searchWorld {
 	t.Helper()
-	return &searchWorld{
-		env:    map[string]string{},
-		socket: filepath.Join(t.TempDir(), "omw.sock"),
-	}
+	// The default is a DETERMINED negative: no daemon. Undetermined is opted into explicitly by
+	// withUndeterminedDaemon, so a test never gets the third answer by accident.
+	return &searchWorld{env: map[string]string{}, live: tri.No}
 }
 
-// withDaemon creates the socket file, so that the command's PROBE finds one.
+// withDaemon says a daemon is running against this store.
 func (w *searchWorld) withDaemon(t *testing.T) *searchWorld {
 	t.Helper()
-	if err := os.WriteFile(w.socket, nil, 0o600); err != nil {
-		t.Fatalf("create socket stand-in: %v", err)
-	}
-	w.env[searchEnvSocket] = w.socket
+	w.live, w.why = tri.Yes, ""
+	return w
+}
+
+// withUndeterminedDaemon says liveness could not be established — not that it is absent.
+func (w *searchWorld) withUndeterminedDaemon(why string) *searchWorld {
+	w.live, w.why = tri.Undetermined, why
 	return w
 }
 
@@ -56,12 +65,9 @@ func (w *searchWorld) scopes(s string) *searchWorld { w.env[searchEnvScopes] = s
 // run drives the real registry, so the command is reached exactly as `omw` reaches it.
 func (w *searchWorld) run(t *testing.T, store *hub.Store, roster *hub.Roster, args ...string) *searchWorld {
 	t.Helper()
-	if w.env[searchEnvSocket] == "" {
-		// Not configured means the probe below finds nothing, which is the "no daemon" state.
-		w.env[searchEnvSocket] = ""
-	}
-	origSource, origRoster := searchSource, searchRoster
-	t.Cleanup(func() { searchSource, searchRoster = origSource, origRoster })
+	origSource, origRoster, origLive := searchSource, searchRoster, daemonLiveness
+	t.Cleanup(func() { searchSource, searchRoster, daemonLiveness = origSource, origRoster, origLive })
+	daemonLiveness = func(cli.Env) (tri.Value, string) { return w.live, w.why }
 	searchSource = func(cli.Env) (*hub.Store, error) {
 		w.sourceCalled = true
 		if store == nil {
@@ -79,7 +85,7 @@ func (w *searchWorld) out() string    { return w.stdout.String() }
 func (w *searchWorld) errOut() string { return w.stderr.String() }
 func (w *searchWorld) all() string    { return w.stdout.String() + w.stderr.String() }
 
-func searchCorpus(t *testing.T) (*hub.Store, *hub.Record) {
+func searchCorpus(t *testing.T) (*hub.Store, *hub.Record, hub.NoteID) {
 	t.Helper()
 	r := hub.NewRecord()
 	s := hub.NewStore(r)
@@ -88,16 +94,17 @@ func searchCorpus(t *testing.T) (*hub.Store, *hub.Record) {
 	r.AddPerson("searcher")
 	r.AddPerson("ada")
 	r.AddPerson("dana")
-	if _, err := s.Publish(hub.Publication{Author: "ada", Title: "why sessions drop", Body: "the staging cluster sessiondrop"}); err != nil {
+	note, err := s.Publish(hub.Publication{Author: "ada", Title: "why sessions drop", Body: "the staging cluster sessiondrop"})
+	if err != nil {
 		t.Fatalf("publish: %v", err)
 	}
-	return s, r
+	return s, r, note.ID
 }
 
 // --- criterion 14: found nothing is an answer --------------------------------------------------
 
 func TestSearchFoundNothingSucceeds(t *testing.T) {
-	s, _ := searchCorpus(t)
+	s, _, _ := searchCorpus(t)
 	w := newSearchWorld(t).withHub().as("searcher").scopes("read")
 	w.withDaemon(t).run(t, s, nil, "nosuchterm")
 
@@ -155,7 +162,7 @@ var searchFailureModes = []searchFailureMode{
 		world: func(t *testing.T) *searchWorld {
 			return newSearchWorld(t).withHub().withDaemon(t).as("searcher").scopes("write")
 		},
-		store:    func(t *testing.T) *hub.Store { s, _ := searchCorpus(t); return s },
+		store:    func(t *testing.T) *hub.Store { s, _, _ := searchCorpus(t); return s },
 		wantCode: cli.ExitFailure,
 		wantHint: hub.ErrReadScopeRequired.Code,
 	},
@@ -164,9 +171,20 @@ var searchFailureModes = []searchFailureMode{
 		world: func(t *testing.T) *searchWorld {
 			return newSearchWorld(t).withHub().withDaemon(t).as("searcher").scopes("publish")
 		},
-		store:    func(t *testing.T) *hub.Store { s, _ := searchCorpus(t); return s },
+		store:    func(t *testing.T) *hub.Store { s, _, _ := searchCorpus(t); return s },
 		wantCode: cli.ExitFailure,
 		wantHint: hub.ErrReadScopeRequired.Code,
+	},
+	{
+		// Issue #41's third answer: liveness could not be established. Distinct from both a stopped
+		// daemon and every other failure.
+		name: "daemon-liveness-undetermined",
+		world: func(t *testing.T) *searchWorld {
+			return newSearchWorld(t).withHub().as("searcher").scopes("read").
+				withUndeterminedDaemon("the lock file could not be read")
+		},
+		wantCode: cli.ExitUndetermined,
+		wantHint: codeDaemonUndetermined,
 	},
 	{
 		// Criterion 15: the hub is unreachable. UNDETERMINED, and its own exit code.
@@ -183,7 +201,7 @@ var searchFailureModes = []searchFailureMode{
 		world: func(t *testing.T) *searchWorld {
 			return newSearchWorld(t).withHub().withDaemon(t).as("searcher").scopes("read")
 		},
-		store:    func(t *testing.T) *hub.Store { s, _ := searchCorpus(t); return s },
+		store:    func(t *testing.T) *hub.Store { s, _, _ := searchCorpus(t); return s },
 		wantCode: cli.ExitFailure,
 		wantHint: hub.ErrUnknownSearchScope.Code,
 	},
@@ -194,7 +212,7 @@ var searchFailureModes = []searchFailureMode{
 		world: func(t *testing.T) *searchWorld {
 			return newSearchWorld(t).withHub().withDaemon(t).as("searcher").scopes("read")
 		},
-		store:    func(t *testing.T) *hub.Store { s, _ := searchCorpus(t); return s },
+		store:    func(t *testing.T) *hub.Store { s, _, _ := searchCorpus(t); return s },
 		wantCode: cli.ExitFailure,
 		wantHint: hub.ErrGrantWiderThanHolder.Code,
 	},
@@ -251,7 +269,7 @@ func TestEveryFailureModeIsDistinguishableFromEveryOtherAndFromFoundNothing(t *t
 	}
 	var seen []observed
 
-	s, _ := searchCorpus(t)
+	s, _, _ := searchCorpus(t)
 	empty := newSearchWorld(t).withHub().withDaemon(t).as("searcher").scopes("read").run(t, s, nil, "nosuchterm")
 	seen = append(seen, observed{"found-nothing (criterion 14)", empty.code, empty.all()})
 
@@ -281,20 +299,55 @@ func TestEveryFailureModeIsDistinguishableFromEveryOtherAndFromFoundNothing(t *t
 // --- criterion 20, 21: nothing implicit --------------------------------------------------------
 
 func TestSearchNeverStartsTheDaemon(t *testing.T) {
-	// CRITERION 20. The probe is the socket's existence: it is absent before, and it must be absent
-	// after. If the command had started anything, the thing it starts is what creates this path.
-	w := newSearchWorld(t).withHub().as("searcher").scopes("read")
-	w.env[searchEnvSocket] = w.socket
-	if _, err := os.Stat(w.socket); !os.IsNotExist(err) {
-		t.Fatalf("the fixture is broken: the socket already exists")
+	// CRITERION 20, PROBED AGAINST A REAL STORE AND THE PRODUCT'S OWN ANSWER.
+	//
+	// The old version of this test stat'd a socket path of its own invention, which is the very
+	// habit Issue #41 removed: it would have gone on passing while the product's real answer said
+	// something else. Here the store is real, liveness is asked through daemon.Inspect — the one
+	// definition — before and after, and no stub is installed for that question.
+	root := storeThatExists(t)
+	if before := daemon.Inspect(root).Running; before != tri.No {
+		t.Fatalf("the fixture is broken: a fresh store already reports the daemon as %v", before)
 	}
+
+	w := newSearchWorld(t).withHub().as("searcher").scopes("read") // live defaults to tri.No
+	w.env[store.PathEnv] = root
 	w.run(t, nil, nil, "sessiondrop")
 
-	if _, err := os.Stat(w.socket); !os.IsNotExist(err) {
-		t.Fatalf("the socket exists after the search — something was started on the person's behalf")
+	if after := daemon.Inspect(root).Running; after != tri.No {
+		t.Fatalf("after the search the daemon reports as %v — something was started on the person's behalf", after)
 	}
 	if w.code != cli.ExitFailure || !strings.Contains(w.errOut(), hub.ErrDaemonNotRunning.Code) {
 		t.Fatalf("exit %d / %s — the command must SAY the daemon is not running", w.code, w.errOut())
+	}
+}
+
+func TestUndeterminedLivenessIsNotReportedAsAStoppedDaemon(t *testing.T) {
+	// ISSUE #41's THIRD ANSWER, at this surface. A liveness that could not be established is not a
+	// daemon that is absent, and the two must not share wording or an exit code — otherwise the
+	// person is told something was established when nothing was.
+	stopped := newSearchWorld(t).withHub().as("searcher").scopes("read")
+	stopped.run(t, nil, nil, "sessiondrop")
+
+	unknown := newSearchWorld(t).withHub().as("searcher").scopes("read").
+		withUndeterminedDaemon("the lock file could not be read")
+	unknown.run(t, nil, nil, "sessiondrop")
+
+	if unknown.code == stopped.code {
+		t.Fatalf("an undetermined liveness exits %d, the same as a determined 'not running' — a caller\n"+
+			"cannot tell 'I could not check' from 'it is stopped'", unknown.code)
+	}
+	if unknown.code != cli.ExitUndetermined {
+		t.Fatalf("exit %d, want %d", unknown.code, cli.ExitUndetermined)
+	}
+	if strings.Contains(unknown.errOut(), hub.ErrDaemonNotRunning.Code) {
+		t.Fatalf("the undetermined report carries the code for a STOPPED daemon:\n%s", unknown.errOut())
+	}
+	if !strings.Contains(unknown.errOut(), "the lock file could not be read") {
+		t.Fatalf("the undetermined report does not say why:\n%s", unknown.errOut())
+	}
+	if unknown.errOut() == stopped.errOut() {
+		t.Fatalf("the two reports are word for word identical:\n%s", unknown.errOut())
 	}
 }
 
@@ -371,13 +424,13 @@ func TestAnIncompleteSearchIsNotPresentedAsAnAnswer(t *testing.T) {
 // --- criterion 23 and the scoping criteria, through the real CLI --------------------------------
 
 func TestSearchFindsAPermittedNoteUnderEveryScope(t *testing.T) {
-	s, _ := searchCorpus(t)
+	s, _, id := searchCorpus(t)
 	for _, scope := range []string{"company", "person:ada"} {
 		w := newSearchWorld(t).withHub().withDaemon(t).as("searcher").scopes("read").run(t, s, nil, "sessiondrop", "--scope="+scope)
 		if w.code != cli.Success {
 			t.Fatalf("scope %q: exit %d\n%s", scope, w.code, w.all())
 		}
-		if !strings.Contains(w.out(), "note-1") {
+		if !strings.Contains(w.out(), string(id)) {
 			t.Fatalf("scope %q did not return the note:\n%s", scope, w.out())
 		}
 	}
