@@ -309,6 +309,11 @@ func (d *Daemon) storeWrite() error {
 func (d *Daemon) Serve() error {
 	d.serving.Store(true)
 	defer close(d.doneCh)
+	// THE CAPABILITIES THAT ARE A PROPERTY OF THIS RUNNING (Issue #6). Registered background work
+	// starts here and is stopped and waited for before Serve returns, so "the daemon is stopped"
+	// and "ingestion is not happening" are the same instant rather than two nearby ones.
+	stopBackground := d.startBackground()
+	defer stopBackground()
 	interval := d.opts.Interval
 	if interval <= 0 {
 		interval = DefaultInterval
