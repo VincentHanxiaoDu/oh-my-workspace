@@ -104,3 +104,21 @@
       measured against a base that has since moved
 - [x] State the four findings and the two unruled decisions at the TOP of the pull request body,
       where a reviewer meets them, rather than only inside a mutation table
+
+## Criterion 19's guard, after it collided with §2.1's unix socket
+
+- [x] Merge `main` in, now that #27 has landed, so the collision is reproducible here rather than
+      only in a scratch clone
+- [x] Verify that simply un-banning `net` opens a real hole — a bare `net.Dial("tcp", …)` passing
+      the whole suite — instead of proposing the removal on reasoning alone
+- [x] Replace the import ban with a rule about USE: every `net.Listen`/`net.Dial` must name `"unix"`
+      as a quoted literal, matched with its quotes so `"unixgram"` cannot satisfy it
+- [x] Walk the whole reachable first-party tree from `go list -deps`, not just this package, because
+      the ban it replaces was transitive and a package-local guard would leave six packages open
+- [x] Merge the two independently written versions of the guard into ONE, keeping the AST matching
+      from the second and the whole-`internal/` walk from the first, after driving the gap in each
+- [x] Drive six leak probes against the merged guard: a tcp dial and a tcp listener in this package,
+      a `net/http` import, a tcp dial in a different package, `net.ListenPacket("udp", …)` — which
+      the regex version passed — and `"unixgram"`, the substring trap
+- [x] Drive Issue #1's carried-forward criterion 14 for real, now that `omw health` is in the tree,
+      and mutate health to depend on the control API to confirm the comparison bites
