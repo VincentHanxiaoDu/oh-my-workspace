@@ -34,8 +34,14 @@ on:
     branches: [main]
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-  issue_comment:
-    types: [created, edited]
+
+# NO `issue_comment` HERE, DELIBERATELY. It used to be, so a review arriving as a comment would
+# re-evaluate the review gate. But `issue_comment` runs from the DEFAULT BRANCH, and the four
+# mechanical jobs — conditioned out by their `if` — still filed themselves as **skipped check runs
+# against main's head sha**, dated after the real push run and superseding it. Main's gates then
+# read `skipped` whether the build had passed or failed. `review-recheck.yml` handles comments now,
+# by re-running this workflow's own pull_request run: one definition of the gate, and main's colours
+# stay main's.
 
 concurrency:
   # THE EVENT NAME IS PART OF THE KEY. Without it a comment and a push share a group, so posting the
@@ -156,7 +162,9 @@ jobs:
     # as reviewed. The verdict lives in the commit status this job publishes, which carries the
     # required-context name and is the thing branch protection reads.
     name: Review gate ran (the verdict is a commit status)
-    if: github.event_name == 'pull_request' || github.event.issue.pull_request != null
+    # PULL REQUESTS ONLY. A comment reaches this job by re-running the whole run (review-recheck.yml),
+    # so the event that arrives here is always `pull_request` — the same shape whichever way it came.
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
