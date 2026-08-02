@@ -78,5 +78,7 @@
 - [x] Drive criterion 15 with a dial function that counts its own invocations
 - [x] Set BOTH `XDG_DATA_HOME` and `HOME` in every sandbox, so the suite cannot reach the
       developer's real device pointer
-- [x] Mutate each of the ten defects the criteria are written about, confirm RED naming the defect,
+- [x] Pin the member-to-subsystem precedence in both directions — a table over `worse` for the
+      function, and a real two-member channels line for the fact that a subsystem calls it
+- [x] Mutate each of the defects the criteria are written about, confirm RED naming the defect,
       and revert

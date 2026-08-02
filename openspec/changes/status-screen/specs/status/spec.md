@@ -90,6 +90,11 @@ The product SHALL yield undetermined for a probe that times out, errors or retur
 cannot interpret, and SHALL NOT yield working or not-working in those cases. One undetermined
 subsystem SHALL NOT suppress, blank or abort the remaining subsystem lines.
 
+#### Scenario: A subsystem with one member nobody could check
+- **WHEN** a subsystem has several members and exactly one of them could not be determined
+- **THEN** the subsystem's own line reads as undetermined rather than as working, and differs from
+  the line of a subsystem containing a confirmed failure
+
 #### Scenario: An unreachable hub with everything else fine
 - **WHEN** a configured hub cannot be reached and every local subsystem is readable
 - **THEN** the hub line is undetermined, every other line is present with its own determined state,
