@@ -39,6 +39,12 @@ type marker struct {
 	Format     int    `json:"format"`
 	StoreID    string `json:"store_id"`
 	CreatedUTC string `json:"created_utc"`
+	// UndeterminedAtCreation records that this store was created at a location whose sync status
+	// could not be determined, using the explicit override (criterion 25). It is PROVENANCE, not a
+	// cached answer: the location is re-probed on every report, and this flag never stands in for
+	// that probe. It is here so a diagnostics bundle (#20) can say how the store came to be where
+	// it is, and so nothing can later present the override as a clean bill of health.
+	UndeterminedAtCreation bool `json:"undetermined_at_creation,omitempty"`
 }
 
 // Store is an opened local store. It is safe for concurrent use by one process.
@@ -47,8 +53,9 @@ type marker struct {
 // CLI are separate processes over the same directory and a cache would let one of them report a
 // state the other has already changed (§4.3, "the control API and the CLI report the same state").
 type Store struct {
-	root string
-	id   string
+	root                   string
+	id                     string
+	undeterminedAtCreation bool
 }
 
 // Path is the absolute path of the store's root.
@@ -61,6 +68,47 @@ func (s *Store) Path() string { return s.root }
 // ID is the store's identity, generated once at creation. It is how a device tells "my store" from
 // "a store somebody restored from a backup over the top of mine".
 func (s *Store) ID() string { return s.id }
+
+// CreatedAtUndeterminedLocation reports whether this store was created with the explicit override,
+// at a location whose sync status could not be determined (criteria 23, 25).
+//
+// It does NOT answer "does this location synchronise" — [Store.SyncState] does, freshly, every time.
+// A caller reporting on the store must use both: this says how the store came to be here, and the
+// probe says what is true now.
+func (s *Store) CreatedAtUndeterminedLocation() bool { return s.undeterminedAtCreation }
+
+// CreateOption adjusts what [Create] does. The zero set of options is the strictest behaviour.
+type CreateOption func(*createConfig)
+
+type createConfig struct {
+	acceptUndetermined bool
+	getenv             func(string) string
+}
+
+// AcceptUndeterminedLocation is the person's explicit override for an undetermined location
+// (criterion 23, and the product ruling on Issue #3: "halt, override available").
+//
+// IT OVERRIDES EXACTLY ONE THING. A location DETERMINED to synchronise off the machine is still
+// refused with [ErrPathSynchronising] — criterion 24 is explicit that §4.1's refusal is not
+// overridable, and only the undetermined case is. This option is therefore not a --force: there is
+// deliberately no option in this package that will create a store inside Dropbox.
+//
+// A store created this way records that it was (see [Store.CreatedAtUndeterminedLocation]), and its
+// location still reports as undetermined afterwards, because the probe is re-run rather than
+// replaced by the person's decision (criterion 25).
+func AcceptUndeterminedLocation() CreateOption {
+	return func(c *createConfig) { c.acceptUndetermined = true }
+}
+
+// AsDeviceStore makes this creation THE device's store: creation is refused if this device has
+// already registered a different store that still exists ([ErrAnotherStoreRegistered]), and on
+// success the new store is recorded so that [Resolve] finds it from anywhere (criterion 4).
+//
+// It takes the environment reader rather than reading os.Getenv so that a test — and the daemon,
+// which may run with a different environment — can be pointed somewhere of its own.
+func AsDeviceStore(getenv func(string) string) CreateOption {
+	return func(c *createConfig) { c.getenv = getenv }
+}
 
 // Create brings a store into being at path, and is the ONLY function here that does (§4.2).
 //
@@ -79,7 +127,14 @@ func (s *Store) ID() string { return s.id }
 //
 // NOTHING IS LEFT BEHIND BY A REFUSAL (criterion 5). No directory is made until every check has
 // passed, and the writability probe removes its own file.
-func Create(path string) (*Store, error) {
+//
+// See [AcceptUndeterminedLocation] for the override the product ruling allows, and [AsDeviceStore]
+// for enforcing one store per device.
+func Create(path string, opts ...CreateOption) (*Store, error) {
+	var cfg createConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
 	root, err := filepath.Abs(path)
 	if err != nil {
 		return nil, pathErr("create", path, ErrPathUndetermined, err.Error())
@@ -99,6 +154,11 @@ func Create(path string) (*Store, error) {
 			"a store may be present here but could not be inspected: "+err.Error())
 	}
 
+	// 1b. Has this device already got a store somewhere else? (criterion 4)
+	if err := checkNoOtherDeviceStore(cfg.getenv, root); err != nil {
+		return nil, err
+	}
+
 	// 2. Does the containing directory exist? Create does not conjure a path nobody asked for.
 	parent := filepath.Dir(root)
 	if fi, err := os.Stat(parent); err != nil {
@@ -116,12 +176,21 @@ func Create(path string) (*Store, error) {
 	}
 
 	// 3. Does it synchronise off the machine? Three answers, three outcomes (§4.1, §4.3).
+	undetermined := false
 	switch f := DetectSync(root); f.State {
 	case tri.Yes:
+		// NOT OVERRIDABLE, DELIBERATELY (criterion 24). cfg.acceptUndetermined is not consulted
+		// here and must never be: §4.1's refusal is the boundary the product is built on, and an
+		// override that reached this branch would make "the disk is the boundary" a preference.
 		return nil, pathErr("create", root, ErrPathSynchronising,
 			f.Provider+", detected at "+f.Evidence+"; nothing was created")
 	case tri.Undetermined:
-		return nil, pathErr("create", root, ErrSyncUndetermined, f.Reason+"; nothing was created")
+		if !cfg.acceptUndetermined {
+			return nil, pathErr("create", root, ErrSyncUndetermined, f.Reason+"; nothing was created")
+		}
+		// The person typed the override. Creation proceeds, and the store remembers that its
+		// location was never confirmed (criterion 25).
+		undetermined = true
 	}
 
 	// 4. Can this user write here?
@@ -151,9 +220,10 @@ func Create(path string) (*Store, error) {
 	}
 	id := hex.EncodeToString(idBytes)
 	body, err := json.Marshal(marker{
-		Format:     storeFormat,
-		StoreID:    id,
-		CreatedUTC: time.Now().UTC().Format(time.RFC3339),
+		Format:                 storeFormat,
+		StoreID:                id,
+		CreatedUTC:             time.Now().UTC().Format(time.RFC3339),
+		UndeterminedAtCreation: undetermined,
 	})
 	if err != nil {
 		return nil, pathErr("create", root, ErrUnreadable, err.Error())
@@ -167,7 +237,52 @@ func Create(path string) (*Store, error) {
 	if err := syncDir(parent); err != nil {
 		return nil, pathErr("create", root, ErrUnreadable, err.Error())
 	}
-	return &Store{root: root, id: id}, nil
+
+	// RECORDED LAST, AND ONLY ONCE THE STORE IS REAL. A pointer written before the store exists
+	// would send every later command to a path with nothing at it.
+	if cfg.getenv != nil {
+		if err := register(cfg.getenv, root); err != nil {
+			return nil, err
+		}
+	}
+	return &Store{root: root, id: id, undeterminedAtCreation: undetermined}, nil
+}
+
+// checkNoOtherDeviceStore enforces criterion 4: one store per device, at one path.
+//
+// A REGISTRATION POINTING AT A STORE THAT IS NO LONGER THERE IS STALE, NOT BINDING. If it were
+// binding, a person who deleted their store could never create another one and the product would be
+// permanently unusable on that machine with no way out. So the pointer is only honoured when a store
+// is actually at the other end of it.
+//
+// A pointer that cannot be READ is a different matter: it is refused as undetermined rather than
+// ignored, because ignoring it is how the second store gets made.
+func checkNoOtherDeviceStore(getenv func(string) string, root string) error {
+	if getenv == nil {
+		return nil
+	}
+	registered, found, err := Registered(getenv)
+	switch found {
+	case tri.Undetermined:
+		if err != nil {
+			return err
+		}
+		return pathErr("create", root, ErrUnreadable, "this device's store pointer could not be read")
+	case tri.No:
+		return nil
+	}
+	if registered == root {
+		return nil // The same store. The marker check above has the final say on that.
+	}
+	if _, oerr := Open(registered); oerr != nil {
+		if errors.Is(oerr, ErrNotFound) {
+			return nil // Stale pointer; the store it named is gone.
+		}
+		return pathErr("create", root, ErrUnreadable,
+			"this device already registered a store at "+registered+" and it could not be read: "+oerr.Error())
+	}
+	return pathErr("create", root, ErrAnotherStoreRegistered,
+		"this device's store is at "+registered+"; there is one store per device (PRD §2.1)")
 }
 
 // probeWritable answers "can I write here?" by writing, then removing what it wrote.
@@ -224,7 +339,7 @@ func Open(path string) (*Store, error) {
 		return nil, pathErr("open", root, ErrUnreadable,
 			"this store is format "+itoa(m.Format)+", which this build does not understand")
 	}
-	return &Store{root: root, id: m.StoreID}, nil
+	return &Store{root: root, id: m.StoreID, undeterminedAtCreation: m.UndeterminedAtCreation}, nil
 }
 
 // Exists answers whether a store is present at path, in three values.

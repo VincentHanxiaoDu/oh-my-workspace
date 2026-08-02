@@ -56,6 +56,40 @@
 - [x] Build the real binary, create a store, and assert nothing is left running and the next command
       finds the store
 
+## The ruling on an undetermined location (criteria 23-25)
+
+- [x] Add `AcceptUndeterminedLocation`, the explicit override, so an undetermined location can be
+      created in on purpose
+- [x] Keep the refusal for a location KNOWN to synchronise unoverridable — the option is not
+      consulted in that branch at all
+- [x] Record the override in the store's marker, and expose it as
+      `Store.CreatedAtUndeterminedLocation`
+- [x] Re-probe the location on every report so an override is never rendered as a confirmation
+- [x] Name the override in the halt message, and delete the claim that the product has not ruled
+
+## Arguments (review finding 2)
+
+- [x] Parse `omw store` arguments instead of treating every argument as a path
+- [x] Reject unknown arguments beginning with a dash, non-zero, creating nothing
+- [x] Give `create` a real `--help` that documents the override and what it will not do
+- [x] Name the real flag when the person types `--force`, `--yes`, `-f` or `-y`
+- [x] Support `--` so a path that legitimately begins with a dash is still reachable
+
+## One store per device (review finding 3, criterion 4)
+
+- [x] Record which store is this device's store in a pointer file holding a path and nothing else
+- [x] Refuse creation at a second path while a registered store is still there
+- [x] Treat a pointer to a store that is gone as stale, so a machine is never left unable to create
+- [x] Refuse rather than proceed when the pointer exists and cannot be read
+- [x] Make `Resolve` consult the pointer, so later commands find the store that was created
+
+## The default location on a fresh machine (review finding 4)
+
+- [x] Create the product's own containing directory when the location is the product's default, and
+      say so in the output
+- [x] Leave a location the person named alone: a missing parent there is still "this path does not
+      exist"
+
 ## Verification
 
 - [x] Break the atomic write and watch the crash test go red, then revert
@@ -64,4 +98,13 @@
 - [x] Make a second creation overwrite the existing store and watch two tests go red, then revert
 - [x] Collapse two of the three creation failures into one message and watch the criterion-6 test go
       red, then revert
+- [x] Make the override defeat the known-synchronising refusal and watch two tests go red, then
+      revert
+- [x] Make an undetermined location render as a confirmation and watch three tests go red, then
+      revert
+- [x] Stop rejecting unknown flags and watch the flag test go red, then revert
+- [x] Remove the one-store-per-device check and watch three tests go red, then revert
+- [x] Stop recording the created store as this device's store and watch five tests go red, then
+      revert
+- [x] Conjure the parent of a path the person typed and watch three tests go red, then revert
 - [x] `make ci` green with every mutation reverted

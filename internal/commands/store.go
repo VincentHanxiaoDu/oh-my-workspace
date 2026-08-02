@@ -17,6 +17,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/cli"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/store"
@@ -31,15 +34,90 @@ func init() {
 	})
 }
 
-const storeUsage = `usage: omw store <create|path|status> [path]
+// overrideFlag is the explicit act the product ruling allows for an undetermined location.
+//
+// ITS NAME IS THE POINT. It is not `--force` and not `--yes`, because it does not force anything and
+// there is exactly one thing it accepts: a location whose sync status could not be determined. A
+// person reading it in their shell history can tell what they agreed to. `--force` would read as
+// "override the Dropbox refusal too", which criterion 24 forbids and this build will not do.
+const overrideFlag = "--accept-undetermined-location"
+
+const storeUsage = `usage: omw store <create|path|status> [options] [path]
 
   create   create this device's store. Nothing else in omw ever creates one.
   path     print where the store lives, and whether one is there.
   status   report the store: present, readable, and whether its location synchronises.
 
-The location comes from $` + store.PathEnv + ` if set, otherwise from a per-user data
-directory. A path may be given to 'create' to override both.
+options for 'create':
+  ` + overrideFlag + `
+           create the store even though it could not be determined whether the
+           location synchronises off this machine. This does NOT override the
+           refusal for a location that is KNOWN to synchronise; nothing does.
+  -h, --help
+           print this and do nothing else.
+
+The location comes from $` + store.PathEnv + `, else this device's registered store,
+else a per-user data directory. A path may be given to override all three. Use --
+before a path that begins with a dash.
 `
+
+// storeArgs is what a `omw store <sub>` invocation parsed to.
+type storeArgs struct {
+	path     string // empty means "wherever this device's store is"
+	override bool
+	help     bool
+}
+
+// parseStoreArgs reads the arguments, and REFUSES ANYTHING FLAG-SHAPED THAT IT DOES NOT KNOW.
+//
+// WHY THIS FUNCTION EXISTS. Before it, every argument was treated as a path, so `omw store create
+// --help` created a store in a directory called `--help` and exited zero — while silently discarding
+// the $OMW_STORE the person had set. Somebody typing `--help` is asking what the command does; they
+// end up believing they created a store, at a path they never chose, while the store they wanted
+// does not exist.
+//
+// That trap sits directly beside the override: the undetermined refusal tells a person they cannot
+// proceed, and the next thing a person types is `--force` or `--yes`. Both must fail loudly and
+// point at the real flag, never quietly become a directory name.
+func parseStoreArgs(args []string) (storeArgs, error) {
+	var out storeArgs
+	seenPath := false
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--":
+			// Everything after this is a path, even if it begins with a dash.
+			for _, rest := range args[i+1:] {
+				if seenPath {
+					return out, fmt.Errorf("more than one path was given (%q and %q); a store has one location", out.path, rest)
+				}
+				out.path, seenPath = rest, true
+			}
+			return out, nil
+		case a == "-h" || a == "--help":
+			out.help = true
+			return out, nil
+		case a == overrideFlag:
+			out.override = true
+		case a == "--force" || a == "--yes" || a == "-f" || a == "-y":
+			// NAMED, NOT GUESSED AT. These are what a person reaches for after the undetermined
+			// refusal, so the error says what the real flag is and what it will and will not do.
+			return out, fmt.Errorf("there is no %s flag.\n"+
+				"  To create a store where the sync status COULD NOT BE DETERMINED, type:\n"+
+				"    %s\n"+
+				"  Nothing overrides the refusal for a location that is KNOWN to synchronise", a, overrideFlag)
+		case strings.HasPrefix(a, "-") && a != "-":
+			return out, fmt.Errorf("unknown option %q; run 'omw store --help' for the options this build has.\n"+
+				"  It has NOT been treated as a path, and no store was created", a)
+		default:
+			if seenPath {
+				return out, fmt.Errorf("more than one path was given (%q and %q); a store has one location", out.path, a)
+			}
+			out.path, seenPath = a, true
+		}
+	}
+	return out, nil
+}
 
 func runStore(env cli.Env) int {
 	if len(env.Args) == 0 {
@@ -47,6 +125,9 @@ func runStore(env cli.Env) int {
 		return cli.ExitUsage
 	}
 	switch env.Args[0] {
+	case "-h", "--help":
+		io.WriteString(env.Stdout, storeUsage)
+		return cli.Success
 	case "create":
 		return storeCreate(env, env.Args[1:])
 	case "path":
@@ -60,41 +141,93 @@ func runStore(env cli.Env) int {
 	}
 }
 
-// resolveTarget picks the path to act on: an explicit argument, or the resolved per-device location.
+// resolveTarget picks the path to act on: the explicit one the person gave, or this device's store.
 //
 // A location that cannot be worked out is ExitUndetermined, not ExitFailure. "I do not know where
 // your store would live" is not "you have no store".
-func resolveTarget(env cli.Env, args []string) (string, int) {
-	if len(args) > 1 {
-		io.WriteString(env.Stderr, storeUsage)
-		return "", cli.ExitUsage
+func resolveTarget(env cli.Env, explicit string) (path string, fromPerson bool, code int) {
+	if explicit != "" {
+		return explicit, true, cli.Success
 	}
-	if len(args) == 1 {
-		return args[0], cli.Success
+	if p := env.Getenv(store.PathEnv); p != "" {
+		fromPerson = true
 	}
-	path, err := store.Resolve(env.Getenv)
+	resolved, err := store.Resolve(env.Getenv)
 	if err != nil {
 		fmt.Fprintf(env.Stderr, "omw store: where the store lives %s.\n", tri.Undetermined)
 		fmt.Fprintf(env.Stderr, "  %v\n", err)
 		fmt.Fprintf(env.Stderr, "  Set $%s to say where it should be, or pass a path.\n", store.PathEnv)
-		return "", cli.ExitUndetermined
+		return "", fromPerson, cli.ExitUndetermined
 	}
-	return path, cli.Success
+	return resolved, fromPerson, cli.Success
+}
+
+// readArgs parses and reports, so each subcommand does not repeat it.
+func readArgs(env cli.Env, args []string) (storeArgs, int) {
+	parsed, err := parseStoreArgs(args)
+	if err != nil {
+		fmt.Fprintf(env.Stderr, "omw store: %v\n", err)
+		return parsed, cli.ExitUsage
+	}
+	if parsed.help {
+		io.WriteString(env.Stdout, storeUsage)
+		return parsed, -1 // handled; exit zero without doing anything else
+	}
+	return parsed, cli.Success
 }
 
 func storeCreate(env cli.Env, args []string) int {
-	target, code := resolveTarget(env, args)
+	parsed, code := readArgs(env, args)
+	if code == -1 {
+		return cli.Success
+	}
+	if code != cli.Success {
+		return code
+	}
+	target, fromPerson, code := resolveTarget(env, parsed.path)
 	if code != cli.Success {
 		return code
 	}
 
-	s, err := store.Create(target)
+	// THE STORE'S OWN CONTAINING DIRECTORY, WHEN IT IS THE PRODUCT'S TO MAKE.
+	//
+	// `~/Library/Application Support` exists on every Mac; `…/omw` never does until something makes
+	// it. Without this, the default location is unreachable on exactly the machine the default
+	// exists for, and the first thing a person meets is "the path does not exist — mkdir it
+	// yourself". Making the store's own parent is part of the explicit act of creating a store, so
+	// the command does it and SAYS it did.
+	//
+	// It does this ONLY for the location the product chose. A path the person typed, or set in
+	// $OMW_STORE, is theirs: a missing parent there is a mistyped path, and conjuring it would
+	// silently create a store somewhere they did not mean (criterion 6's "this path does not
+	// exist" is a real and useful answer).
+	if !fromPerson {
+		parent := filepath.Dir(target)
+		if _, err := os.Stat(parent); errors.Is(err, os.ErrNotExist) {
+			if err := os.MkdirAll(parent, 0o700); err != nil {
+				fmt.Fprintf(env.Stderr, "omw store create: %s could not be created: %v\n", parent, err)
+				return cli.ExitFailure
+			}
+			fmt.Fprintf(env.Stdout, "created the directory the store lives in: %s\n", parent)
+		}
+	}
+
+	opts := []store.CreateOption{store.AsDeviceStore(env.Getenv)}
+	if parsed.override {
+		opts = append(opts, store.AcceptUndeterminedLocation())
+	}
+
+	s, err := store.Create(target, opts...)
 	if err == nil {
-		// CRITERION 1: the absolute path it created, on success. CRITERION 9: this line is the
-		// "confirmed local, created" rendering, and it must not be reachable by an undetermined
-		// probe — which is why Create refuses that case rather than reporting it here.
+		// CRITERION 1: the absolute path it created, on success.
 		fmt.Fprintf(env.Stdout, "created the store at %s\n", s.Path())
 		fmt.Fprintf(env.Stdout, "location: %s\n", s.SyncState().Describe())
+		if s.CreatedAtUndeterminedLocation() {
+			// CRITERION 25. An override is not a clean bill of health, and this success must not
+			// read like the one at a confirmed non-synchronising path.
+			fmt.Fprintf(env.Stdout, "You created this store with %s, so whether it stays\n", overrideFlag)
+			fmt.Fprintf(env.Stdout, "on this machine is not something the product has been able to confirm.\n")
+		}
 		fmt.Fprintf(env.Stdout, "This store is the only home of your tickets and unpublished drafts.\n")
 		return cli.Success
 	}
@@ -127,17 +260,25 @@ func reportCreateFailure(env cli.Env, target string, err error) int {
 		return cli.ExitFailure
 
 	case errors.Is(err, store.ErrSyncUndetermined):
-		// THE OPEN DECISION, SAID OUT LOUD. Issue #3 asks whether an undetermined location may be
-		// created in, and the PRD does not settle it. This build neither proceeds nor quietly
-		// halts: it stops on its own exit code, says the probe did not conclude, and names the
-		// decision as open. It must be impossible to mistake this for either settled outcome.
+		// THE RULING, IN ONE PLACE (Issue #3): halt, override available. The default is to stop,
+		// and to say the state is UNDETERMINED rather than that the path synchronises — §4.3 —
+		// while telling the person the exact thing they can type to proceed on purpose (§4.2).
 		fmt.Fprintf(env.Stderr, "omw store create: whether %s synchronises off this machine %s.\n", target, tri.Undetermined)
 		fmt.Fprintf(env.Stderr, "  why: %s\n", detail)
 		fmt.Fprintf(env.Stderr, "  This is NOT 'it does not synchronise' and NOT 'it does'. Nothing was created.\n")
-		fmt.Fprintf(env.Stderr, "  The product has no ruling yet on whether creation should proceed here:\n")
-		fmt.Fprintf(env.Stderr, "  Issue #3, 'Blocked on a decision', is open on exactly this question.\n")
-		fmt.Fprintf(env.Stderr, "  Until it is ruled on, create the store somewhere this check can conclude.\n")
+		fmt.Fprintf(env.Stderr, "  Nothing has been guessed on your behalf. If you know this location stays on\n")
+		fmt.Fprintf(env.Stderr, "  this machine, say so explicitly and it will be created:\n")
+		fmt.Fprintf(env.Stderr, "    omw store create %s%s\n", overrideFlag, pathArgument(target))
+		fmt.Fprintf(env.Stderr, "  The store's location will still report as %s afterwards.\n", tri.Undetermined)
 		return cli.ExitUndetermined
+
+	case errors.Is(err, store.ErrAnotherStoreRegistered):
+		// CRITERION 4. One store per device is not advice; a second store at another path splits
+		// the sole home of unpublished data in two.
+		fmt.Fprintf(env.Stderr, "omw store create: this device already has a store.\n")
+		fmt.Fprintf(env.Stderr, "  %s\n", detail)
+		fmt.Fprintf(env.Stderr, "  Nothing was created at %s. Run 'omw store path' to see the one you have.\n", target)
+		return cli.ExitFailure
 
 	case errors.Is(err, store.ErrPathMissing):
 		fmt.Fprintf(env.Stderr, "omw store create: %s cannot be created because the path does not exist.\n", target)
@@ -172,8 +313,21 @@ func reportCreateFailure(env cli.Env, target string, err error) int {
 //
 // It prints the path even when no store is there, because "where would it go" is a useful and
 // separate question from "is it there", and it renders the presence answer in three values.
+// pathArgument renders the path back into the command line only when the person had to say it —
+// suggesting a command with a path they never typed would be telling them to do something else.
+func pathArgument(target string) string {
+	return " -- " + target
+}
+
 func storePath(env cli.Env, args []string) int {
-	target, code := resolveTarget(env, args)
+	parsed, code := readArgs(env, args)
+	if code == -1 {
+		return cli.Success
+	}
+	if code != cli.Success {
+		return code
+	}
+	target, _, code := resolveTarget(env, parsed.path)
 	if code != cli.Success {
 		return code
 	}
@@ -198,7 +352,14 @@ func storePath(env cli.Env, args []string) int {
 // store — is it there, can it be read, does its location synchronise — three renderings, none of
 // them silence, and an undetermined answer anywhere keeps the command off the success exit code.
 func storeStatus(env cli.Env, args []string) int {
-	target, code := resolveTarget(env, args)
+	parsed, code := readArgs(env, args)
+	if code == -1 {
+		return cli.Success
+	}
+	if code != cli.Success {
+		return code
+	}
+	target, _, code := resolveTarget(env, parsed.path)
 	if code != cli.Success {
 		return code
 	}
@@ -229,6 +390,12 @@ func storeStatus(env cli.Env, args []string) int {
 	fmt.Fprintf(env.Stdout, "present:  %s\n", tri.Yes.Render("yes", "no"))
 	fmt.Fprintf(env.Stdout, "readable: %s\n", tri.Yes.Render("yes", "no"))
 	fmt.Fprintf(env.Stdout, "store id: %s\n", s.ID())
+	if s.CreatedAtUndeterminedLocation() {
+		// CRITERION 25: an override is remembered and shown, so this report can never be mistaken
+		// for one about a store at a confirmed non-synchronising path.
+		fmt.Fprintf(env.Stdout, "created:  with %s, at a location whose sync\n", overrideFlag)
+		fmt.Fprintf(env.Stdout, "          status was never confirmed\n")
+	}
 
 	// CRITERION 8: refusal is not a one-time gate. The location is re-probed every time, because a
 	// directory can be moved under a sync root long after the store was legitimately created.

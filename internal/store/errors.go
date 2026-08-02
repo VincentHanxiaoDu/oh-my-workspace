@@ -24,18 +24,23 @@ var (
 	// and the ancestor directory the evidence was found in.
 	ErrPathSynchronising = errors.New("this location synchronises off this machine")
 
-	// ErrSyncUndetermined means the product could not determine whether the location synchronises.
+	// ErrSyncUndetermined means the product could not determine whether the location synchronises,
+	// and the person has not overridden that.
 	//
-	// OPEN DECISION — Issue #3, "Blocked on a decision". §4.1 says the store refuses a
-	// synchronising location; §4.3 says an undetermined state is never rendered as a "no". Those
-	// combine for reporting but not for the ACTION: proceeding treats undetermined as "not
-	// synchronising", halting makes the store uncreatable on any filesystem this probe cannot
-	// classify, and an explicit override is a third answer the PRD does not fix either.
+	// THE RULING (Issue #3, PRD §4.1 + §4.3): halt, override available. An undetermined location
+	// blocks creation by default and is reported as UNDETERMINED — not as "this path synchronises",
+	// which would be an undetermined state rendered as a "no". A person who wants to proceed says so
+	// explicitly, and [AcceptUndeterminedLocation] is that act.
 	//
-	// Until the product rules, Create returns this error rather than picking one of the three. It
-	// is deliberately not ErrPathSynchronising: a caller must not be able to report an
-	// undetermined probe as a determined refusal, and must not be able to treat it as a pass.
+	// It is deliberately not ErrPathSynchronising, and the two are not interchangeable: that one is
+	// a determined refusal and is NOT overridable (criterion 24). A caller must not be able to
+	// report an undetermined probe as a determined refusal, or treat it as a pass.
 	ErrSyncUndetermined = errors.New("could not determine whether this location synchronises off this machine")
+
+	// ErrAnotherStoreRegistered means this device already has a store, somewhere else. One store per
+	// device (§2.1, criterion 4): creating a second at a different path is how "the sole home of
+	// unpublished data" quietly becomes two homes with half the tickets in each.
+	ErrAnotherStoreRegistered = errors.New("this device already has a store somewhere else")
 
 	// ErrPathMissing means the directory the store would be created inside does not exist. Create
 	// does not build a path a person did not ask for: a mistyped parent is a mistake worth hearing

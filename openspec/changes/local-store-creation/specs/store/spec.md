@@ -12,6 +12,18 @@ a byte of it.
 - **THEN** exactly one store is created, the absolute path it was created at is printed, and the
   command exits zero
 
+#### Scenario: The default location on a machine that has never run the product
+- **WHEN** the creation command is run with no location named, on a machine where the product's own
+  directory does not exist yet
+- **THEN** the product creates its own directory, says that it did, and creates the store — the
+  default location is not unreachable on the machine the default exists for
+
+#### Scenario: A location the person named whose parent does not exist
+- **WHEN** the creation command is given a location, by argument or environment, whose containing
+  directory does not exist
+- **THEN** creation is refused and says the path does not exist, because a location the person typed
+  is theirs and a missing parent there is a mistyped path
+
 #### Scenario: A second creation against an existing store
 - **WHEN** the creation command is run again against a path that already holds a store
 - **THEN** no second store is created, the existing store is left byte-identical, and the command
@@ -26,6 +38,27 @@ a byte of it.
 - **WHEN** the product resolves the store's location from different working directories
 - **THEN** it resolves to the same single path every time, and never searches upwards for a nearby
   store
+
+#### Scenario: Creation records which store is this device's store
+- **WHEN** a store is created at a location of the person's choosing
+- **THEN** later commands run with no location named resolve to that store rather than to the
+  default location
+
+#### Scenario: A second store at a different path
+- **WHEN** creation is attempted at a path other than the one this device has already registered,
+  and a store is still present there
+- **THEN** creation is refused, the output names where the one store already is, and nothing is
+  created at the new path
+
+#### Scenario: The registered store no longer exists
+- **WHEN** the store this device registered has been deleted and creation is attempted elsewhere
+- **THEN** creation succeeds, because a pointer to something that is gone does not leave the machine
+  permanently unable to hold a store
+
+#### Scenario: Whether this device already has a store cannot be determined
+- **WHEN** the record of this device's store exists and cannot be read
+- **THEN** creation is refused rather than proceeding, because proceeding is how a second store gets
+  made
 
 ### Requirement: The store refuses a location that synchronises off the machine
 The product SHALL probe the target location's ancestry for evidence that it is copied off this
@@ -43,6 +76,16 @@ which path, and SHALL leave nothing behind at the target.
 - **THEN** the same probe detects them and refuses on either platform, because detection reads
   evidence from disk and never branches on which operating system is running
 
+#### Scenario: An argument that is not a path
+- **WHEN** an argument beginning with a dash that the command does not recognise is given
+- **THEN** the command exits non-zero, creates nothing, echoes the argument back, and never treats
+  it as a location for the store
+
+#### Scenario: Asking what the command does
+- **WHEN** the person asks the creation command for help
+- **THEN** the usage is printed, including the override and what it will not do, the command exits
+  zero, and no store is created
+
 #### Scenario: Three failures that must not read alike
 - **WHEN** creation fails because the location synchronises, because the path does not exist, or
   because the person cannot write there
@@ -54,20 +97,43 @@ which path, and SHALL leave nothing behind at the target.
 - **THEN** the product reports the location as synchronising rather than accepting it silently, and
   distinguishes that from "confirmed off the sync path" and from "could not be determined"
 
-### Requirement: An undetermined sync state is neither a pass nor a refusal
+### Requirement: An undetermined sync state halts creation, with an explicit override
 The product SHALL render a sync probe that could not conclude as undetermined, distinguishable in
 output and in exit code from both "confirmed local, store created" and "confirmed synchronising,
-refused", and SHALL never render it as "not synchronising" or as silence.
+refused", SHALL never render it as "not synchronising" or as silence, and SHALL create the store
+there only when the person says so with an explicit act they type.
 
 #### Scenario: The probe cannot conclude
 - **WHEN** the product cannot determine whether the target location synchronises off the machine
 - **THEN** the outcome is rendered as undetermined with the reason attached, on an exit code shared
   with neither settled outcome, and nothing is created
 
-#### Scenario: The product has not ruled on whether to proceed
+#### Scenario: The halt says what the person can do about it
 - **WHEN** the undetermined outcome is reported
-- **THEN** the output states that the product has no ruling on whether creation should proceed here
-  and names the open decision, so the halt cannot be mistaken for a settled refusal
+- **THEN** the output names the explicit override that would create the store there, and says the
+  location will still report as undetermined afterwards
+
+#### Scenario: The person overrides an undetermined location
+- **WHEN** the person types the explicit override for a location whose sync status could not be
+  determined
+- **THEN** exactly one store is created, its absolute path is printed, and the command exits zero
+
+#### Scenario: The override is offered a location known to synchronise
+- **WHEN** the person types the explicit override for a location determined to synchronise off the
+  machine
+- **THEN** creation is refused with the same non-zero outcome and the same wording as without the
+  override, and nothing is created — the refusal for a known synchronising location is not
+  overridable
+
+#### Scenario: Reporting on a store created under the override
+- **WHEN** the product reports on a store that was created with the override
+- **THEN** its location state is still undetermined, never confirmed non-synchronising, and the
+  report is distinguishable from the report for a store at a confirmed non-synchronising location
+
+#### Scenario: A word the person guesses instead of the override
+- **WHEN** the person types a flag the command does not have, such as a general-purpose force or yes
+- **THEN** the command exits non-zero, creates nothing, and names the one flag that does exist and
+  what it will not do
 
 ### Requirement: A record is either absent or complete, never partial
 The product SHALL write every record to a temporary file in the destination's own directory, fsync

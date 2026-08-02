@@ -26,10 +26,19 @@ func runStoreCmd(t *testing.T, env map[string]string, args ...string) (code int,
 	return code, out.String(), errb.String()
 }
 
+// envFor is a sandboxed environment naming one store.
+//
+// HOME is redirected as well as OMW_STORE, because this device's store pointer (criterion 4) lives
+// under HOME and no test may read or write the pointer belonging to the machine it runs on.
+func envFor(t *testing.T, storePath string) map[string]string {
+	t.Helper()
+	return map[string]string{store.PathEnv: storePath, "HOME": t.TempDir()}
+}
+
 func storeEnv(t *testing.T) (map[string]string, string) {
 	t.Helper()
 	root := filepath.Join(t.TempDir(), "store")
-	return map[string]string{store.PathEnv: root}, root
+	return envFor(t, root), root
 }
 
 // CRITERION 1: one store, and the absolute path printed on success.
@@ -88,7 +97,7 @@ func TestStoreCreateRefusesASynchronisingLocation(t *testing.T) {
 	}
 	target := filepath.Join(dropbox, "store")
 
-	code, _, stderr := runStoreCmd(t, map[string]string{store.PathEnv: target}, "create")
+	code, _, stderr := runStoreCmd(t, envFor(t, target), "create")
 	if code == cli.Success {
 		t.Fatalf("creating inside a Dropbox root succeeded")
 	}
@@ -147,7 +156,7 @@ func TestTheThreeCreationFailuresReadDifferently(t *testing.T) {
 	}
 	seen := map[string]string{}
 	for name, c := range cases {
-		code, _, stderr := runStoreCmd(t, map[string]string{store.PathEnv: c.target}, "create")
+		code, _, stderr := runStoreCmd(t, envFor(t, c.target), "create")
 		if code == cli.Success {
 			t.Fatalf("%s: create succeeded", name)
 		}
@@ -191,9 +200,9 @@ func TestUndeterminedSyncIsItsOwnOutcome(t *testing.T) {
 	dropbox := filepath.Join(t.TempDir(), "Dropbox")
 	os.MkdirAll(dropbox, 0o755)
 	os.WriteFile(filepath.Join(dropbox, ".dropbox"), []byte("m"), 0o644)
-	refusedCode, _, refusedErr := runStoreCmd(t, map[string]string{store.PathEnv: filepath.Join(dropbox, "store")}, "create")
+	refusedCode, _, refusedErr := runStoreCmd(t, envFor(t, filepath.Join(dropbox, "store")), "create")
 
-	code, stdout, stderr := runStoreCmd(t, map[string]string{store.PathEnv: target}, "create")
+	code, stdout, stderr := runStoreCmd(t, envFor(t, target), "create")
 
 	if code == createdCode {
 		t.Errorf("undetermined exits %d, the same as 'confirmed local, created' — criterion 9 requires the two be distinguishable", code)
@@ -210,8 +219,13 @@ func TestUndeterminedSyncIsItsOwnOutcome(t *testing.T) {
 	if !strings.Contains(stderr, "could not be determined") {
 		t.Errorf("the output never says the state could not be determined:\n%s", stderr)
 	}
-	if !strings.Contains(stderr, "Issue #3") {
-		t.Errorf("the output does not name the open decision it is stopping on:\n%s", stderr)
+	// THE RULING IS HALT-WITH-AN-OVERRIDE, so the refusal has to tell the person the exact thing
+	// they can type. A halt that does not is a dead end.
+	if !strings.Contains(stderr, overrideFlag) {
+		t.Errorf("the refusal does not tell the person how to proceed on purpose:\n%s", stderr)
+	}
+	if strings.Contains(stderr, "no ruling") || strings.Contains(stderr, "Blocked on a decision") {
+		t.Errorf("the output still claims the product has not ruled on this:\n%s", stderr)
 	}
 	if stderr == refusedErr || stdout == createdOut {
 		t.Error("the undetermined output is identical to one of the settled outcomes")
@@ -230,7 +244,7 @@ func TestUndeterminedSyncIsItsOwnOutcome(t *testing.T) {
 // creates a store fails this test rather than slipping past it.
 func TestNoCommandSurfaceCreatesAStore(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "store")
-	env := map[string]string{store.PathEnv: root}
+	env := envFor(t, root)
 
 	surfaces := [][]string{
 		{"store", "path"},

@@ -43,10 +43,21 @@ Three promises hang on getting it right rather than merely getting it built:
 - **A new `omw store` command** with `create`, `path` and `status`, whose exit codes carry the
   distinctions: success, failure, and `ExitUndetermined` for what could not be determined.
 
-### Not changed, and deliberately so
-
-**Issue #3's blocked decision is left open.** When the probe cannot determine whether a location
-synchronises, the PRD fixes neither proceeding nor halting nor an explicit override, and this change
-picks none of the three. Creation stops on `ExitUndetermined` with a message saying the state could
-not be determined, that the product has no ruling on whether to proceed, and naming Issue #3's open
-decision. That is a refusal to decide made visible, not a decision.
+- **The ruled behaviour for an undetermined location: halt, with an explicit override.** An
+  undetermined probe blocks creation by default, on its own exit code, and says the state could not
+  be determined rather than that the path synchronises. A person who wants to proceed types
+  `--accept-undetermined-location`. That override accepts exactly one thing: it does **not** work for
+  a location determined to synchronise, because §4.1's refusal is not overridable. A store created
+  that way remembers it, and its location still reports as undetermined afterwards, because the probe
+  is re-run rather than replaced by the person's decision.
+- **Arguments are parsed, not assumed to be paths.** An unrecognised argument beginning with a dash
+  is refused; `--help` prints the usage and creates nothing; `--force` and `--yes` are named and
+  redirected to the real flag. Before this, `omw store create --help` exited zero having created a
+  store in a directory called `--help` while silently discarding `$OMW_STORE`.
+- **One store per device is enforced, not just documented.** Creation records which store is this
+  device's store in a pointer file holding a path and nothing else, refuses a second store at another
+  path while that one still exists, and `Resolve` consults it so later commands find the store that
+  was made.
+- **The default location works on a fresh machine.** `~/Library/Application Support/omw` does not
+  exist until something makes it; the command makes the store's own containing directory and says so.
+  A location the *person* named is left alone — a missing parent there is still a mistyped path.
