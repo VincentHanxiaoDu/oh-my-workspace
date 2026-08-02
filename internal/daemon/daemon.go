@@ -163,7 +163,7 @@ func Start(opts Options) (*Daemon, error) {
 		return nil, fmt.Errorf("the daemon could not record that it is running: %w", err)
 	}
 
-	control, state, detail, cerr := openControl(p, d.Report, opts.ConfirmOwnerOnly)
+	control, state, detail, cerr := openControl(p, opts.StorePath, d.Report, opts.ConfirmOwnerOnly)
 	d.control, d.controlState, d.controlDetail = control, state, detail
 	if cerr != nil && !errors.Is(cerr, ErrControlNotOwnerOnly) {
 		d.controlState, d.controlDetail = tri.Undetermined, cerr.Error()
