@@ -144,6 +144,11 @@ type VersionSource interface {
 type Archive struct {
 	mu          sync.RWMutex
 	deactivated map[PersonID]bool
+	// unreadable is Issue #22's third value: people whose record could not be read, so whether they
+	// have left was NOT established. It is a separate set from deactivated on purpose — a person in
+	// it is neither active nor departed, and merging the two would make "I could not check" render
+	// as one of the answers. See [Archive.MarkUnreadable] and [AuthorActive].
+	unreadable map[PersonID]bool
 }
 
 // NewArchive returns an empty archive.
