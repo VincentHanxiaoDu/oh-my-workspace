@@ -2,7 +2,6 @@ package inbox
 
 import (
 	"errors"
-	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -462,40 +461,12 @@ func TestEveryDeclaredAcknowledgementIsReachable(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Presence — probed, never named. PRD §4.2, §4.6, §5.1.
-// ---------------------------------------------------------------------------
-
-func TestWithNoControlSocketTheDaemonIsDeterminedNotToBeRunning(t *testing.T) {
-	root := t.TempDir()
-	p := Probe(root)
-	if p.Running.String() != "no" {
-		t.Errorf("with no control socket the daemon reports %v; that is determinable and it is no", p.Running)
-	}
-	if p.ControlAPIOpen.String() != "no" {
-		t.Errorf("with nothing listening the control API reports %v", p.ControlAPIOpen)
-	}
-	// And probing started nothing.
-	if _, err := os.Stat(filepath.Join(root, ControlSocketName)); err == nil {
-		t.Error("probing created a control socket; nothing may start the daemon (PRD §4.2)")
-	}
-}
-
-// A path that exists and is not a socket is UNDETERMINED — not "not running". The distinction is
-// the whole of §4.3 applied to §4.2, and this is the case where a bool would have said "no".
-func TestSomethingThatIsNotASocketIsUndeterminedAndNotANegative(t *testing.T) {
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, ControlSocketName), []byte("not a socket"), 0o600); err != nil {
-		t.Fatalf("seeding: %v", err)
-	}
-	p := Probe(root)
-	if p.Running.Determined() {
-		t.Errorf("a control socket path holding a regular file was answered as %v", p.Running)
-	}
-	if p.ControlAPIOpen.Determined() {
-		t.Errorf("whether the control API is open was answered as %v", p.ControlAPIOpen)
-	}
-	if p.RunningWhy == "" || p.ControlWhy == "" {
-		t.Error("undetermined without a reason is close to silence; both must name what was found")
-	}
-}
+// The daemon/control-API probe that used to live in this package is GONE, and its absence is the
+// point. It named the control socket's file name, and Issue #41 ruled that exactly one place in
+// the product derives a control-socket path — `internal/daemon`, which falls back to a per-user
+// runtime directory above the kernel's sun_path limit, so any second copy is wrong on the fallback
+// path. The inbox now asks `daemonLiveness` in package commands, which asks `daemon.Inspect`, which
+// is the same function `omw daemon status` answers from.
+//
+// TestNoPackageOutsideDaemonDerivesAControlSocketPath in internal/commands enforces this over the
+// whole tree, so there is nothing left for this package to assert about it.
