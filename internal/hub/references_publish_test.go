@@ -5,6 +5,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -123,7 +124,11 @@ func TestPublishingThroughAGrantIsBoundByTheSameRule(t *testing.T) {
 func TestTheOnlyDirectCallerOfStorePublishIsTheCheckedWrapper(t *testing.T) {
 	const allowed = "references_publish.go"
 	found := map[string]int{}
-	for _, dir := range []string{".", "../commands", "../cli", "../health"} {
+	// EVERY PACKAGE UNDER internal, DISCOVERED RATHER THAN LISTED. The first version named four
+	// directories; merging main brought two more packages, and a hard-coded list would have gone on
+	// passing while checking less than its name says. A new package that calls Publish is now
+	// caught the day it appears.
+	for _, dir := range internalPackageDirs(t) {
 		for _, file := range referenceGoFilesIn(t, dir) {
 			src, err := os.ReadFile(file)
 			if err != nil {
@@ -192,41 +197,65 @@ func TestReferenceErrorsAreDistinguishableFromEveryOther(t *testing.T) {
 	}
 }
 
-// THE THREE SCOPES ARE STILL THREE. Issue #12 ruled the vocabulary and this Issue adds nothing to
-// it — reading references is `read`, and the hub operator's ability to read everything is a
-// deployment fact, not a scope.
-func TestThisIssueAddsNoFourthScope(t *testing.T) {
-	if got := len(Vocabulary()); got != 3 {
-		t.Fatalf("the vocabulary has %d scopes: %v", got, Vocabulary())
-	}
-	for _, s := range Vocabulary() {
-		switch s {
-		case ScopeRead, ScopeWrite, ScopePublish:
-		default:
-			t.Errorf("unexpected scope %q", s)
+// THE SCOPE VOCABULARY AND THE VERSION CONSTRAINT ARE ASSERTED ON main, BY ISSUE #11.
+//
+// This branch was cut before #11 merged, and both Issues were told to honour Issue #12's two
+// constraints, so both wrote a guard for each. #11's are merged and reviewed and they win:
+// `TestTheScopeVocabularyIsStillExactlyThree` and `TestVersionStillCarriesNoVisibility` in
+// versions_test.go cover everything my two did — and more, since they use reflection over the
+// struct rather than reading its source text, and #11's also covers `VersionView`. Mine are gone.
+//
+// ONE THING MY VERSION CAUGHT THAT #11's DOES NOT, kept here under a name of its own rather than
+// lost in the deduplication: #11 compares each field's type to `Visibility` exactly, so a field of
+// type `*Visibility`, `[]Visibility` or `map[…]Visibility` would pass it. Mine was a text scan and
+// happened to catch those. This is that assertion, made properly.
+func TestVersionCarriesNoVisibilityThroughAnyIndirection(t *testing.T) {
+	target := reflect.TypeOf(Visibility{})
+	for _, container := range []reflect.Type{reflect.TypeOf(Version{}), reflect.TypeOf(VersionView{})} {
+		for i := 0; i < container.NumField(); i++ {
+			f := container.Field(i)
+			ft := f.Type
+			// Unwrap pointers, slices, arrays and maps until something concrete is reached.
+			for {
+				switch ft.Kind() {
+				case reflect.Ptr, reflect.Slice, reflect.Array:
+					ft = ft.Elem()
+					continue
+				case reflect.Map:
+					if ft.Elem() == target || ft.Key() == target {
+						t.Fatalf("%s.%s reaches a Visibility through a map; a note has ONE visibility\n"+
+							"governing every version of it", container.Name(), f.Name)
+					}
+					ft = ft.Elem()
+					continue
+				}
+				break
+			}
+			if ft == target {
+				t.Fatalf("%s.%s reaches a Visibility (%s); per-version visibility is how the timeline\n"+
+					"becomes a bypass", container.Name(), f.Name, f.Type)
+			}
 		}
 	}
 }
 
-// And no visibility field crept onto Version. One visibility governs a note and all of its
-// versions; per-version visibility is how the timeline becomes a bypass.
-func TestVersionStillCarriesNoVisibility(t *testing.T) {
-	src, err := os.ReadFile("store.go")
+// internalPackageDirs returns every package directory under internal/, this one included.
+func internalPackageDirs(t *testing.T) []string {
+	t.Helper()
+	entries, err := os.ReadDir("..")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("cannot read the internal directory: %v", err)
 	}
-	decl := string(src)
-	start := strings.Index(decl, "type Version struct {")
-	if start < 0 {
-		t.Fatal("Version's declaration was not found, so this check proves nothing")
+	out := []string{"."}
+	for _, e := range entries {
+		if e.IsDir() && e.Name() != "hub" {
+			out = append(out, filepath.Join("..", e.Name()))
+		}
 	}
-	end := strings.Index(decl[start:], "\n}")
-	if end < 0 {
-		t.Fatal("Version's declaration does not end")
+	if len(out) < 3 {
+		t.Fatalf("only %d package directories found; this sweep would prove little: %v", len(out), out)
 	}
-	if strings.Contains(strings.ToLower(decl[start:start+end]), "visibility") {
-		t.Error("Version has gained a visibility field; a note's visibility governs every version of it")
-	}
+	return out
 }
 
 func referenceGoFilesIn(t *testing.T, dir string) []string {

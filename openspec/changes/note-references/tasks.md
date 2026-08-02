@@ -50,3 +50,14 @@
 - [x] The reference code imports no network-capable package
 - [x] The only direct caller of `Store.Publish` is the wrapper that checks references
 - [x] The vocabulary is still three scopes and `Version` still carries no visibility field
+
+## After merging main (Issue #11 landed)
+
+- [x] Merge `origin/main` and make the merged tree compile and pass, not just this branch
+- [x] Drop my duplicate `TestVersionStillCarriesNoVisibility` in favour of #11's merged one
+- [x] Keep the one thing mine caught that #11's does not, under its own name: a `Visibility`
+      reached through a pointer, slice, array or map
+- [x] Drop my duplicate scope-vocabulary guard; #11's merged one covers it and more
+- [x] Adopt #11's `VersionRef` so a listing says which version it means in the shared spelling
+- [x] Drive criterion 13 against #11's real `Archive` instead of structurally
+- [x] Widen the `Store.Publish` caller sweep to every package under `internal`, discovered not listed

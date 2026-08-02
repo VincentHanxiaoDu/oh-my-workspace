@@ -29,9 +29,13 @@ type ReferenceView struct {
 // Listing is a note's outbound references as one reader sees them, together with that reader's
 // rendering of the body.
 type Listing struct {
-	// Note and Version say what was listed. Version is the concrete number, never 0.
-	Note    NoteID
-	Version int
+	// Ref names exactly which version was listed, in Issue #11's spelling — `note-1@v3` — so the
+	// answer to "which version does this reference set belong to" can be copied out of one command
+	// and pasted into another. Issue #14's own Related note says a reference to a note with new
+	// versions must say which version it means, and that "that answer comes from #11's definition
+	// of latest": this branch was cut before #11 merged, and adopting VersionRef after merging it
+	// is what honouring that note looks like. It is never the zero ref for a real listing.
+	Ref VersionRef
 	// Body is the note as this reader sees it: references rendered in their state for this reader,
 	// and references this reader may not see removed without a trace.
 	Body string
@@ -176,7 +180,7 @@ func OutboundReferences(s *Store, id NoteID, version int, reader PersonID) (List
 		return states[Reference{Kind: r.Kind, Target: r.Target}]
 	}
 
-	l := Listing{Note: n.ID, Version: v.Number, Body: RenderBody(v.Body, stateOf)}
+	l := Listing{Ref: VersionRef{Note: n.ID, Number: v.Number}, Body: RenderBody(v.Body, stateOf)}
 	for _, r := range ParseReferences(v.Body) {
 		st := stateOf(r)
 		if st == StateHidden {

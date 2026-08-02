@@ -264,8 +264,13 @@ func TestReferencesAreThoseOfTheVersionAsked(t *testing.T) {
 		}
 	}
 	// And the version asked for is the version answered about.
-	if v1.Version != 1 || v2.Version != 2 {
-		t.Errorf("versions came back as %d and %d", v1.Version, v2.Version)
+	if v1.Ref.Number != 1 || v2.Ref.Number != 2 {
+		t.Errorf("versions came back as %s and %s", v1.Ref, v2.Ref)
+	}
+	// The ref is Issue #11's, and it round-trips: what a listing names can be pasted back in.
+	back, err := ParseVersionRef(v1.Ref.String())
+	if err != nil || back != v1.Ref {
+		t.Errorf("the listing's ref %q did not parse back to itself: %v, %v", v1.Ref, back, err)
 	}
 }
 
@@ -410,19 +415,20 @@ func TestFollowingAReferenceWidensNothing(t *testing.T) {
 // CRITERION 13: a reference to a note by a person who has been deactivated still resolves.
 // Archiving is not unresolution.
 //
-// WHAT THIS DRIVES AND WHAT IT DOES NOT, SAID PLAINLY: Issue #22 owns archival and there is no
-// archived flag in this build, so what is driven is the property that makes criterion 13 true —
-// resolution consults the note's existence and [CanRead] and NOTHING about the author's standing.
-// The author here is not in the hub's record of people at all, which is the closest this build has
-// to a departed colleague.
+// DRIVEN FOR REAL, against Issue #11's Archive, which merged to main after this branch was cut.
+// Until then this could only be asserted structurally — that resolution consults the note's
+// existence and [CanRead] and nothing about the author's standing. Now the author is actually
+// marked as having left, which is the state criterion 13 is about.
 func TestANoteByADepartedColleagueStillResolves(t *testing.T) {
 	c := newCorpus(t)
 	departed, err := PublishWithReferences(c.store, Publication{Author: "quinn", Title: "written before leaving", Body: "the knowledge was the point"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := c.rec.People(); containsPerson(got, "quinn") {
-		t.Fatalf("quinn is in the hub's record of people, so this test is not about a departed colleague: %v", got)
+	arch := NewArchive()
+	arch.Deactivate("quinn")
+	if !arch.IsDeactivated("quinn") {
+		t.Fatal("the author was not marked as departed, so this test is not about a departed colleague")
 	}
 	n := c.publish(t, "alice", "cites them", "as [[note:"+string(departed.ID)+"]] says")
 
@@ -434,15 +440,6 @@ func TestANoteByADepartedColleagueStillResolves(t *testing.T) {
 		t.Errorf("the reference to the departed colleague's note is %+v, want one resolved reference —\n"+
 			"archiving is not unresolution", l.Refs)
 	}
-}
-
-func containsPerson(ps []PersonID, p PersonID) bool {
-	for _, x := range ps {
-		if x == p {
-			return true
-		}
-	}
-	return false
 }
 
 // A reader who may not read the REFERENCING note learns nothing about its edges: the refusal is the

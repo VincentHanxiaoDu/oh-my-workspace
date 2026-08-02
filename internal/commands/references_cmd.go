@@ -222,7 +222,9 @@ func referencesOf(env cli.Env, args []string) int {
 	}
 
 	// THE COUNT IS THE READER'S COUNT (criterion 18). hub.Listing has no other one to print.
-	fmt.Fprintf(env.Stdout, "note %s, version %d\n", string(l.Note), l.Version)
+	// Issue #11's ref spelling, so the version these references belong to can be pasted straight
+	// into `omw versions`.
+	fmt.Fprintf(env.Stdout, "references of %s\n", l.Ref)
 	fmt.Fprintf(env.Stdout, "references: %d\n", l.Count())
 	for _, v := range l.Refs {
 		switch v.State {
