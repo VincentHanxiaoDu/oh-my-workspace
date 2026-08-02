@@ -518,6 +518,12 @@ func TestTheThreeReviewOutcomesAreDistinguishableInOutputAndInState(t *testing.T
 	refused := do("refuse: you named a customer", nil)
 	unreachable := do("", os.ErrDeadlineExceeded)
 	unusable := do("I am not sure, really", nil)
+	// EACH KIND OF UNUSABLE ANSWER IS DRIVEN SEPARATELY. Driving only the rambling one let a
+	// half-fix — "an empty answer passes, everything else is undetermined" — through this package
+	// entirely; it was caught in internal/drafts and nowhere else, which is one test away from not
+	// being caught at all.
+	empty := do("", nil)
+	whitespace := do("   \n\t", nil)
 
 	outs := map[string]string{"passed": passed.out, "refused": refused.out, "unreachable": unreachable.out}
 	seen := map[string]string{}
@@ -537,7 +543,7 @@ func TestTheThreeReviewOutcomesAreDistinguishableInOutputAndInState(t *testing.T
 	}
 
 	// CRITERION 16: an incomplete review is not a pass, and it has its own exit code.
-	for name, r := range map[string]run{"unreachable": unreachable, "unusable": unusable} {
+	for name, r := range map[string]run{"unreachable": unreachable, "unusable": unusable, "returned nothing": empty, "returned whitespace": whitespace} {
 		if r.code == passed.code {
 			t.Errorf("a review that %s shares an exit code with a pass (%d)", name, r.code)
 		}
