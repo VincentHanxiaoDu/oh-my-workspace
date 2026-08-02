@@ -22,7 +22,6 @@ import (
 
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/channels"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/cli"
-	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/daemon"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/store"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri"
 )
@@ -106,19 +105,35 @@ func channelsStore(env cli.Env) (*store.Store, string, int) {
 // ingestionRunning is whether ingestion is happening right now, in three values.
 //
 // IT IS THE DAEMON'S RUNNING STATE AND NOTHING ELSE, because that is exactly what ingestion is
-// (criterion 4). daemon.Inspect reads the lock and the run record; it starts nothing (criterion 7).
-func ingestionRunning(path string) (tri.Value, string) {
-	rep := daemon.Inspect(path)
-	switch rep.Running {
+// (criterion 4).
+//
+// IT ASKS [daemonLiveness] AND DERIVES NOTHING (Issue #41). This file does not stat a socket, does
+// not know what a control socket is called, and does not call daemon.Inspect itself: whether a
+// daemon holds a store has one definition in this product, and a second caller reproducing the
+// rule is one release away from reproducing an older version of it and then disagreeing with
+// `omw daemon status` about the same running daemon. The reason string is passed through rather
+// than rewritten, so the sentence a person reads names the specific finding.
+//
+// THE THIRD ANSWER IS NOT "STOPPED", AND FOR THIS CAPABILITY THAT IS CRITERION 6 AND NOT ONLY §4.3.
+// Criterion 6 requires a channel command to say its ingestion facts are not current when the daemon
+// is down. "I could not establish whether the daemon is down" is a third case there too: the facts
+// are equally not to be trusted, and the reason is different, so it gets its own wording rather
+// than being folded into either of the other two.
+func ingestionRunning(env cli.Env) (tri.Value, string) {
+	live, why := daemonLiveness(env)
+	switch live {
 	case tri.Yes:
 		return tri.Yes, "the daemon is running, so your channels are being ingested continuously"
 	case tri.No:
 		return tri.No, "the daemon is NOT running, so nothing is being ingested and the ingestion " +
 			"facts below are not current"
 	default:
-		return tri.Undetermined, "whether the daemon is running " + tri.Undetermined.String() +
-			", so whether ingestion is happening — and whether the facts below are current — " +
+		detail := "whether ingestion is happening — and whether the facts below are current — " +
 			tri.Undetermined.String()
+		if why != "" {
+			detail += ": " + why
+		}
+		return tri.Undetermined, detail
 	}
 }
 
@@ -229,7 +244,7 @@ func channelsConnect(env cli.Env, args []string) int {
 		id = defaultChannelID(kind, account)
 	}
 
-	s, path, code := channelsStore(env)
+	s, _, code := channelsStore(env)
 	if code != cli.Success {
 		return code
 	}
@@ -249,7 +264,7 @@ func channelsConnect(env cli.Env, args []string) int {
 	fmt.Fprintf(env.Stdout, "connected %s as %s, under the identifier %s\n", conn.Kind, conn.Account, conn.ID)
 	// CONNECTING DOES NOT INGEST AND DOES NOT START ANYTHING. Said, so that a person who sees no
 	// tickets afterwards knows why rather than concluding nobody has asked them for anything.
-	running, why := ingestionRunning(path)
+	running, why := ingestionRunning(env)
 	fmt.Fprintf(env.Stdout, "ingestion: %s — %s\n", running.Render("running", "NOT RUNNING"), why)
 	return exitFor(running)
 }
@@ -309,11 +324,11 @@ func channelsList(env cli.Env, args []string) int {
 		fmt.Fprintf(env.Stderr, "omw channels list: takes no arguments\n")
 		return cli.ExitUsage
 	}
-	s, path, code := channelsStore(env)
+	s, _, code := channelsStore(env)
 	if code != cli.Success {
 		return code
 	}
-	running, why := ingestionRunning(path)
+	running, why := ingestionRunning(env)
 	sayIngestionStanding(env.Stdout, running, why)
 
 	conns, err := channels.List(s)
@@ -359,11 +374,11 @@ func channelsStatus(env cli.Env, args []string) int {
 		fmt.Fprintf(env.Stderr, "omw channels status: name exactly one channel\n")
 		return cli.ExitUsage
 	}
-	s, path, code := channelsStore(env)
+	s, _, code := channelsStore(env)
 	if code != cli.Success {
 		return code
 	}
-	running, why := ingestionRunning(path)
+	running, why := ingestionRunning(env)
 	sayIngestionStanding(env.Stdout, running, why)
 
 	c, err := channels.Get(s, args[0])
