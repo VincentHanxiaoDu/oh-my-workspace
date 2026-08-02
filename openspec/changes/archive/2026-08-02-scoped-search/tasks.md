@@ -38,6 +38,8 @@
 - [x] `omw search scopes` — the search subjects, and the unchanged capability vocabulary
 - [x] Found nothing exits 0 and says so; could not run exits 1; could not determine exits 3
 - [x] No hub configured is stated precisely and reaches nothing
+- [x] The daemon question routed through Issue #41's single answer; no socket knowledge in this package
+- [x] Liveness rendered three-valued: undetermined carries its own wording, code and exit status
 - [x] The daemon is said to be not running, never started
 
 ## Unguessable note ids (the owner's ruling, amended into Issue #15)

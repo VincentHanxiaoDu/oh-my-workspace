@@ -22,7 +22,6 @@ package commands
 import (
 	"fmt"
 	"io"
-	"os"
 	"strings"
 
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/cli"
@@ -41,10 +40,16 @@ func init() {
 // Environment this command reads. Its own constants, not shared with another command file.
 const (
 	searchEnvHub      = "OMW_HUB"
-	searchEnvSocket   = "OMW_CONTROL_SOCKET"
 	searchEnvIdentity = "OMW_IDENTITY"
 	searchEnvScopes   = "OMW_SCOPES"
 )
+
+// THERE IS NO SOCKET PATH HERE, DELIBERATELY. This command used to stat a path named by an
+// OMW_CONTROL_SOCKET variable, which nothing in the product ever set — so it answered "the daemon
+// is not running" while a daemon was running. Issue #41 replaced every such guess with one answer,
+// daemonLiveness in liveness.go, and the rule is that no package outside internal/daemon derives a
+// control socket path at all: internal/daemon falls back to a per-user runtime directory above the
+// sun_path limit, so a second copy of the rule is not merely duplicated but wrong on that path.
 
 // searchSource is how this command reaches a hub.
 //
@@ -63,20 +68,6 @@ var searchSource = func(env cli.Env) (*hub.Store, error) {
 // searchRoster supplies the hub's record of who is still with the company (PRD §5.4). Nil means
 // this build cannot tell, which renders as undetermined rather than as "everyone is still here".
 var searchRoster = func(env cli.Env) *hub.Roster { return nil }
-
-// searchDaemonRunning reports whether the daemon is up.
-//
-// IT PROBES, IT DOES NOT NAME. The socket path comes from the environment and its existence is the
-// answer; nothing here assumes a platform's convention for where a socket lives. PRD §4.2 and
-// criterion 20: the daemon is never started on the person's behalf.
-var searchDaemonRunning = func(env cli.Env) bool {
-	p := strings.TrimSpace(env.Getenv(searchEnvSocket))
-	if p == "" {
-		return false
-	}
-	_, err := os.Stat(p)
-	return err == nil
-}
 
 // searchGrant builds the grant this search is issued under.
 //
@@ -165,9 +156,13 @@ func runSearch(env cli.Env) int {
 	}
 	// Criterion 20: said, never started. A search does not bring the daemon up on the person's
 	// behalf, and this command has no code that could.
-	if !searchDaemonRunning(env) {
-		fmt.Fprintf(env.Stderr, "omw search: %v (code: %s)\n", hub.ErrDaemonNotRunning, hub.ErrDaemonNotRunning.Code)
-		return cli.ExitFailure
+	//
+	// THE ANSWER IS THE PRODUCT'S ONE ANSWER AND IT IS THREE-VALUED. "The daemon is not running" is
+	// an established fact; "whether the daemon is running could not be determined" is not a
+	// negative, and collapsing the two would be exactly the confident false negative Issue #41
+	// removed. reportDaemonNotLive writes each with its own wording and its own exit code.
+	if live, why := daemonLiveness(env); live != tri.Yes {
+		return reportDaemonNotLive(env, "omw search", live, why)
 	}
 
 	grant, err := searchGrant(env)
