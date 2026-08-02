@@ -100,3 +100,7 @@
       is drivable after all — and drive it in the merged tree, where it passes
 - [x] Measure the real pointer before and after `go test ./internal/commands/` and record the
       result, rather than asserting from the code that it is safe
+- [x] Re-verify the merge against `main` after #27 landed (`669efda`), rather than leaving a finding
+      measured against a base that has since moved
+- [x] State the four findings and the two unruled decisions at the TOP of the pull request body,
+      where a reviewer meets them, rather than only inside a mutation table
