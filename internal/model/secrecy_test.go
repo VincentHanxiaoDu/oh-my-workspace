@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/hub"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/refusal"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri"
 )
 
@@ -147,9 +147,9 @@ func TestAskingAnAPIForTheCredentialIsRefusedAndNotAnsweredEmpty(t *testing.T) {
 	if val != "" {
 		t.Errorf("the refusal also returned a value %q", val)
 	}
-	if hub.Code(err) != ErrCredentialNotReadable.Code {
+	if refusal.Code(err) != ErrCredentialNotReadable.Code {
 		t.Errorf("the refusal's code is %q, want %q — a caller must tell it apart without parsing prose",
-			hub.Code(err), ErrCredentialNotReadable.Code)
+			refusal.Code(err), ErrCredentialNotReadable.Code)
 	}
 
 	// THE DISTINCTION. A fully configured credential refused, and a genuinely absent one reported:
@@ -163,9 +163,9 @@ func TestAskingAnAPIForTheCredentialIsRefusedAndNotAnsweredEmpty(t *testing.T) {
 		t.Errorf("a provider with a credential reports present=%v, want yes", configured.Present())
 	}
 	_, err2 := CredentialThrough(none)
-	if hub.Code(err2) != hub.Code(err) {
+	if refusal.Code(err2) != refusal.Code(err) {
 		t.Errorf("the refusal differs depending on whether a credential exists (%q vs %q); the refusal itself "+
-			"must not be an oracle for the answer it refuses", hub.Code(err2), hub.Code(err))
+			"must not be an oracle for the answer it refuses", refusal.Code(err2), refusal.Code(err))
 	}
 }
 

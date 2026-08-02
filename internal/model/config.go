@@ -49,7 +49,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/hub"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/refusal"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/store"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri"
 )
@@ -84,7 +84,7 @@ const (
 // has to be able to tell them apart without reading English.
 var (
 	// ErrNoModel — something that needs a model was asked for and there is no model to run it with.
-	ErrNoModel = &hub.Error{
+	ErrNoModel = &refusal.Error{
 		Code: "no-model",
 		Msg:  "no model is configured, and review mode checks your drafts with your own model",
 	}
@@ -95,13 +95,13 @@ var (
 	// yet supplied reports as such — it never reports as fully configured, and it never reports as
 	// no-provider-configured." A person in this state has done half of a two-part act and needs to
 	// be told which half is outstanding, not sent back to the beginning.
-	ErrNoCredential = &hub.Error{
+	ErrNoCredential = &refusal.Error{
 		Code: "no-model-credential",
 		Msg:  "a model provider is chosen and no credential has been supplied for it",
 	}
 
 	// ErrUndetermined — whether a model is configured could not be established. Never a "no".
-	ErrUndetermined = &hub.Error{
+	ErrUndetermined = &refusal.Error{
 		Code: "model-undetermined",
 		Msg:  "whether a model is configured could not be determined, which is neither yes nor no",
 	}
@@ -113,19 +113,19 @@ var (
 	// cannot tell those apart will report the wrong one to its person. So the request is refused,
 	// with its own code, and "no credential is configured" is a different code on a successful
 	// answer.
-	ErrCredentialNotReadable = &hub.Error{
+	ErrCredentialNotReadable = &refusal.Error{
 		Code: "model-credential-not-readable",
 		Msg:  "refused: a model credential is never returned through an API; whether one is present is answerable, its value is not",
 	}
 
 	// ErrNoStore — configuring a model needs somewhere to record the choice.
-	ErrNoStore = &hub.Error{
+	ErrNoStore = &refusal.Error{
 		Code: "no-store",
 		Msg:  "no store is open, and a model choice is recorded in your store",
 	}
 
 	// ErrNoProviderNamed — `use` was given nothing to use.
-	ErrNoProviderNamed = &hub.Error{
+	ErrNoProviderNamed = &refusal.Error{
 		Code: "no-provider-named",
 		Msg:  "refused: choosing a provider means naming one",
 	}
@@ -133,7 +133,7 @@ var (
 
 // allErrors is every error this package defines, for the test that asserts they are pairwise
 // distinguishable in both code and message.
-var allErrors = []*hub.Error{
+var allErrors = []*refusal.Error{
 	ErrNoModel, ErrNoCredential, ErrUndetermined, ErrCredentialNotReadable,
 	ErrNoStore, ErrNoProviderNamed,
 }
@@ -341,7 +341,7 @@ func readCredential(getenv func(string) string, rec record, recUnreadable bool, 
 // the product calls it, and TestNothingConfiguresAModelAsASideEffect asserts that.
 func Use(s *store.Store, provider string) error {
 	if s == nil {
-		return hub.Refusedf(ErrNoStore, "no store was opened")
+		return refusal.Refusedf(ErrNoStore, "no store was opened")
 	}
 	provider = strings.TrimSpace(provider)
 	if provider == "" {
@@ -360,7 +360,7 @@ func Use(s *store.Store, provider string) error {
 // three-valued answer into a refusal at configuration time.
 func UseCredentialFile(s *store.Store, path string) error {
 	if s == nil {
-		return hub.Refusedf(ErrNoStore, "no store was opened")
+		return refusal.Refusedf(ErrNoStore, "no store was opened")
 	}
 	rec, _, _ := readRecord(s)
 	rec.CredentialFile = strings.TrimSpace(path)
@@ -372,7 +372,7 @@ func UseCredentialFile(s *store.Store, path string) error {
 // pretending to have deleted something.
 func Clear(s *store.Store) error {
 	if s == nil {
-		return hub.Refusedf(ErrNoStore, "no store was opened")
+		return refusal.Refusedf(ErrNoStore, "no store was opened")
 	}
 	err := s.Delete(recordKind, recordID)
 	if errors.Is(err, store.ErrRecordNotFound) {
