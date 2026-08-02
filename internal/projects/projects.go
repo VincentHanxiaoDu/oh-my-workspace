@@ -17,16 +17,20 @@ import (
 
 // Record kinds this package owns in the device's store.
 //
-// Three kinds and not one, because they have three different lifetimes and three different owners.
+// Two kinds and not one, because they have two different lifetimes and two different owners.
 // KindProject is written by a person's explicit act and outlives everything. KindState is the
-// daemon's polled result and is meaningless once stale. KindHeartbeat is the daemon's liveness and
-// is meaningless the moment the daemon stops. Folding the state into the project record would mean
-// the daemon rewriting a person's registry entry every couple of seconds — a poll that can lose a
-// project to a bad write.
+// daemon's polled result and is meaningless once the daemon stops. Folding the state into the
+// project record would mean the daemon rewriting a person's registry entry every couple of seconds
+// — a poll that can lose a project to a bad write.
+//
+// THERE IS NO HEARTBEAT KIND, AND THERE WAS. An earlier version of this package wrote one and read
+// it back to decide whether anything was watching. That was a SECOND answer to "is the daemon
+// running", which is the defect Issue #41 removed from three other surfaces on the day it was
+// filed. Liveness now arrives as a [Liveness] argument from the one probe, and this package has no
+// opinion about how it was established.
 const (
-	KindProject   = store.Kind("project")
-	KindState     = store.Kind("project-state")
-	KindHeartbeat = store.Kind("project-watch")
+	KindProject = store.Kind("project")
+	KindState   = store.Kind("project-state")
 )
 
 // PollInterval is how often a running daemon re-examines each watched directory.
@@ -36,15 +40,20 @@ const (
 // see the old state, a re-read after this interval must see the new one.
 const PollInterval = 2 * time.Second
 
-// WatchTimeout is how long after a heartbeat the client still believes something is watching.
+// Liveness is the answer to "is a daemon running against this store", as established ELSEWHERE.
 //
-// WHY A MULTIPLE AND NOT THE INTERVAL ITSELF. A daemon that is alive and simply slow to get its
-// next tick scheduled must not flicker into "nothing is watching", because that would make the
-// provenance of criterion 6 depend on scheduler luck rather than on what actually produced the
-// state. Three intervals is long enough that a healthy daemon never trips it and short enough that
-// a killed one is disbelieved within a few seconds — criterion 5's "wait well beyond the poll
-// interval" is well beyond this too.
-const WatchTimeout = 3 * PollInterval
+// IT IS AN ARGUMENT AND NOT SOMETHING THIS PACKAGE WORKS OUT. Issue #41: every surface that made
+// its own guess at daemon liveness got it wrong the same way, and a per-package fix would have
+// produced one more guess rather than one answer. `internal/commands` fills this in from
+// daemonLiveness, which wraps daemon.Inspect — the same call `omw daemon status` renders — and a
+// daemon polling projects fills it in from what it knows about itself.
+//
+// Running is three-valued because the probe is. A lock that cannot be read is not a daemon that is
+// absent, and Detail says why when nothing could be established.
+type Liveness struct {
+	Running tri.Value
+	Detail  string
+}
 
 // ErrNotAProject is returned when a path a person offers cannot be a project directory: it does not
 // exist, or it exists and is not a directory.
@@ -85,8 +94,22 @@ const (
 	// DaemonPolled means a running daemon produced this state on one of its polls, before this
 	// command was run.
 	DaemonPolled
-	// ExaminedNow means nothing was watching, so this command walked the directory itself.
+	// ExaminedNow means it was ESTABLISHED that nothing was watching, so this command walked the
+	// directory itself.
 	ExaminedNow
+	// ProvenanceUndetermined means the directory was walked by this command, but whether a daemon
+	// was ALSO watching could not be established, so it is not known whether these numbers were
+	// already being kept up to date — or whether they were about to be overwritten by a poll.
+	//
+	// WHY THIS IS NOT ExaminedNow. Both cases walk the directory, so "where did these numbers come
+	// from" has the same answer in each, and stamping ExaminedNow would be defensible on those
+	// grounds alone. It is still wrong. ExaminedNow carries a second claim — that this command
+	// walked the directory BECAUSE nothing was watching — and choosing to walk was itself a
+	// decision made on a fact nobody established. A build that stamps ExaminedNow here has resolved
+	// an undetermined liveness to "no" in order to act, and then reported the action as though the
+	// resolution had been a finding. PRD §4.3 and Issue #4 criterion 10 one level up: the third
+	// answer is a real answer, including when it is the provenance that is the third answer.
+	ProvenanceUndetermined
 )
 
 // String renders provenance for the listing. Every branch is a distinct non-empty phrase: criterion
@@ -98,6 +121,12 @@ func (p Provenance) String() string {
 		return "watched by the daemon"
 	case ExaminedNow:
 		return "examined during this command"
+	case ProvenanceUndetermined:
+		// Distinct from BOTH real answers and from the unrecorded marker, and it carries tri's
+		// fixed undetermined wording so it cannot be read as a negative. It states the part that IS
+		// known — this command did the walking — and then refuses the part that is not.
+		return "walked by this command, but whether a daemon is also watching " +
+			tri.Undetermined.String()
 	default:
 		return "PROVENANCE NOT RECORDED — this is a defect, not a state"
 	}
@@ -213,36 +242,4 @@ func List(s *store.Store) ([]Project, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
 	return out, nil
-}
-
-// heartbeat is what a running daemon writes each poll so the client can tell something is watching.
-type heartbeat struct {
-	At time.Time `json:"at"`
-}
-
-// Watching reports whether something is currently watching the projects.
-//
-// IT RETURNS A tri.Value, NOT A BOOL. "The store could not be read" is not "nothing is watching",
-// and collapsing the two would make a listing claim it had walked the directories itself when it
-// had in fact failed to find out (PRD §4.3). The caller decides what to do with the third answer;
-// this function will not decide it by returning No.
-//
-// It reads a heartbeat and NEVER writes one. Nothing in the reading path can turn the client into a
-// watcher — criterion 11.
-func Watching(s *store.Store, now time.Time) tri.Value {
-	var hb heartbeat
-	err := s.GetJSON(KindHeartbeat, "daemon", &hb)
-	switch {
-	case errors.Is(err, store.ErrRecordNotFound):
-		return tri.No // no heartbeat has ever been written: determinedly, nothing is watching.
-	case err != nil:
-		return tri.Undetermined // the record is there and unreadable. We do not know.
-	}
-	if hb.At.IsZero() {
-		return tri.Undetermined
-	}
-	if now.Sub(hb.At) > WatchTimeout {
-		return tri.No // a daemon that stopped. Determined, and the reason criterion 5 is drivable.
-	}
-	return tri.Yes
 }

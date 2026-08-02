@@ -20,11 +20,29 @@
 // to time the command, check whether a daemon is up, or know anything the listing did not print.
 //
 // [Provenance] therefore is not a derived convenience. It is recorded at the moment the state is
-// produced: [Poll] stamps [DaemonPolled] on what it writes, [Snapshot] stamps [ExaminedNow] on what
-// it scans itself, and [Render] prints the stamp on every entry, unconditionally. There is no code
-// path that produces an entry without one — [ProvenanceUnrecorded] is the zero value and renders as
-// a loud defect marker rather than as either real answer, for the same reason [tri.Undetermined] is
+// produced: [Poll] stamps [DaemonPolled] on what it writes, [Take] stamps [ExaminedNow] on what it
+// scans itself, and [Render] prints the stamp on every entry, unconditionally. There is no code path
+// that produces an entry without one — [ProvenanceUnrecorded] is the zero value and renders as a
+// loud defect marker rather than as either real answer, for the same reason [tri.Undetermined] is
 // the zero value of the three-valued answer.
+//
+// # LIVENESS IS TOLD TO THIS PACKAGE, NEVER WORKED OUT BY IT (Issue #41)
+//
+// Provenance is only as good as the answer to "is a daemon running", and this package does not
+// answer that. [Take] takes a [Liveness], filled in by `internal/commands` from the one probe that
+// wraps daemon.Inspect — the same call `omw daemon status` renders.
+//
+// AN EARLIER VERSION OF THIS PACKAGE ANSWERED IT ITSELF, with a heartbeat record it wrote in [Poll]
+// and read back in a listing. That was a second answer to a question the product already answers,
+// and it was wrong in the way second answers are: with a daemon genuinely running and watching,
+// `omw projects list` printed "nothing is watching". The provenance marking was present, correct in
+// shape, and pointing at the wrong branch — which is worse than a missing marking, because it reads
+// as a finding. There is now no heartbeat and no liveness probe here at all.
+//
+// Because the answer is three-valued, so is the provenance. Where liveness could not be established
+// the directories are still walked — a person is owed real numbers rather than silence — but the
+// stamp is [ProvenanceUndetermined] and not [ExaminedNow]: see that constant for why walking on an
+// unestablished fact must not be reported as walking because of an established one.
 //
 // # NOTHING WATCHES WITHOUT THE DAEMON (criteria 5, 11)
 //
@@ -35,9 +53,9 @@
 // writes a heartbeat and never spawns anything — running a listing does not turn the client into a
 // watcher, which is criterion 11 and PRD §4.2's "nothing implicit".
 //
-// The daemon's liveness is read, never asserted: [Watching] reports whether a heartbeat written by
-// [Poll] is fresh enough to mean something is currently watching. It returns a [tri.Value] because
-// "the store could not be read" is not "nothing is watching".
+// [Poll] writes only the polled STATE. It announces nothing about its own liveness, because the
+// daemon holding the store's lock is already that announcement and a second one is a second thing
+// to disagree with it.
 //
 // # THE THREE-WAY DISTINCTION (criteria 8, 9, 10, 20)
 //
@@ -64,6 +82,8 @@
 //     missing or undetermined, because both read the same [Entry] values.
 //   - A test in this package drives both renderings off one snapshot and asserts they agree on all
 //     three markings, which is the half of criterion 14 that lives on this side.
+//   - The liveness the control API reports and the liveness a listing reports are the same value by
+//     construction, because neither surface establishes it — both are handed it.
 //   - What is NOT done: no control API is contacted, because inventing one here would guarantee
 //     agreement with a surface Issue #2 is not building. The remaining half is a test that runs both
 //     real surfaces, and it belongs on the branch where both exist.

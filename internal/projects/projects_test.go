@@ -36,6 +36,18 @@ func newStore(t *testing.T) *store.Store {
 // noEnv is an environment with nothing in it — notably no hub and no depth override.
 func noEnv(string) string { return "" }
 
+// The three liveness answers, as this package now receives them.
+//
+// THEY ARE FIXTURES AND NOT PROBES. Since Issue #41 this package does not establish liveness — it
+// is told, by the one probe in internal/commands that wraps daemon.Inspect. So a test here supplies
+// the answer directly, and the test that a REAL daemon produces the right answer lives beside that
+// probe, where a real daemon can be started. Both halves exist; neither is in the wrong place.
+var (
+	nothingWatching = projects.Liveness{Running: tri.No}
+	daemonWatching  = projects.Liveness{Running: tri.Yes}
+	livenessUnknown = projects.Liveness{Running: tri.Undetermined, Detail: "the lock could not be opened"}
+)
+
 func pathsIn(snap projects.Snapshot) []string {
 	out := make([]string, 0, len(snap.Entries))
 	for _, e := range snap.Entries {
@@ -154,7 +166,7 @@ func TestAMissingDirectoryIsMarkedAndTheOthersSurvive(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	snap, err := projects.Take(s, noEnv, time.Now().UTC())
+	snap, err := projects.Take(s, noEnv, time.Now().UTC(), nothingWatching)
 	if err != nil {
 		t.Fatalf("the listing failed because one directory was missing: %v", err)
 	}
@@ -207,7 +219,7 @@ func TestTheFourOutcomesAreFourDistinctRenderings(t *testing.T) {
 	}
 	t.Cleanup(func() { os.Chmod(unreadable, 0o755) })
 
-	snap, err := projects.Take(s, noEnv, time.Now().UTC())
+	snap, err := projects.Take(s, noEnv, time.Now().UTC(), nothingWatching)
 	if err != nil {
 		t.Fatalf("take: %v", err)
 	}
@@ -260,7 +272,7 @@ func TestEveryListedProjectStatesWhereItsStateCameFrom(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	snap, err := projects.Take(s, noEnv, time.Now().UTC())
+	snap, err := projects.Take(s, noEnv, time.Now().UTC(), nothingWatching)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,9 +296,10 @@ func TestEveryListedProjectStatesWhereItsStateCameFrom(t *testing.T) {
 // CRITERION 7: the same command over the same projects reports the two provenances in the two
 // situations, and the outputs differ.
 //
-// The two situations are built by writing and not writing a heartbeat, which is exactly what a
-// running and a stopped daemon do. Nothing here is inferred from timing: the assertion is that the
-// two OUTPUTS differ and each names its own case.
+// The two situations are built by supplying the two liveness ANSWERS, because since Issue #41 this
+// package is told the answer rather than working one out. That a real daemon produces the right
+// answer is driven in internal/commands, against a daemon started by the real binary. Nothing here
+// is inferred from timing: the assertion is that the two OUTPUTS differ and each names its own case.
 func TestTheListingReportsBothProvenancesAndTheOutputsDiffer(t *testing.T) {
 	s := newStore(t)
 	dir := t.TempDir()
@@ -296,8 +309,8 @@ func TestTheListingReportsBothProvenancesAndTheOutputsDiffer(t *testing.T) {
 	}
 	now := time.Now().UTC()
 
-	// Daemon stopped: no heartbeat has ever been written.
-	stoppedSnap, err := projects.Take(s, noEnv, now)
+	// Daemon stopped.
+	stoppedSnap, err := projects.Take(s, noEnv, now, nothingWatching)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,11 +319,11 @@ func TestTheListingReportsBothProvenancesAndTheOutputsDiffer(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Daemon running: it has polled.
+	// Daemon running, and it has polled.
 	if err := projects.Poll(s, noEnv, now); err != nil {
 		t.Fatal(err)
 	}
-	runningSnap, err := projects.Take(s, noEnv, now)
+	runningSnap, err := projects.Take(s, noEnv, now, daemonWatching)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -387,9 +400,6 @@ func TestWithNoDaemonRunningNothingAdvancesBetweenCommands(t *testing.T) {
 	waitFor(t, 5*time.Second, func() bool { return storedFiles(t, s, dir) == 0 }, "the first poll")
 	close(stop)
 	<-done
-	if err := projects.StopWatching(s); err != nil {
-		t.Fatal(err)
-	}
 
 	before := wholeStore(t, s)
 	mkfile(t, filepath.Join(dir, "new.txt"), "x")
@@ -409,7 +419,7 @@ func TestWithNoDaemonRunningNothingAdvancesBetweenCommands(t *testing.T) {
 
 	// And the state DOES advance when a listing is run — otherwise the assertion above would pass
 	// on a build where nothing works at all.
-	snap, err := projects.Take(s, noEnv, time.Now().UTC())
+	snap, err := projects.Take(s, noEnv, time.Now().UTC(), nothingWatching)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -423,47 +433,48 @@ func TestWithNoDaemonRunningNothingAdvancesBetweenCommands(t *testing.T) {
 	}
 }
 
-// CRITERION 11: no listing, add or remove starts anything. Driven behaviourally — the heartbeat that
-// means "something is watching" is absent after every one of them — and structurally, because a
-// command that spawned a process would leave no heartbeat either.
-func TestNoProjectCommandStartsTheDaemon(t *testing.T) {
+// CRITERION 11 AS A PROPERTY OF THIS PACKAGE: no read path writes anything a daemon would write.
+//
+// It used to assert that no heartbeat appeared, which was circular — the heartbeat was this
+// package's own invention. Since Issue #41 liveness lives in the store's daemon lock, so the honest
+// package-level question is whether a listing leaves the store byte-for-byte as it found it. The
+// behavioural half — that `omw daemon status` still says "not running" after project commands —
+// is driven in internal/commands, where a real daemon and the real probe both exist.
+func TestNoReadPathWritesAnythingToTheStore(t *testing.T) {
 	s := newStore(t)
 	dir := t.TempDir()
-
-	if got := projects.Watching(s, time.Now().UTC()); got != tri.No {
-		t.Fatalf("before anything: Watching=%s, want no", got)
-	}
 	if _, err := projects.Add(s, dir); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := projects.Take(s, noEnv, time.Now().UTC()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := projects.List(s); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := projects.Remove(s, dir); err != nil {
-		t.Fatal(err)
+	before := wholeStore(t, s)
+
+	for i := 0; i < 3; i++ {
+		if _, err := projects.Take(s, noEnv, time.Now().UTC(), nothingWatching); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := projects.List(s); err != nil {
+			t.Fatal(err)
+		}
 	}
 
-	if got := projects.Watching(s, time.Now().UTC()); got != tri.No {
-		t.Errorf("after add, list and remove: Watching=%s, want no.\n"+
-			"  A project command started something on the person's behalf (PRD §4.2).", got)
+	after := wholeStore(t, s)
+	if len(before) != len(after) {
+		t.Fatalf("listing changed how many records the store holds: %d -> %d", len(before), len(after))
 	}
-	// The record directory itself, at the layout the store actually uses. Checked against a path
-	// that a poll DOES create, so this cannot pass by naming a directory that never exists either
-	// way — the sibling assertion below proves the path is the right one.
-	hb := filepath.Join(s.Path(), "records", string(projects.KindHeartbeat))
-	if _, err := os.Stat(hb); !os.IsNotExist(err) {
-		t.Errorf("a heartbeat record directory exists at %s after project commands; "+
-			"something wrote one", hb)
+	for name, was := range before {
+		if after[name] != was {
+			t.Errorf("%s was rewritten by a listing.\n  was: %s\n  now: %s\n"+
+				"  A read path that writes is a read path that can start something.", name, was, after[name])
+		}
 	}
+
+	// A CONTROL: a poll DOES write, so the comparison above is capable of noticing a write at all.
 	if err := projects.Poll(s, noEnv, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(hb); err != nil {
-		t.Fatalf("a poll did not create %s, so the assertion above was checking a path that "+
-			"never exists and its pass said nothing: %v", hb, err)
+	if len(wholeStore(t, s)) == len(before) {
+		t.Fatal("a poll changed no records, so the comparison above would not have noticed a " +
+			"listing that wrote one either — its pass said nothing")
 	}
 }
 
@@ -534,7 +545,7 @@ func TestTheWireFormAndTheRenderedListingAgreeOnAllThreeMarkings(t *testing.T) {
 	os.Chmod(unreadable, 0o000)
 	t.Cleanup(func() { os.Chmod(unreadable, 0o755) })
 
-	snap, err := projects.Take(s, noEnv, time.Now().UTC())
+	snap, err := projects.Take(s, noEnv, time.Now().UTC(), nothingWatching)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -598,32 +609,148 @@ func TestUnrecordedProvenanceIsNotOneOfTheTwoAnswers(t *testing.T) {
 	}
 }
 
-// Watching returns the third answer when it could not find out, never "no". PRD §4.3.
-func TestAnUnreadableHeartbeatIsUndeterminedAndNotStopped(t *testing.T) {
-	s := newStore(t)
-	if got := projects.Watching(s, time.Now().UTC()); got != tri.No {
-		t.Fatalf("with no heartbeat at all: %s, want no (determinedly nothing is watching)", got)
+// THE FOUR PROVENANCES ARE FOUR DISTINCT RENDERINGS, COMPARED PAIRWISE.
+//
+// Criterion 10 requires a real value, missing and undetermined to be three distinct renderings of a
+// project's STATE. Issue #41's criterion 4 applies the same rule to the liveness answer. This is the
+// two of them meeting: the provenance is itself three-valued now, plus the unrecorded marker, and
+// none of the four may print as another. Pairwise, because four assertions against four literals all
+// stay green after two of the phrases are edited to match.
+func TestTheFourProvenancesAllRenderDifferently(t *testing.T) {
+	all := map[string]projects.Provenance{
+		"daemon-polled": projects.DaemonPolled,
+		"examined-now":  projects.ExaminedNow,
+		"undetermined":  projects.ProvenanceUndetermined,
+		"unrecorded":    projects.ProvenanceUnrecorded,
 	}
-	// A heartbeat record that is present and will not decode.
-	if err := s.Put(store.Record{Kind: projects.KindHeartbeat, ID: "daemon", Data: []byte("{{not json")}); err != nil {
-		t.Fatal(err)
+	names := []string{"daemon-polled", "examined-now", "undetermined", "unrecorded"}
+	for i := 0; i < len(names); i++ {
+		if s := all[names[i]].String(); strings.TrimSpace(s) == "" {
+			t.Errorf("%s renders as silence", names[i])
+		}
+		for j := i + 1; j < len(names); j++ {
+			a, b := names[i], names[j]
+			if all[a].String() == all[b].String() {
+				t.Errorf("%s and %s render IDENTICALLY as %q", a, b, all[a].String())
+			}
+			ja, _ := json.Marshal(all[a])
+			jb, _ := json.Marshal(all[b])
+			if string(ja) == string(jb) {
+				t.Errorf("%s and %s are the same value on the wire: %s", a, b, ja)
+			}
+		}
 	}
-	if got := projects.Watching(s, time.Now().UTC()); got != tri.Undetermined {
-		t.Errorf("with an unreadable heartbeat: %s, want %s. "+
-			"A heartbeat we could not read is not a determination that nothing is watching.",
-			got, tri.Undetermined)
+	// The undetermined provenance carries the product's fixed third-answer wording, so it cannot be
+	// read as a negative, and it does NOT claim the walk happened because nothing was watching.
+	und := projects.ProvenanceUndetermined.String()
+	if !strings.Contains(und, tri.Undetermined.String()) {
+		t.Errorf("the undetermined provenance does not use the product's undetermined wording: %q", und)
+	}
+	if strings.Contains(und, projects.ExaminedNow.String()) {
+		t.Errorf("the undetermined provenance contains the determined phrase %q, so a reader — or a "+
+			"grep — matches one inside the other: %q", projects.ExaminedNow.String(), und)
 	}
 }
 
-// A daemon that stopped without cleaning up is disbelieved once its heartbeat ages out, which is
-// what makes criterion 5 observable for a killed daemon.
-func TestAStaleHeartbeatMeansNothingIsWatching(t *testing.T) {
+// An undetermined liveness produces an undetermined provenance on every row, and a listing that
+// still shows real state. Silence would be a worse answer than an honest "I cannot tell you".
+func TestAnUndeterminedLivenessMakesEveryRowsProvenanceUndetermined(t *testing.T) {
 	s := newStore(t)
-	now := time.Now().UTC()
-	if err := projects.Poll(s, noEnv, now.Add(-projects.WatchTimeout-time.Second)); err != nil {
+	dir := t.TempDir()
+	mkfile(t, filepath.Join(dir, "a.txt"), "x")
+	if _, err := projects.Add(s, dir); err != nil {
 		t.Fatal(err)
 	}
-	if got := projects.Watching(s, now); got != tri.No {
-		t.Errorf("a heartbeat older than the watch timeout still reads as watching: %s", got)
+
+	snap, err := projects.Take(s, noEnv, time.Now().UTC(), livenessUnknown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := entryFor(t, snap, dir)
+	if e.Provenance != projects.ProvenanceUndetermined {
+		t.Errorf("provenance is %v where liveness was not established; want undetermined. "+
+			"Stamping a determined answer here resolves an unestablished fact in order to act, "+
+			"and then reports the action as though the resolution had been a finding.", e.Provenance)
+	}
+	if e.State.Files != 1 {
+		t.Errorf("the state is %d files, want 1 — the person was given silence instead of the "+
+			"numbers, which is not what an undetermined LIVENESS justifies withholding", e.State.Files)
+	}
+	if snap.Watching != tri.Undetermined {
+		t.Errorf("Watching is %s, want %s", snap.Watching, tri.Undetermined)
+	}
+	if snap.WatchingDetail == "" {
+		t.Error("an undetermined watching answer carries no reason; a shrug is not the third answer")
+	}
+
+	// And it survives the wire, so a control API client is told the same thing.
+	wire, err := projects.MarshalSnapshot(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := projects.UnmarshalSnapshot(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := entryFor(t, back, dir).Provenance; got != projects.ProvenanceUndetermined {
+		t.Errorf("the undetermined provenance came back over the wire as %v", got)
+	}
+	if back.Watching != tri.Undetermined || back.WatchingDetail != snap.WatchingDetail {
+		t.Errorf("the watching answer did not survive the wire: %s / %q",
+			back.Watching, back.WatchingDetail)
+	}
+}
+
+// THE THREE WATCHING HEADERS ARE THREE DISTINCT RENDERINGS, PAIRWISE.
+//
+// Added after a mutation that deleted the "no" branch and let an established absence render in the
+// undetermined wording was caught only by the CLI tests. The header is where a person reads the
+// answer criterion 5 is about, and this package renders it, so this package should be the one that
+// notices — a defect caught two packages away is caught by luck about who asserted what.
+func TestTheThreeWatchingHeadersAllRenderDifferently(t *testing.T) {
+	s := newStore(t)
+	if _, err := projects.Add(s, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	rendered := map[string]string{}
+	for name, live := range map[string]projects.Liveness{
+		"yes":          daemonWatching,
+		"no":           nothingWatching,
+		"undetermined": livenessUnknown,
+	} {
+		snap, err := projects.Take(s, noEnv, time.Now().UTC(), live)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var b strings.Builder
+		if err := projects.Render(&b, snap); err != nil {
+			t.Fatal(err)
+		}
+		// THE ANSWER LINE ITSELF, not the whole header block.
+		//
+		// The block version of this test STAYED GREEN under the mutation it was written for: with
+		// the "no" branch deleted, an established absence rendered in the undetermined wording, but
+		// the blocks still differed because the undetermined case appends a reason line and the
+		// negative case has no reason to append. That is a difference in the EXPLANATION, not in
+		// the answer — and a person reads the answer. Second time today a comparison of mine passed
+		// on an incidental difference; both times only a mutation showed it.
+		rendered[name] = strings.SplitN(b.String(), "\n", 2)[0]
+		if strings.TrimSpace(rendered[name]) == "" {
+			t.Errorf("the %s header is silence", name)
+		}
+	}
+	names := []string{"yes", "no", "undetermined"}
+	for i := 0; i < len(names); i++ {
+		for j := i + 1; j < len(names); j++ {
+			a, b := names[i], names[j]
+			if rendered[a] == rendered[b] {
+				t.Errorf("the %s and %s watching headers render IDENTICALLY:\n%s", a, b, rendered[a])
+			}
+		}
+	}
+	// The undetermined header must not be readable as the established absence.
+	if strings.Contains(rendered["undetermined"], "nothing is watching between commands") {
+		t.Errorf("the undetermined header contains the established-absence sentence:\n%s",
+			rendered["undetermined"])
 	}
 }

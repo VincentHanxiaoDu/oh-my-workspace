@@ -35,11 +35,15 @@
 
 ## Watching
 
-- [x] `Poll` writes the heartbeat before walking anything, so a slow poll is not mistaken for a dead
-      daemon
-- [x] `Watching` returns `tri.Undetermined` for a heartbeat it could not read, never `No`
-- [x] A heartbeat older than the watch timeout means nothing is watching, so a killed daemon is
-      disbelieved within a few seconds
+- [x] Take the liveness answer as an argument (`projects.Liveness`) rather than establishing one
+      here, so this package cannot become a second answer to "is the daemon running" (Issue #41)
+- [x] Fill it in at the CLI from `daemonLiveness`, the one probe wrapping `daemon.Inspect` — the
+      same call `omw daemon status` renders
+- [x] Make the provenance three-valued to match: where liveness was not established, walk the
+      directories but stamp the provenance undetermined rather than "examined during this command"
+- [x] Render the three watching answers distinguishably, with the undetermined one carrying a reason
+      and never the established-absence sentence
+- [x] `Poll` writes only the polled state and announces nothing about its own liveness
 - [x] `Run` is the whole contract the daemon has with this package, and nothing else starts a poll
 
 ## The command
@@ -64,8 +68,11 @@
       that fails if the walk examined no files
 - [x] Mutate provenance out of the listing, make missing and empty identical, drop a missing project,
       make a listing start the daemon, half-fix the prune to walk-then-filter, silence truncation,
-      follow symlinks, collapse an unreadable heartbeat to "no", and disable the git path — confirm
-      each goes red naming the defect, and revert
+      follow symlinks, and disable the git path — confirm each goes red naming the defect, and revert
+- [x] Mutate the liveness wiring too: bypass the one probe, collapse an undetermined provenance to
+      "examined during this command", and delete the negative header branch — confirm each goes red
+- [x] Drive criterion 7 against a REAL daemon started by the real binary, not a fixture this package
+      invented, and assert agreement with `omw daemon status` rather than with a local record
 
 ## Not done, and why
 

@@ -20,6 +20,8 @@ func (p Provenance) MarshalJSON() ([]byte, error) {
 		return []byte(`"daemon-polled"`), nil
 	case ExaminedNow:
 		return []byte(`"examined-now"`), nil
+	case ProvenanceUndetermined:
+		return []byte(`"undetermined"`), nil
 	default:
 		return []byte(`"unrecorded"`), nil
 	}
@@ -37,6 +39,8 @@ func (p *Provenance) UnmarshalJSON(b []byte) error {
 		*p = DaemonPolled
 	case "examined-now":
 		*p = ExaminedNow
+	case "undetermined":
+		*p = ProvenanceUndetermined
 	default:
 		*p = ProvenanceUnrecorded
 	}
@@ -131,13 +135,34 @@ func Render(w io.Writer, snap Snapshot) error {
 		_, err = fmt.Fprintf(w, format, args...)
 	}
 
+	// THE HEADER IS THE ONE LIVENESS ANSWER, RENDERED. It is not worked out here and it is not
+	// worked out by this package: `omw daemon status` and this line are two renderings of the same
+	// daemon.Inspect call, which is the only construction under which they cannot disagree
+	// (Issue #41). The undetermined branch never contains the negative branch's sentence, so a
+	// person — or a grep — cannot mistake one for the other.
 	switch snap.Watching {
 	case tri.Yes:
 		p("watching: yes — the daemon is watching these directories\n")
 	case tri.No:
 		p("watching: no — nothing is watching between commands\n")
 	default:
-		p("watching: %s — whether anything is watching could not be read\n", tri.Undetermined)
+		p("watching: %s — whether a daemon is watching these directories was not established.\n",
+			tri.Undetermined)
+		// SAID OUT LOUD, for the same reason reportDaemonNotLive says it, AND IN THE SAME WORDS:
+		// without this line a reader takes the line above as a stopped daemon, which is the
+		// confident false negative Issue #41 exists to remove.
+		//
+		// The wording avoids the phrase "nothing is watching" ON PURPOSE. That phrase is what a
+		// listing prints when it has ESTABLISHED an absence, and liveness_test.go greps every
+		// surface for it while a daemon runs. A reassurance containing the sentence it is
+		// reassuring the reader against is a substring collision waiting to make that grep — or a
+		// person skimming — read this as the negative. Found by my own test matching its own
+		// forbidden phrase inside this very line.
+		p("  this is not a report that the daemon is stopped; nothing about it has been established.\n")
+		if snap.WatchingDetail != "" {
+			p("  %s\n", snap.WatchingDetail)
+		}
+		p("  'omw daemon status' reports the same state for this store.\n")
 	}
 
 	if len(snap.Entries) == 0 {

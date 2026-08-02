@@ -13,8 +13,10 @@ import (
 	"time"
 
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/cli"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/daemon"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/projects"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/store"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri"
 )
 
 // projectsSandbox gives a test a store of its own and an environment that names it.
@@ -118,7 +120,14 @@ func TestPointingAtSomethingThatIsNotADirectoryIsRefusedByExitCode(t *testing.T)
 
 // CRITERION 6 AND 7 AT THE SURFACE THE CRITERION IS ABOUT: the two situations produce different
 // listings, from the same command over the same project, and each states its own provenance.
+//
+// THE DAEMON IS A REAL ONE, started by the real binary the way a person starts it. It used to be
+// simulated by writing a heartbeat record this package invented, and that heartbeat WAS the defect
+// Issue #41 removed: a second answer to "is the daemon running", which agreed with nothing. A test
+// against a fixture only this package understands would still have been green with `omw daemon
+// status` saying the opposite — which is exactly what shipped.
 func TestTheListingsWithAndWithoutADaemonAreDifferentOutputs(t *testing.T) {
+	bin := buildOMW(t)
 	storePath, getenv := projectsSandbox(t)
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("x"), 0o644); err != nil {
@@ -128,28 +137,131 @@ func TestTheListingsWithAndWithoutADaemonAreDifferentOutputs(t *testing.T) {
 		t.Fatalf("add: %s", e)
 	}
 
-	_, stopped, _ := runProjectsCmd(t, getenv, "list")
+	// --- Nothing running. The fixture is checked against the product's own answer first, so a
+	// broken fixture reads as a broken fixture and not as a failed criterion.
+	if got := statusClaim(t, getenv); got != tri.No {
+		t.Fatalf("before anything was started `omw daemon status` says %v; the fixture is wrong", got)
+	}
+	codeStopped, stopped, _ := runProjectsCmd(t, getenv, "list")
 
-	// Something starts watching — the daemon's one call into this package.
+	// --- A real daemon, plus the poll a projects-aware daemon performs.
+	if start := runBinary(t, bin, storePath, "daemon", "start"); start.code != 0 {
+		t.Fatalf("`omw daemon start` exited %d\n%s%s", start.code, start.stdout, start.stderr)
+	}
+	stoppedOnce := false
+	stop := func() {
+		if !stoppedOnce {
+			runBinary(t, bin, storePath, "daemon", "stop")
+			stoppedOnce = true
+		}
+	}
+	t.Cleanup(stop)
+	if got := statusClaim(t, getenv); got != tri.Yes {
+		t.Fatalf("`omw daemon start` returned but `omw daemon status` says %v", got)
+	}
+	// Issue #2's daemon does not yet poll projects, so this stands in for the one call it will
+	// make. It writes only the polled STATE — never any claim about liveness, which now has exactly
+	// one source.
 	if err := projects.Poll(openSandbox(t, storePath), getenv, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	_, running, _ := runProjectsCmd(t, getenv, "list")
+	codeRunning, running, _ := runProjectsCmd(t, getenv, "list")
 
 	if stopped == running {
 		t.Fatalf("the same command over the same project printed IDENTICAL output with nothing "+
-			"watching and with the daemon watching. A person cannot tell the two apart from the "+
+			"watching and with a daemon watching. A person cannot tell the two apart from the "+
 			"listing, which is criterion 6:\n%s", stopped)
 	}
 	if !strings.Contains(stopped, "examined during this command") {
 		t.Errorf("with nothing watching, the listing does not say it examined the directories:\n%s", stopped)
 	}
-	if !strings.Contains(running, "watched by the daemon") {
-		t.Errorf("with the daemon watching, the listing does not say the state came from it:\n%s", running)
+	if !strings.Contains(stopped, "watching: no") {
+		t.Errorf("with nothing watching, the listing does not say so:\n%s", stopped)
 	}
-	// Nothing is inferred from timing: both statements are literally in the text.
-	if strings.Contains(stopped, "watched by the daemon") {
-		t.Errorf("the stopped listing claims daemon provenance:\n%s", stopped)
+	if !strings.Contains(running, "watched by the daemon") {
+		t.Errorf("with a daemon watching, the listing does not say the state came from it:\n%s", running)
+	}
+	if !strings.Contains(running, "watching: yes") {
+		t.Errorf("with a daemon running, the listing does not say anything is watching:\n%s", running)
+	}
+	// CRITERION 5 OF ISSUE #41, at this surface: with a daemon running, nothing here may claim an
+	// absence. This is the assertion whose absence let #35 through.
+	assertNoStaleBecauseNothingIsWatchingClaim(t, "omw projects list", running)
+	if codeStopped != cli.Success || codeRunning != cli.Success {
+		t.Errorf("determined answers exited %d and %d; both are answers and both should be %d",
+			codeStopped, codeRunning, cli.Success)
+	}
+
+	// --- And back, after a real stop: a probe that latched to "running" passes everything above.
+	stop()
+	if got := statusClaim(t, getenv); got != tri.No {
+		t.Fatalf("after `omw daemon stop` returned, `omw daemon status` says %v", got)
+	}
+	_, afterStop, _ := runProjectsCmd(t, getenv, "list")
+	if strings.Contains(afterStop, "watched by the daemon") {
+		t.Errorf("after the daemon stopped, the listing still claims daemon provenance over a "+
+			"state record the dead daemon left behind:\n%s", afterStop)
+	}
+	if !strings.Contains(afterStop, "watching: no") {
+		t.Errorf("after the daemon stopped, the listing does not say nothing is watching:\n%s", afterStop)
+	}
+}
+
+// ISSUE #41 CRITERION 4, APPLIED ONE LEVEL UP TO THE PROVENANCE ITSELF.
+//
+// Where liveness cannot be established, the listing must not say "examined during this command" —
+// that phrase carries the claim that this command walked the directories BECAUSE nothing was
+// watching, and nothing established that. It must not say "nothing is watching" either. The store
+// is broken in a real way (the lock the daemon package reads is replaced by a directory), exactly
+// as liveness_test.go stages it, rather than by stubbing the probe.
+func TestWhereLivenessCannotBeEstablishedTheProvenanceIsUndeterminedToo(t *testing.T) {
+	storePath, getenv := projectsSandbox(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, e := runProjectsCmd(t, getenv, "add", dir); code != cli.Success {
+		t.Fatalf("add: %s", e)
+	}
+	// Determined first, so the two are compared against each other and not against literals.
+	_, determined, _ := runProjectsCmd(t, getenv, "list")
+
+	lock := filepath.Join(storePath, daemon.RunDir, "daemon.lock")
+	if err := os.MkdirAll(lock, 0o700); err != nil {
+		t.Fatalf("could not stage an unreadable lock: %v", err)
+	}
+	if got := statusClaim(t, getenv); got != tri.Undetermined {
+		t.Fatalf("with an unreadable lock `omw daemon status` says %v, so this test is not "+
+			"staging what it claims", got)
+	}
+
+	code, out, errOut := runProjectsCmd(t, getenv, "list")
+	all := out + errOut
+
+	if code != cli.ExitUndetermined {
+		t.Errorf("exited %d where liveness could not be established; want %d, which no determined "+
+			"answer uses\n%s", code, cli.ExitUndetermined, all)
+	}
+	if strings.Contains(all, "examined during this command") {
+		t.Errorf("the listing claims it examined the directories BECAUSE nothing was watching, "+
+			"which nothing established:\n%s", all)
+	}
+	// The phrase a listing prints only when it has ESTABLISHED an absence. Asserted through the
+	// shared helper so this surface is held to the same list as every other one, rather than to a
+	// copy of it that can drift.
+	assertNoStaleBecauseNothingIsWatchingClaim(t, "omw projects list (liveness undetermined)", all)
+	if !strings.Contains(all, tri.Undetermined.String()) {
+		t.Errorf("the third answer is not rendered in words:\n%s", all)
+	}
+	if !strings.Contains(all, "this is not a report that the daemon is stopped") {
+		t.Errorf("the listing does not tell the reader this is not a negative:\n%s", all)
+	}
+	// The state itself is still there: a person is owed real numbers, not silence.
+	if !strings.Contains(all, dir) {
+		t.Errorf("the project vanished from the listing because liveness was undetermined:\n%s", all)
+	}
+	if all == determined {
+		t.Errorf("an undetermined liveness and a determined one produce the same listing:\n%s", all)
 	}
 }
 
@@ -249,11 +361,15 @@ func TestNoProjectCommandStartsTheDaemonThroughTheCLI(t *testing.T) {
 	runProjectsCmd(t, getenv, "remove", dir)
 	runProjectsCmd(t, getenv, "add", dir)
 
-	// Verified by what the product itself uses to report watching, not by an internal flag.
-	if got := projects.Watching(openSandbox(t, storePath), time.Now().UTC()); got.String() != "no" {
-		t.Errorf("after add, list, remove and add: watching is %q, want \"no\". "+
+	// VERIFIED BY WHAT THE PRODUCT ITSELF USES TO REPORT DAEMON STATE — criterion 11 says exactly
+	// that — which since Issue #41 is `omw daemon status` and nothing else. An earlier version
+	// asked a heartbeat record this package invented; that fixture would have stayed green while
+	// the product's own surface said the opposite, which is how #41 happened three times.
+	if got := statusClaim(t, getenv); got != tri.No {
+		t.Errorf("after add, list, remove and add, `omw daemon status` says %v, want not running. "+
 			"A project command started something on the person's behalf (PRD §4.2).", got)
 	}
+	_ = storePath
 	_, out, _ := runProjectsCmd(t, getenv, "list")
 	if !strings.Contains(out, "watching: no") {
 		t.Errorf("the listing does not tell the person nothing is watching:\n%s", out)

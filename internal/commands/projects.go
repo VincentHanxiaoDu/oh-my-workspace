@@ -163,7 +163,12 @@ func projectsList(env cli.Env, args []string) int {
 	if code != cli.Success {
 		return code
 	}
-	snap, err := projects.Take(s, env.Getenv, time.Now().UTC())
+	// THE ONE LIVENESS ANSWER (Issue #41). Not a socket path stat'd here, not a heartbeat this
+	// package writes and reads back: the same call `omw daemon status` renders. The projects
+	// package takes it as an argument and has no opinion about how it was established, so there is
+	// nothing here that can drift away from what the daemon surface says about the same machine.
+	live, why := daemonLiveness(env)
+	snap, err := projects.Take(s, env.Getenv, time.Now().UTC(), projects.Liveness{Running: live, Detail: why})
 	if err != nil {
 		fmt.Fprintf(env.Stderr, "omw projects list: the listing could not be produced.\n  %v\n", err)
 		// ExitUndetermined, not ExitFailure: we did not determine the state, and a script must not
@@ -175,9 +180,12 @@ func projectsList(env cli.Env, args []string) int {
 		return cli.ExitFailure
 	}
 	// A LISTING THAT COULD NOT SAY WHETHER ANYTHING IS WATCHING HAS NOT ANSWERED THE QUESTION THE
-	// ISSUE IS ABOUT. The rows printed above are honest — each carries its own provenance — but the
-	// person asked "is anything keeping up with these", and the answer is undetermined. Exiting
-	// Success here would let a script read an undetermined watcher as a determined "no".
+	// ISSUE IS ABOUT. The rows printed above are honest — each carries its own provenance, and that
+	// provenance is itself undetermined here — but the person asked "is anything keeping up with
+	// these", and nothing established an answer. Exiting Success would let a script read an
+	// undetermined watcher as a determined "no", which is the one thing this exit code exists to
+	// prevent. The listing is still PRINTED: the state is real, and withholding it would be
+	// answering a question nobody asked.
 	if !snap.Watching.Determined() {
 		return cli.ExitUndetermined
 	}

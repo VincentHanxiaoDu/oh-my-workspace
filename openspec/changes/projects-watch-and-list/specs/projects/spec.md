@@ -45,6 +45,13 @@ cases SHALL be distinguishable from the listing output alone, with nothing infer
 - **WHEN** an entry reaches the output without a provenance having been recorded for it
 - **THEN** it renders as a defect marker and as neither of the two real answers
 
+#### Scenario: Whether a daemon is running could not be established
+- **WHEN** a listing is run and the product cannot establish whether a daemon is watching
+- **THEN** the listing still reports each project's state, states that whether anything is watching
+  could not be determined together with the reason, marks each entry's provenance as undetermined
+  rather than as examined-during-this-command, does not report that nothing is watching, and exits
+  with the code reserved for an undetermined answer
+
 ### Requirement: Missing, unreadable and empty are three distinct answers
 The product SHALL mark a project whose directory is missing rather than omitting it, SHALL mark a
 project whose state could not be determined as undetermined rather than as a negative or as silence,
@@ -68,8 +75,12 @@ hub configured.
 
 #### Scenario: Listing with the daemon stopped
 - **WHEN** a person adds, lists and removes projects with the daemon stopped
-- **THEN** whatever the product uses to report watching still reports that nothing is watching, and
-  the listing says so
+- **THEN** whatever the product uses to report daemon state still reports that nothing is running,
+  and the listing says so
+
+#### Scenario: Listing with a daemon running
+- **WHEN** a person lists projects while a daemon is running
+- **THEN** the listing agrees with the product's own daemon-state surface, and reports no absence
 
 #### Scenario: No hub configured
 - **WHEN** adding, listing and removing are run with no hub configured

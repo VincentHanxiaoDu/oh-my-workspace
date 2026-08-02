@@ -27,11 +27,14 @@ type Entry struct {
 
 // Snapshot is a whole project listing at one moment: the single determination both surfaces render.
 type Snapshot struct {
-	// Watching is whether something was watching when this snapshot was taken. tri, not bool: a
-	// store that could not be read has not told us that nothing is watching.
+	// Watching is whether something was watching when this snapshot was taken, as established by
+	// the product's ONE liveness probe and passed in — see [Liveness]. tri, not bool.
 	Watching tri.Value `json:"watching"`
-	Entries  []Entry   `json:"entries"`
-	TakenAt  time.Time `json:"taken_at"`
+	// WatchingDetail says why, when Watching is undetermined. Never empty in that case: "I could
+	// not tell you" without a reason is a shrug, and the person is owed the reason the probe gave.
+	WatchingDetail string    `json:"watching_detail,omitempty"`
+	Entries        []Entry   `json:"entries"`
+	TakenAt        time.Time `json:"taken_at"`
 }
 
 // storedState is the daemon's polled result as it lives in the store.
@@ -42,30 +45,49 @@ type storedState struct {
 
 // Take produces the listing. This is the whole determination; everything else renders it.
 //
-// THE PROVENANCE DECISION, WHICH IS CRITERION 6. Something is watching, so the state on screen was
-// produced by that watcher — read it and stamp DaemonPolled. Nothing is watching, so nothing has
-// produced any state since the last command — walk the directories here and stamp ExaminedNow.
-// There is no third path in which state appears without a stamp.
+// THE PROVENANCE DECISION, WHICH IS CRITERION 6. It is made from the ONE liveness answer, passed
+// in by the caller (Issue #41), and it has three branches because that answer has three values:
+//
+//   - Something IS watching, so the state on screen was produced by that watcher — read the polled
+//     record and stamp DaemonPolled.
+//   - It is established that NOTHING is watching, so nothing has produced any state since the last
+//     command — walk the directories here and stamp ExaminedNow.
+//   - Whether anything is watching COULD NOT BE ESTABLISHED — walk the directories, because a
+//     person is owed real numbers rather than silence, and stamp ProvenanceUndetermined, because
+//     the reason for walking was not established. See that constant for why this is not ExaminedNow.
+//
+// There is no fourth path in which state appears without a stamp.
 //
 // When something IS watching but has not yet written a state for a project (a project added seconds
 // ago), this examines that project itself and stamps ExaminedNow on it — the honest answer for that
 // row. Reporting DaemonPolled for a poll that has not happened would be the criterion failed in the
 // one case where a person most needs the truth.
 //
-// IT NEVER STARTS ANYTHING (criterion 11). Take reads a heartbeat; it does not write one, does not
-// call Poll, and does not spawn. Running a listing with the daemon stopped leaves it stopped.
-func Take(s *store.Store, getenv func(string) string, now time.Time) (Snapshot, error) {
+// IT NEVER STARTS ANYTHING (criterion 11). Take reads; it does not poll, does not write a lock and
+// does not spawn. Running a listing with the daemon stopped leaves it stopped.
+func Take(s *store.Store, getenv func(string) string, now time.Time, live Liveness) (Snapshot, error) {
 	projects, err := List(s)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	watching := Watching(s, now)
 	depth := DepthFor(getenv)
 
-	snap := Snapshot{Watching: watching, TakenAt: now, Entries: make([]Entry, 0, len(projects))}
+	// The provenance a walked project gets, decided ONCE from the liveness answer rather than at
+	// each row, so no row can be stamped on a different reading of the same fact.
+	walked := ExaminedNow
+	if !live.Running.Determined() {
+		walked = ProvenanceUndetermined
+	}
+
+	snap := Snapshot{
+		Watching:       live.Running,
+		WatchingDetail: live.Detail,
+		TakenAt:        now,
+		Entries:        make([]Entry, 0, len(projects)),
+	}
 	for _, p := range projects {
 		e := Entry{Project: p}
-		if watching == tri.Yes {
+		if live.Running == tri.Yes {
 			var ss storedState
 			if err := s.GetJSON(KindState, p.ID, &ss); err == nil {
 				e.State, e.Provenance, e.PolledAt = ss.State, DaemonPolled, ss.PolledAt
@@ -75,7 +97,7 @@ func Take(s *store.Store, getenv func(string) string, now time.Time) (Snapshot, 
 				return Snapshot{}, err
 			}
 		}
-		e.State, e.Provenance = Scan(p.Path, depth), ExaminedNow
+		e.State, e.Provenance = Scan(p.Path, depth), walked
 		snap.Entries = append(snap.Entries, e)
 	}
 	return snap, nil
