@@ -419,9 +419,14 @@ func reviewWorldWithoutModel(t *testing.T) map[string]string {
 func TestReviewWithNoModelNamesTheMissingModelAndExitsNonZero(t *testing.T) {
 	env := reviewWorldWithoutModel(t)
 	runOutboxCmd(t, env, "draft", "note-a", "a draft")
-	got := runOutboxCmd(t, env, "publish", "note-a")
+	// THROUGH `review`, BECAUSE `omw outbox publish` NO LONGER EXISTS. Product ruled that one
+	// command publishes — `omw publish note` — and that the gate moves inside `publish.Transfer`
+	// (#46). What this capability still owns is the gate itself, reached here by the person asking
+	// for the check directly, and the criterion is unchanged: the missing model is NAMED and the
+	// exit is non-zero. The publish-side half of criterion 13 is asserted on #46.
+	got := runOutboxCmd(t, env, "review", "note-a")
 	if got.code == cli.Success {
-		t.Fatalf("publishing under review with no model exited 0:\n%s", got.all())
+		t.Fatalf("reviewing under review mode with no model exited 0:\n%s", got.all())
 	}
 	if !strings.Contains(strings.ToLower(got.all()), "model") {
 		t.Errorf("the output does not name the missing model configuration:\n%s", got.all())
@@ -475,12 +480,12 @@ func TestReviewWithNoModelPublishesNothing(t *testing.T) {
 	env[outboxEnvHub] = "https://hub.example" // a hub IS configured; still nothing goes out.
 	runOutboxCmd(t, env, "draft", "note-a", "a draft")
 	dials := watchForDials(t, env)
-	got := runOutboxCmd(t, env, "publish", "note-a")
+	got := runOutboxCmd(t, env, "review", "note-a")
 	if got.code == cli.Success {
-		t.Fatalf("publish exited 0 with no model under review:\n%s", got.all())
+		t.Fatalf("review exited 0 with no model under review mode:\n%s", got.all())
 	}
 	if n := dials(); n != 0 {
-		t.Errorf("publish opened %d connection(s) while the review could not be performed", n)
+		t.Errorf("the gate opened %d connection(s) while the review could not be performed", n)
 	}
 	if !strings.Contains(mustRun(t, env, "list").stdout, "note-a") {
 		t.Error("the draft has left the outbox")
@@ -489,16 +494,17 @@ func TestReviewWithNoModelPublishesNothing(t *testing.T) {
 	if strings.Contains(st.stdout, string(drafts.StateLeaving)) {
 		t.Errorf("the draft was handed onward despite the review not running:\n%s", st.stdout)
 	}
-	// THE GATE ITSELF MUST HAVE HELD, not merely the transfer that does not exist yet. Asserting
-	// only on the draft's state lets a build through in which the gate passed the draft and the
-	// missing transport is the only thing that stopped it — which is a publication the day #10
-	// lands. Found by mutating the gate to let a model-less review through WITHOUT recording a
-	// state, and watching this test stay green.
-	if !strings.Contains(got.stdout, "published: no") {
-		t.Errorf("publish does not state that the draft was not published:\n%s", got.stdout)
+	// THE GATE ITSELF MUST HAVE HELD, and that is now the whole assertion here: there is no
+	// transfer in this capability any more to hide behind. Asserting only on the draft's state
+	// lets a build through in which the gate reported a pass and something downstream happened to
+	// stop it — which is a publication the moment the caller changes. Found by mutating the gate
+	// to let a model-less review through WITHOUT recording a state, and watching this test stay
+	// green.
+	if !strings.Contains(strings.ToLower(got.all()), "no model is configured") {
+		t.Errorf("the gate does not name the missing model:\n%s", got.all())
 	}
 	if strings.Contains(got.stdout, "and passed") {
-		t.Errorf("publish reports a pass with no model configured:\n%s", got.stdout)
+		t.Errorf("the gate reports a pass with no model configured:\n%s", got.stdout)
 	}
 }
 
@@ -742,7 +748,7 @@ func everySubcommand() [][]string {
 	return [][]string{
 		{"draft", "note-a", "some text"}, {"list"}, {"state", "note-a"},
 		{"mode"}, {"mode", "set", "manual"}, {"rules"}, {"rules", "set", "my rules"},
-		{"model"}, {"review", "note-a"}, {"publish", "note-a"},
+		{"model"}, {"review", "note-a"},
 	}
 }
 
@@ -1029,5 +1035,148 @@ func TestADraftSurvivesTheProcessThatWroteIt(t *testing.T) {
 	code, out, _ = run("outbox", "state", "note-a")
 	if code != 0 || !strings.Contains(out, string(drafts.StateDrafted)) {
 		t.Fatalf("a new process does not find the draft's state (exit %d):\n%s", code, out)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// `omw outbox publish` is gone — product's ruling on #38
+// ---------------------------------------------------------------------------
+//
+// TWO COMMANDS PUBLISHED THE SAME DRAFTS AND ONLY ONE OF THEM WAS GATED. `omw outbox publish` ran
+// the gate and then refused to transfer, saying the transport belonged to Issue #10 and did not
+// exist — untrue once #46 landed it. `omw publish note` did the real transfer and read neither the
+// mode nor the gate. Product ruled: one command publishes, and the gate moves into
+// `publish.Transfer` (#46). These tests hold up this half — the command is gone, it does not
+// transfer, it does not become "unknown subcommand", and REMOVING IT TOOK NOTHING ELSE WITH IT.
+
+func TestOutboxPublishIsGone(t *testing.T) {
+	env := obWorld(t)
+	mustRun(t, env, "draft", "note-a", "a draft")
+	got := runOutboxCmd(t, env, "publish", "note-a")
+	if got.code == cli.Success {
+		t.Fatalf("omw outbox publish still exits 0:\n%s", got.all())
+	}
+	// It must not report a publication outcome of any kind — that vocabulary belonged to the
+	// command that is gone, and its presence would mean the command is still answering.
+	for _, gone := range []string{"published: no", "published: " + tri.Undetermined.String(), "the gate passed"} {
+		if strings.Contains(got.all(), gone) {
+			t.Errorf("omw outbox publish still answers as a publishing command (%q):\n%s", gone, got.all())
+		}
+	}
+}
+
+// A PERSON WHO TYPED IT IS TOLD WHERE PUBLISHING LIVES. Being told the word is unrecognised leaves
+// them holding a draft with no route, which is the thing removing a command must not do. Compared
+// against the genuine unknown-subcommand answer rather than a literal, because what matters is that
+// the two are not the same reply.
+func TestOutboxPublishNamesTheCommandThatPublishes(t *testing.T) {
+	env := obWorld(t)
+	got := runOutboxCmd(t, env, "publish", "note-a")
+	if !strings.Contains(got.all(), "omw publish note") {
+		t.Errorf("omw outbox publish does not name the command that publishes:\n%s", got.all())
+	}
+	unknown := runOutboxCmd(t, env, "not-a-subcommand", "note-a")
+	if got.all() == unknown.all() {
+		t.Errorf("omw outbox publish is answered as an unknown subcommand:\n%s", got.all())
+	}
+	if strings.Contains(got.all(), "unknown subcommand") {
+		t.Errorf("omw outbox publish falls through to the unknown-subcommand reply:\n%s", got.all())
+	}
+	// Also reachable in the help, so a person looking for publishing in `omw outbox` finds the
+	// route rather than an absence.
+	if !strings.Contains(mustRun(t, env, "help").stdout, "omw publish note") {
+		t.Error("omw outbox help does not say where publishing lives")
+	}
+}
+
+// The pointer is owed WHATEVER the state of the machine. The retired command does no work, so the
+// preflight's refusals (no daemon, no store, a control API that cannot be confirmed) must not be
+// able to swallow it.
+func TestOutboxPublishAnswersEvenWithNoStore(t *testing.T) {
+	got := runOutboxCmd(t, obNoStore(t), "publish", "note-a")
+	if got.code == cli.Success {
+		t.Fatalf("omw outbox publish exited 0 with no store:\n%s", got.all())
+	}
+	if !strings.Contains(got.all(), "omw publish note") {
+		t.Errorf("with no store, omw outbox publish does not name the command that publishes:\n%s", got.all())
+	}
+}
+
+// IT TRANSFERS NOTHING AND CHANGES NOTHING. A hub is configured and a mode that would have let the
+// draft through is in effect, so the only thing stopping a transfer would be that there is no
+// longer any code here to perform one.
+func TestOutboxPublishNeitherDialsNorTouchesTheDraft(t *testing.T) {
+	env := obWithModel(obWorld(t))
+	mustRun(t, env, "mode", "set", "manual")
+	mustRun(t, env, "draft", "note-a", "a draft")
+	before := runOutboxCmd(t, env, "state", "note-a")
+	env[outboxEnvHub] = "https://hub.example"
+	dials := watchForDials(t, env)
+	runOutboxCmd(t, env, "publish", "note-a")
+	if n := dials(); n != 0 {
+		t.Errorf("omw outbox publish opened %d connection(s)", n)
+	}
+	delete(env, outboxEnvHub)
+	after := runOutboxCmd(t, env, "state", "note-a")
+	if after.stdout != before.stdout {
+		t.Errorf("omw outbox publish changed the draft's state.\n  before: %s\n  after:  %s", before.stdout, after.stdout)
+	}
+	if !strings.Contains(mustRun(t, env, "list").stdout, "note-a") {
+		t.Error("the draft left the outbox")
+	}
+}
+
+// REMOVING A COMMAND MUST NOT QUIETLY TAKE REVIEWABLE BEHAVIOUR WITH IT. This is the guard against
+// the failure mode of this change: the gate, the modes and the outbox states are what Issue #9 is
+// about, they were reachable through the command that is gone, and they are all still here and
+// still three-valued. It drives them end to end rather than trusting that the other tests in this
+// file were not deleted alongside the command.
+func TestRemovingPublishLeavesTheGateTheModesAndTheStatesIntact(t *testing.T) {
+	for _, m := range drafts.Modes() {
+		env := obWorld(t)
+		mustRun(t, env, "mode", "set", string(m))
+		if back := mustRun(t, env, "mode"); !strings.Contains(back.stdout, string(m)) {
+			t.Errorf("mode %q does not read back after publish was removed:\n%s", m, back.stdout)
+		}
+	}
+
+	// The gate, in all three of its outcomes, reached the way a person reaches it now.
+	seen := map[string]string{}
+	for _, c := range []struct {
+		name   string
+		answer string
+		err    error
+	}{{"passed", "pass", nil}, {"refused", "refuse: you named a customer", nil}, {"undetermined", "", os.ErrDeadlineExceeded}} {
+		env := obWithModel(obWorld(t))
+		mustRun(t, env, "mode", "set", "review")
+		mustRun(t, env, "rules", "set", "no customer names")
+		mustRun(t, env, "draft", "note-a", "a draft")
+		withReviewer(t, c.answer, c.err)
+		got := runOutboxCmd(t, env, "review", "note-a")
+		seen[c.name] = got.stdout + "\n" + runOutboxCmd(t, env, "state", "note-a").stdout
+		if c.name == "passed" && got.code != cli.Success {
+			t.Errorf("a passing review exits %d after publish was removed:\n%s", got.code, got.all())
+		}
+		if c.name != "passed" && got.code == cli.Success {
+			t.Errorf("a %s review exits 0 after publish was removed:\n%s", c.name, got.all())
+		}
+		if !strings.Contains(mustRun(t, env, "list").stdout, "note-a") {
+			t.Errorf("the draft is not in the outbox after a %s review", c.name)
+		}
+	}
+	assertThreeDistinct(t, "the review's outcome, after publish was removed", seen)
+
+	// And the central refusal Issue #9 exists for: review, no model, named and non-zero.
+	env := reviewWorldWithoutModel(t)
+	runOutboxCmd(t, env, "draft", "note-a", "a draft")
+	got := runOutboxCmd(t, env, "review", "note-a")
+	if got.code == cli.Success {
+		t.Fatalf("review with no model exits 0 after publish was removed:\n%s", got.all())
+	}
+	if !strings.Contains(strings.ToLower(got.all()), "model") {
+		t.Errorf("review with no model no longer names the missing model:\n%s", got.all())
+	}
+	if strings.Contains(runOutboxCmd(t, env, "state", "note-a").stdout, string(drafts.StateDrafted)) {
+		t.Errorf("a draft blocked on a missing model reads as merely drafted:\n%s", got.all())
 	}
 }

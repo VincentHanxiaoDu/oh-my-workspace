@@ -88,6 +88,12 @@ func runOutbox(env cli.Env) int {
 	case "-h", "--help", "help":
 		outboxUsage(env.Stdout)
 		return cli.Success
+	case "publish":
+		// RETIRED, AND SAID SO RATHER THAN VANISHING. This is answered BEFORE the preflight
+		// deliberately: a person who types a command that no longer exists is owed the pointer
+		// whether or not their daemon is up and whether or not their store can be opened. The
+		// preflight's refusals are about doing work, and there is no work here.
+		return outboxPublishRetired(env)
 	}
 	if code, ok := outboxPreflight(env, sub); !ok {
 		return code
@@ -107,8 +113,6 @@ func runOutbox(env cli.Env) int {
 		return outboxModel(env, rest)
 	case "review":
 		return outboxReview(env, rest)
-	case "publish":
-		return outboxPublish(env, rest)
 	default:
 		fmt.Fprintf(env.Stderr, "omw outbox: unknown subcommand %q\n", sub)
 		fmt.Fprintf(env.Stderr, "run 'omw outbox help' for what this build has.\n")
@@ -130,7 +134,8 @@ usage: omw outbox <subcommand>
   rules set <text>       record the rules review checks against, in your own words
   model                  whether a model is configured for review (never prints your key)
   review <id>            check one draft against your rules, on this machine
-  publish <id>           run your chosen gate and try to publish
+
+Publishing is 'omw publish note'. There is one command that publishes, and this is not it.
 
 Drafting, listing and manual mode need no hub and open no connection. Where a hub is genuinely
 needed this says exactly what is missing and exits non-zero; it never half-works.
@@ -535,17 +540,27 @@ func outboxModel(env cli.Env, args []string) int {
 // review, publish
 // ---------------------------------------------------------------------------
 
-// outboxGateResult is what the gate concluded, in the terms the callers need.
+// outboxGateResult is what the gate concluded, in the terms its caller needs.
 type outboxGateResult struct {
-	mayLeave bool
-	code     int
+	code int
 }
 
 // outboxReviewGate runs the person's chosen gate over one draft.
 //
 // IT NEVER DEPENDS ON THE HUB (criterion 12, PRD §5.2). The hub is not read, not dialled and not
-// mentioned; a person with no hub at all gets the whole check. It is also the only place in this
-// file that decides a draft may leave, so there is exactly one path to guard.
+// mentioned; a person with no hub at all gets the whole check.
+//
+// IT NO LONGER DECIDES WHETHER A DRAFT MAY LEAVE, and the `mayLeave` field it used to return is
+// gone with the command that read it: the gate that guards publication now lives inside
+// `publish.Transfer` (#46), where the transfer cannot happen without it. What remains here is
+// `omw outbox review` — running the person's rules over one draft on this machine and recording the
+// outcome — which is the whole of criteria 11 through 17 that is this capability's, and none of the
+// transfer that is not.
+//
+// THE RESULT IS STILL A STRUCT, ON PURPOSE. Collapsing it to a bare `int` is what a tidy-up wants,
+// and it is the wrong trade this week: #53 adds `return outboxGateResult{code: code}` to this
+// function for criterion 10, and #18 has already rewritten the same statements on `main`. Keeping
+// the type costs nothing and keeps three in-flight branches out of each other's way.
 func outboxReviewGate(env cli.Env, s *store.Store, o *drafts.Outbox, id hub.NoteID, what string) outboxGateResult {
 	ms := drafts.ReadMode(s)
 	fmt.Fprintf(env.Stdout, "%s\n", ms.Render())
@@ -556,7 +571,7 @@ func outboxReviewGate(env cli.Env, s *store.Store, o *drafts.Outbox, id hub.Note
 	if ms.Mode != drafts.ModeReview {
 		// manual and auto have no gate of their own: the person's act is the gate in manual, and
 		// auto is the deliberate absence of one.
-		return outboxGateResult{mayLeave: true, code: cli.Success}
+		return outboxGateResult{code: cli.Success}
 	}
 
 	cfg := drafts.ReadModel(env.Getenv)
@@ -607,7 +622,7 @@ func outboxReviewGate(env cli.Env, s *store.Store, o *drafts.Outbox, id hub.Note
 	fmt.Fprintf(env.Stdout, "%s\n", o.StateOf(id).Render())
 	switch outcome.Verdict {
 	case drafts.VerdictPassed:
-		return outboxGateResult{mayLeave: true, code: cli.Success}
+		return outboxGateResult{code: cli.Success}
 	case drafts.VerdictRefused:
 		fmt.Fprintf(env.Stderr, "omw outbox %s: your rules refused this draft; it is still in your outbox.\n", what)
 		return outboxGateResult{code: cli.ExitFailure}
@@ -652,44 +667,23 @@ func outboxReview(env cli.Env, args []string) int {
 	return res.code
 }
 
-func outboxPublish(env cli.Env, args []string) int {
-	if len(args) != 1 {
-		fmt.Fprintf(env.Stderr, "omw outbox publish: name exactly one draft.\n")
-		return cli.ExitUsage
-	}
-	s, o, code, ok := outboxOpen(env, "publish")
-	if !ok {
-		return code
-	}
-	id := hub.NoteID(args[0])
-	if st := o.StateOf(id); st.Exists != tri.Yes {
-		return outboxReportMissingDraft(env, "publish", id, st)
-	}
-
-	// THE GATE FIRST, AND THE HUB AFTER (criterion 12). The check runs on this machine and does not
-	// consult the hub, so a person with no hub still finds out what their rules think.
-	res := outboxReviewGate(env, s, o, id, "publish")
-	if !res.mayLeave {
-		fmt.Fprintf(env.Stdout, "published: no — this draft is still in your outbox\n")
-		return res.code
-	}
-
-	if !outboxHubIsConfigured(env) {
-		// CRITERION 22: the transfer genuinely needs a hub, so this says precisely that and exits
-		// non-zero. It does not half-work and it does not pretend.
-		fmt.Fprintf(env.Stdout, "published: no — this draft is still in your outbox\n")
-		fmt.Fprintf(env.Stderr, "omw outbox publish: %v (code: %s)\n", hub.ErrNoHubConfigured, hub.ErrNoHubConfigured.Code)
-		fmt.Fprintf(env.Stderr, "  Publishing sends a note to a hub, and there is no hub configured.\n")
-		return cli.ExitFailure
-	}
-	// THE BOUNDARY WITH ISSUE #10, SAID OUT LOUD. This capability decides whether a draft may
-	// leave; the transfer that takes it is Issue #10 and is not in this build. Reporting success
-	// here would be the client telling a person their note is out in the world when it is on their
-	// disk — so the outcome is undetermined, with its own exit code, and the draft stays put.
-	fmt.Fprintf(env.Stdout, "published: %s — the transfer out of the outbox is Issue #10 and this build has no transport\n", tri.Undetermined)
-	fmt.Fprintf(env.Stdout, "your draft is still in your outbox and nothing has left this machine.\n")
-	fmt.Fprintf(env.Stderr, "omw outbox publish: the gate passed and the transfer was not performed.\n")
-	return cli.ExitUndetermined
+// outboxPublishRetired answers `omw outbox publish`, which no longer exists.
+//
+// WHY THERE IS NO SECOND PUBLISHING COMMAND. This one ran the gate and then refused to transfer,
+// saying the transport was Issue #10's and absent — a sentence that stopped being true the moment
+// #46 landed the transport. Meanwhile `omw publish note` performed the real transfer and consulted
+// neither the mode nor the gate, so a `review` draft with no model reached an outbound dial. Two
+// commands over the same drafts, one of them lying and the other ungated. Product's ruling: ONE
+// command publishes, and the gate moves inside `publish.Transfer` where a second caller cannot walk
+// past it. This one goes away rather than delegating, because a delegating alias is a second caller.
+//
+// IT DOES NOT FALL THROUGH TO "unknown subcommand". A person who typed this had a draft they wanted
+// published; being told the word is unrecognised leaves them with the drafts and no route.
+func outboxPublishRetired(env cli.Env) int {
+	fmt.Fprintf(env.Stderr, "omw outbox publish: this command no longer exists.\n")
+	fmt.Fprintf(env.Stderr, "  Publishing is 'omw publish note', which is now the only command that publishes.\n")
+	fmt.Fprintf(env.Stderr, "  Nothing was published and nothing in your outbox was changed by this.\n")
+	return cli.ExitUsage
 }
 
 func outboxReportMissingDraft(env cli.Env, what string, id hub.NoteID, st drafts.StateReport) int {
