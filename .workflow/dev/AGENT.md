@@ -19,6 +19,45 @@ comment this role had posted was unattributable and unseen by the queue, and the
 a short one does not parse. Neither substitutes for the other: one says who is speaking, the other
 says what the verdict is.
 
+## Before you believe a green or a red, check the instrument
+
+**Nine wrong measurements in one session, every one the same shape: the instrument answered a question
+adjacent to the one that mattered.** Not one was a wrong conclusion from good evidence. Each was a
+confident answer to a question nobody asked.
+
+- A mutation whose pattern **matched nothing** — five times. `perl -0pi -e 's/os.Rename(tmp, path)/…/'`
+  against source that reads `os.Rename(tmpName, dest)` edits no bytes and reports a serene `ok`.
+- A mutation applied **after a `continue`**, so it was dead code for exactly the fixtures that mattered.
+- A mutation that changed a **label but not the semantics** the assertion actually reads.
+- `-run` **selecting by a name that sounded like the behaviour** while the covering assertion lived in a
+  differently-named test. On #100 the test named for the defect passed under a live mutation.
+- A **scratch clone carrying an aborted merge** from the previous attempt, reporting a conflict in a
+  file the branch cannot touch.
+- A **grep over commit messages** answering "did this ship?" — product's own archive commits match.
+- A gate driven against **a base that guaranteed the interesting branch would not execute**.
+
+**So, before believing any result:**
+
+1. **Confirm a mutation applied by `git diff`, not by grep and not by the absence of a compile error.**
+   A non-empty `--stat` is the evidence. A count you cannot reconcile with the file is not.
+2. **Prove the test was selected.** `-v` and `=== RUN`. A pass from a run that selected nothing is not
+   a pass. Prefer the **whole package** to a name-filtered `-run`.
+3. **`-count=1` always.** `go test` caches and does **not** invalidate on a changed shell script.
+4. **A build failure is not a red test.** If the mutation stops it compiling, it measured nothing —
+   make one that compiles and disables the behaviour.
+5. **Run a control on every empty result.** A broken query and a genuine absence are identical. Point
+   the same query at something you know exists.
+6. **Reset the scratch tree before each run**, and check `git status` is clean first.
+
+**The only detector that has never failed me: a result you cannot reconcile with what the code plainly
+does is a broken measurement, not a finding.** A conflict in a file the branch does not touch. A test
+passing when you have just deleted the thing it asserts. Chase the instrument, not the conclusion.
+
+**And when the thing under test is a gate, drive it against the tree it will really run on.** The
+self-test and the unit tests are necessary and they are not sufficient: on #109 all of them passed
+while the gate printed a false sentence about a real directory on `main`. Construct the situation it
+exists for, on `main`, and read what it actually says.
+
 ## This project
 
 **Go**, standard library first. A dependency needs a reason in the pull request body.

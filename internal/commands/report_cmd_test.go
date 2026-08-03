@@ -133,15 +133,25 @@ func TestReportRunExitCodesForTheThreeFacts(t *testing.T) {
 		t.Errorf("full did not carry the commit message:\n%s", out)
 	}
 
+	// THE THIRD FACT CHANGED WITH ISSUE #67, AND THE TEST SAYS WHICH FACT IT NOW IS.
+	//
+	// This used to read `token_usage` as an established emptiness — "a subject with no activity
+	// exited 0, an established emptiness is an answer". It was neither: nothing in this build has
+	// ever written token_usage activity, so the emptiness was a fact about the client and the exit
+	// 0 was a confident negative. `omw report subjects` now says so, and the report says so.
+	// TestASubjectWithNoProducerIsUndeterminedAndNotAQuietDay drives the distinction in full.
 	code, quietOut, _ := r.run("run", "quiet")
-	if code != cli.Success {
-		t.Errorf("a subject with no activity exited %d, want Success — an established emptiness is an answer", code)
+	if code != cli.ExitUndetermined {
+		t.Errorf("a subject nothing in this build writes exited %d, want ExitUndetermined (%d)", code, cli.ExitUndetermined)
 	}
-	if !strings.Contains(quietOut, "no activity") {
-		t.Errorf("a quiet subject did not say so:\n%s", quietOut)
+	if strings.Contains(quietOut, "no activity") {
+		t.Errorf("a subject nobody observes is reported as a quiet period:\n%s", quietOut)
+	}
+	if !strings.Contains(quietOut, "could not be determined") {
+		t.Errorf("an unobservable subject does not say so:\n%s", quietOut)
 	}
 	if quietOut == out {
-		t.Error("a quiet subject and an active one produced the same output")
+		t.Error("an unobservable subject and an active one produced the same output")
 	}
 }
 
@@ -152,6 +162,10 @@ func TestReportRunExitCodesForTheThreeFacts(t *testing.T) {
 // test creates, so the assertion does not depend on any daemon actually existing here.
 func TestSubscriptionOperationsSayTheDaemonIsNotRunningAndDoNotStartIt(t *testing.T) {
 	r := newReportRunner(t)
+	// `run` is staged with real activity first, so it reaches a DETERMINED report: since Issue #67
+	// a report on a subject nothing writes exits 3, and this test is about what every operation
+	// SAYS, not about that exit code.
+	r.stage(reports.Item{ID: "c1", Subject: "git", Kind: "commit", Text: "a real commit"})
 	for _, args := range [][]string{
 		{"subscribe", "daily", "git:full"},
 		{"show", "daily"},

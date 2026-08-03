@@ -181,7 +181,7 @@ func modelShow(env cli.Env, args []string) int {
 		return code
 	}
 	cfg := model.Read(env.Getenv, s)
-	view := cfg.View()
+	view := model.ViewOn(s, extensionRegistry, cfg)
 	fmt.Fprintf(env.Stdout, "%s\n", view.Render())
 
 	// THERE IS NOTHING TO ADD HERE, AND THAT IS THE DESIGN. Whether this build has an adapter for
@@ -228,7 +228,7 @@ func modelUse(env cli.Env, args []string) int {
 	if _, known := model.Lookup(name); !known {
 		fmt.Fprintf(env.Stdout, "  this build has no adapter for %s; your choice is recorded and review cannot run yet.\n", name)
 	}
-	fmt.Fprintf(env.Stdout, "%s\n", model.Read(env.Getenv, s).View().Render())
+	fmt.Fprintf(env.Stdout, "%s\n", model.ViewOn(s, extensionRegistry, model.Read(env.Getenv, s)).Render())
 	return cli.Success
 }
 
@@ -250,7 +250,7 @@ func modelKey(env cli.Env, args []string) int {
 	}
 	fmt.Fprintf(env.Stdout, "credential file: %s\n", args[1])
 	fmt.Fprintf(env.Stdout, "  The path is recorded. Its contents are not, and are read only when your model runs.\n")
-	fmt.Fprintf(env.Stdout, "%s\n", model.Read(env.Getenv, s).View().Render())
+	fmt.Fprintf(env.Stdout, "%s\n", model.ViewOn(s, extensionRegistry, model.Read(env.Getenv, s)).Render())
 	return cli.Success
 }
 
@@ -273,7 +273,7 @@ func modelClear(env cli.Env, args []string) int {
 	}
 	fmt.Fprintf(env.Stdout, "the recorded model choice on this device has been forgotten.\n")
 	fmt.Fprintf(env.Stdout, "  $%s and $%s are yours and were not touched.\n", model.EnvProvider, model.EnvCredential)
-	fmt.Fprintf(env.Stdout, "%s\n", model.Read(env.Getenv, s).View().Render())
+	fmt.Fprintf(env.Stdout, "%s\n", model.ViewOn(s, extensionRegistry, model.Read(env.Getenv, s)).Render())
 	return cli.Success
 }
 

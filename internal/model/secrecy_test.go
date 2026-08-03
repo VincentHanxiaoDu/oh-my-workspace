@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/hub"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/refusal"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri"
 )
 
@@ -99,9 +99,13 @@ func TestTheViewHasNowhereToPutACredential(t *testing.T) {
 	// behind a negative, and whether this build has an adapter for the chosen provider. "Adapter"
 	// arrived when criterion 18's agreement test caught two surfaces wording one state differently;
 	// this test refused it until it was listed here, which is the whole point of the check.
+	// "AdapterDetail" is the sixth, added on purpose: it carries the REGISTERED extension's own
+	// reason for failing to load, which is a fact about this machine's code and never about the
+	// person's key. It reaches this struct from `extension.Entry.Detail`, which criterion 22
+	// already holds to the same rule.
 	allowed := map[string]bool{
 		"Provider": true, "ProviderChosen": true, "CredentialPresent": true,
-		"Detail": true, "Adapter": true,
+		"Detail": true, "Adapter": true, "AdapterDetail": true,
 	}
 	vt := reflect.TypeOf(View{})
 	for i := 0; i < vt.NumField(); i++ {
@@ -147,9 +151,9 @@ func TestAskingAnAPIForTheCredentialIsRefusedAndNotAnsweredEmpty(t *testing.T) {
 	if val != "" {
 		t.Errorf("the refusal also returned a value %q", val)
 	}
-	if hub.Code(err) != ErrCredentialNotReadable.Code {
+	if refusal.Code(err) != ErrCredentialNotReadable.Code {
 		t.Errorf("the refusal's code is %q, want %q — a caller must tell it apart without parsing prose",
-			hub.Code(err), ErrCredentialNotReadable.Code)
+			refusal.Code(err), ErrCredentialNotReadable.Code)
 	}
 
 	// THE DISTINCTION. A fully configured credential refused, and a genuinely absent one reported:
@@ -163,9 +167,9 @@ func TestAskingAnAPIForTheCredentialIsRefusedAndNotAnsweredEmpty(t *testing.T) {
 		t.Errorf("a provider with a credential reports present=%v, want yes", configured.Present())
 	}
 	_, err2 := CredentialThrough(none)
-	if hub.Code(err2) != hub.Code(err) {
+	if refusal.Code(err2) != refusal.Code(err) {
 		t.Errorf("the refusal differs depending on whether a credential exists (%q vs %q); the refusal itself "+
-			"must not be an oracle for the answer it refuses", hub.Code(err2), hub.Code(err))
+			"must not be an oracle for the answer it refuses", refusal.Code(err2), refusal.Code(err))
 	}
 }
 

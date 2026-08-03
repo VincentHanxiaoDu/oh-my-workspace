@@ -132,7 +132,11 @@ func runDiagnostics(env cli.Env) int {
 	if !res.Manifest.BodiesIncluded {
 		fmt.Fprintf(env.Stdout, "ticket, draft and message bodies are NOT in this bundle. Re-run with %s to include them.\n", includeBodiesFlag)
 	} else {
-		fmt.Fprintf(env.Stdout, "you asked for bodies, so ticket, draft and message text IS in this bundle. Your model key is not.\n")
+		// NAMED FROM THE MANIFEST, not from a fixed sentence. This line used to promise "ticket,
+		// draft and message text", which stopped being true the moment a body category could come
+		// back undetermined — and a summary that overstates what it handed over is the one thing a
+		// person reads before deciding to send it (Issue #67).
+		fmt.Fprintf(env.Stdout, "you asked for bodies, so the text of every category marked collected above IS in this bundle. Your model key is not.\n")
 	}
 	return cli.Success
 }

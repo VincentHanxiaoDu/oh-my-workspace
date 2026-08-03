@@ -118,10 +118,26 @@ func readLockBody(p runPaths) (lockBody, bool) {
 	return b, true
 }
 
+// release hands the lock back, and CLEARS THE BODY ON THE WAY OUT.
+//
+// Issue #69: the body used to be left behind, so the next daemon found a pid that was not its own
+// and announced "a lock left behind by pid N was found and taken over" — on every clean restart as
+// well as after every crash. The sentence fired 15 times out of 15 and distinguished nothing.
+//
+// Truncating here is what makes the notice mean something: a body in the lock file now says
+// exactly one thing, that its writer never got to this line. A guard that cries wolf is a guard
+// that stops being read, and the sentence exists to be read.
+//
+// The truncation happens BEFORE the unlock, so it is done while this process still holds exclusive
+// access and no successor can be reading a half-cleared file. A failure to truncate is not fatal —
+// the lock still has to be given back — and the cost is one spurious notice, which is where this
+// started rather than something worse.
 func (h *lockHandle) release() {
 	if h == nil || h.file == nil {
 		return
 	}
+	_ = h.file.Truncate(0)
+	_ = h.file.Sync()
 	_ = unlockFile(h.file)
 	_ = h.file.Close()
 	h.file = nil

@@ -1,8 +1,7 @@
 package hub
 
 import (
-	"errors"
-	"fmt"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/refusal"
 )
 
 // Error is a hub refusal or failure that a caller can tell apart from another one WITHOUT reading
@@ -12,15 +11,19 @@ import (
 // without parsing prose", and criterion 12 that "refused" and "no such note" be distinguishable.
 // Prose is translated, reworded and line-wrapped; a code is not. Every surface that reports one of
 // these prints its Code alongside its message, and every test asserts on the Code.
-type Error struct {
-	// Code is stable, lowercase, hyphenated, and part of the contract. Changing one is a breaking
-	// change to anything scripting against `omw`.
-	Code string
-	// Msg is the sentence a person reads.
-	Msg string
-}
-
-func (e *Error) Error() string { return e.Msg }
+//
+// # IT IS AN ALIAS, AND THAT IS LOAD-BEARING (Issue #21)
+//
+// The type moved to [refusal] so that `internal/model` can have typed refusals without importing
+// this package — Issue #6's structural ban on `internal/channels` reaching the hub is transitive,
+// and channels → daemon → model → hub was the path that #18 and #6 opened between them. The reason
+// is written up in that package.
+//
+// `type X = Y` and not `type X Y`: an alias is the SAME type, so every `&hub.Error{…}` in the tree,
+// every `errors.As(err, &e)` against a `*hub.Error`, and every value below keeps working
+// unchanged. A defined type would have silently split the vocabulary in two, which is the opposite
+// of the point.
+type Error = refusal.Error
 
 // The refusals and failures this package can produce.
 //
@@ -106,19 +109,13 @@ var allErrors = []*Error{
 	ErrEmptyAudience, ErrUnknownVisibility, ErrNoAuthor,
 }
 
-// Code returns the stable code of the hub error inside err, or "" if err is not one.
+// Code returns the stable code of the refusal inside err, or "" if err is not one.
 //
 // It walks wrapped errors, so a caller may add context with %w and a script still reads the same
 // code. This is the function a surface calls; nothing prints a bare error string as its only signal.
-func Code(err error) string {
-	var e *Error
-	if errors.As(err, &e) {
-		return e.Code
-	}
-	return ""
-}
+//
+// It is [refusal.Code] under this package's name, for the reason [Error] is an alias.
+var Code = refusal.Code
 
-// Refusedf wraps a hub error with detail while keeping its code readable through errors.As.
-func Refusedf(base *Error, format string, args ...any) error {
-	return fmt.Errorf("%s: %w", fmt.Sprintf(format, args...), base)
-}
+// Refusedf wraps a refusal with detail while keeping its code readable through errors.As.
+var Refusedf = refusal.Refusedf

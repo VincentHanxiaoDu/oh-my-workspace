@@ -342,7 +342,7 @@ func outboxDraft(env cli.Env, args []string) int {
 		// be able to accumulate drafts in silence; the missing model is named the first time it
 		// matters, not only when they eventually try to publish.
 		cfg := model.Read(env.Getenv, s)
-		fmt.Fprintf(env.Stdout, "%s\n", cfg.Render())
+		fmt.Fprintf(env.Stdout, "%s\n", model.ViewOn(s, extensionRegistry, cfg).Render())
 		switch cfg.Configured() {
 		case tri.Yes:
 			fmt.Fprintf(env.Stdout, "%s\n", o.StateOf(id).Render())
@@ -565,7 +565,7 @@ func outboxModel(env cli.Env, args []string) int {
 		return code
 	}
 	cfg := model.Read(env.Getenv, s)
-	fmt.Fprintf(env.Stdout, "%s\n", cfg.Render())
+	fmt.Fprintf(env.Stdout, "%s\n", model.ViewOn(s, extensionRegistry, cfg).Render())
 	switch cfg.Configured() {
 	case tri.Yes:
 		return cli.Success
@@ -589,6 +589,39 @@ type outboxGateResult struct {
 	code     int
 }
 
+// outboxExtensionRefusal is CRITERION 10, at the gate rather than only behind it.
+//
+// # THE DEFECT IT CLOSES
+//
+// `outboxReviewer` is wrapped in `extension_cmd.go` so that a broken extension is named instead of
+// being opened, and that wrap is correct — but the review gate returns on `cfg.Configured() ==
+// tri.No` BEFORE control ever reaches a reviewer. So the person whose extension is broken AND who
+// has not yet recorded a credential — the ordinary way this goes wrong, not an edge case — was told
+// "no model is configured" at the very moment `omw ext list` said FAILED TO LOAD, and sent to fix a
+// credential that would not have helped them. `extension_cmd.go` named calling `model.Readiness`
+// from here as the follow-up; this is it.
+//
+// # THE ORDER IS THE CRITERION, AND IT IS NOT DECIDED HERE
+//
+// [model.Readiness] already documents "the extension is consulted BEFORE the credential", and this
+// function adds no second opinion about which situation the machine is in: it asks Readiness and
+// acts on the one situation that is this gate's to refuse. A WORKING extension with no credential
+// is still SituationNoModelConfigured, so it still gets the no-model refusal below — that sentence
+// is then true, and replacing it would be this defect with the directions swapped.
+func outboxExtensionRefusal(env cli.Env, s *store.Store, o *drafts.Outbox, id hub.NoteID, what string, cfg model.Config) (int, bool) {
+	answer := model.Readiness(s, extensionRegistry, cfg.View())
+	if answer.Situation != model.SituationExtensionFailedToLoad {
+		return cli.Success, false
+	}
+	_ = o.SetState(id, drafts.StateBlocked, "you chose review mode and the chosen provider's extension did not load, so nothing can check your rules")
+	fmt.Fprintf(env.Stdout, "%s\n", o.StateOf(id).Render())
+	fmt.Fprintf(env.Stderr, "omw outbox %s: %v (code: %s)\n", what, model.ErrProviderFailedToLoad, answer.Code)
+	fmt.Fprintf(env.Stderr, "  %s\n", answer.Reason)
+	fmt.Fprintf(env.Stderr, "  This is NOT 'no model is configured', and recording a credential will not fix it.\n")
+	fmt.Fprintf(env.Stderr, "  Nothing has been published, and this draft is not merely awaiting you.\n")
+	return cli.ExitFailure, true
+}
+
 // outboxReviewGate runs the person's chosen gate over one draft.
 //
 // IT NEVER DEPENDS ON THE HUB (criterion 12, PRD §5.2). The hub is not read, not dialled and not
@@ -608,7 +641,16 @@ func outboxReviewGate(env cli.Env, s *store.Store, o *drafts.Outbox, id hub.Note
 	}
 
 	cfg := model.Read(env.Getenv, s)
-	fmt.Fprintf(env.Stdout, "%s\n", cfg.Render())
+	fmt.Fprintf(env.Stdout, "%s\n", model.ViewOn(s, extensionRegistry, cfg).Render())
+	if cfg.Configured() == tri.No {
+		// CRITERION 10, AND ONLY WHERE THIS GATE WOULD OTHERWISE SAY "no model is configured".
+		// A credential that IS recorded reaches `outboxReviewer`, where the extension is already
+		// consulted; the missing half is exactly this branch, which returns before any reviewer
+		// exists. See outboxExtensionRefusal.
+		if code, refused := outboxExtensionRefusal(env, s, o, id, what, cfg); refused {
+			return outboxGateResult{code: code}
+		}
+	}
 	switch cfg.Configured() {
 	case tri.No:
 		// THE CENTRAL REFUSAL (criteria 13, 14, 15). It names the missing model, it exits non-zero,

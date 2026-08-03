@@ -56,6 +56,7 @@ import (
 	"time"
 
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/daemon"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/drafts"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/health"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/store"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri"
@@ -131,6 +132,24 @@ type Category struct {
 	// because a category that collected nothing wrote nothing. The manifest/contents agreement test
 	// checks both directions of this.
 	Files []string `json:"files"`
+}
+
+// undeterminedBy fills in the two undetermined endings a record source can reach, and keeps them
+// APART (Issue #67, criterion 4). "This build has nothing that writes these records" and "the
+// records are there and would not be read" are different facts with different reasons, and neither
+// of them is a count of zero. verb is what could not be done — "counted", "read".
+func (c Category) undeterminedBy(err error, noun, path, verb string) Category {
+	c.State = StateUndetermined
+	if errors.Is(err, errNoProducerInThisBuild) {
+		c.Reason = ReasonNotInThisBuild
+		c.Detail = "nothing in this build writes " + noun + " records, so how many there are could not be " +
+			verb + "; this is NOT a report that there are none"
+		return c
+	}
+	c.Reason = ReasonCouldNotRead
+	c.Detail = "the " + noun + " records in " + path + " could not be " + verb + ": " + err.Error() +
+		"; this is NOT a report that there are none"
+	return c
 }
 
 // BodiesRequest records whether the person affirmatively asked for bodies. It is a separate,
@@ -219,9 +238,13 @@ var categoryNames = []string{
 // compile against them. When they land, these constants are the ones to delete in favour of theirs.
 const (
 	KindTicket = store.Kind("ticket")
-	KindDraft  = store.Kind("draft")
-	// KindMessage is a raw message ingested from a channel (PRD §2.1). Criterion 5 is about this
-	// one specifically.
+	// KindMessage is what a raw message ingested from a channel WOULD be stored under (PRD §2.1).
+	//
+	// NOTHING WRITES IT AND NOTHING HERE READS IT — see listMessages. It is kept as the name the
+	// ingester will use when it lands, so that the reader and the writer agree by construction
+	// rather than by two people choosing the same string. Wiring it back into a List call without
+	// building that ingester puts Issue #67's asserted zero straight back, and internal/kindguard
+	// fails the build if anybody does.
 	KindMessage = store.Kind("message")
 	// KindModelCredential is the person's model key (PRD §3.13, Issue #18). It is named here ONLY
 	// so that it can be excluded by name and so that a test can prove the exclusion against a real
@@ -229,22 +252,165 @@ const (
 	KindModelCredential = store.Kind("model-credential")
 )
 
-// bodyKinds is exactly what the opt-in switch reaches.
+// THERE IS NO KindDraft, AND ITS ABSENCE IS THE FIX FOR ISSUE #67, BLOCKER 2.
 //
-// KindModelCredential IS NOT IN THIS LIST AND MUST NOT BE ADDED. The opt-in is a person saying
-// "my tickets and drafts are less private to me than my broken client is important"; it is not a
-// person handing over a key, and §3.13 does not have a switch.
-var bodyKinds = map[string]store.Kind{
-	CatTicketBodies:  KindTicket,
-	CatDraftBodies:   KindDraft,
-	CatMessageBodies: KindMessage,
+// This package used to declare `store.Kind("draft")` and count the records under it. Nothing in the
+// product has ever written a record under that kind: `omw outbox draft` writes revision files into
+// the outbox inside the store (internal/drafts). The reader and the writer never met, so a bundle
+// taken on a machine with two drafts reported `draft-inventory  collected (0)` — and a supporter
+// reading that bundle concludes the person has no drafts. An asserted zero is worse than a
+// withholding, because a withholding is visibly a gap.
+//
+// So drafts are now enumerated through the outbox that writes them, by [listDrafts]. The general
+// lesson is enforced structurally by internal/kindguard, which fails when a store kind is read here
+// and written nowhere.
+
+// collectedRecord is one thing a category can carry.
+type collectedRecord struct {
+	// ID is the record's identifier, as its own subsystem names it.
+	ID string
+	// Size is how big the record is, in bytes. It is the ONLY thing the default bundle reports
+	// about a record besides its id.
+	Size int
+	// Body is the record's content. It is populated only when bodies were affirmatively asked for
+	// — a source that filled this in regardless would put the person's material one careless
+	// `writeCollected` away from a bundle they are about to email.
+	Body string
 }
 
-// inventoryKinds maps an inventory category to the kind it counts.
-var inventoryKinds = map[string]store.Kind{
-	CatTicketInventory:  KindTicket,
-	CatDraftInventory:   KindDraft,
-	CatMessageInventory: KindMessage,
+// recordSource is where one category's records come from.
+//
+// IT IS A FUNCTION AND NOT A store.Kind (Issue #67). A kind is a directory name, and a directory
+// name that nobody writes to still reads perfectly well — as zero records. Naming the SUBSYSTEM
+// that owns the records instead means a category can only be added by pointing at something that
+// produces them, and a subsystem this build does not have returns [errNoProducerInThisBuild]
+// rather than an empty list.
+type recordSource struct {
+	// Noun names the thing, in prose and in the bundle's file names.
+	Noun string
+	// List returns every record. wantBodies asks for the content as well as the metadata.
+	//
+	// AN ERROR IS UNDETERMINED, NEVER EMPTY. A source that cannot read its records must not return
+	// an empty slice: that is the one return value that makes "I could not look" and "there is
+	// nothing" the same bytes in a manifest.
+	List func(st *store.Store, wantBodies bool) ([]collectedRecord, error)
+}
+
+// errNoProducerInThisBuild is a category whose records nothing in this build writes. It renders as
+// undetermined with [ReasonNotInThisBuild] — "this build cannot ask" is not "the answer is none".
+var errNoProducerInThisBuild = errors.New("nothing in this build produces these records")
+
+// listTickets enumerates the inbox's tickets (internal/inbox writes them under this kind).
+func listTickets(st *store.Store, wantBodies bool) ([]collectedRecord, error) {
+	recs, err := st.List(KindTicket)
+	if err != nil {
+		return nil, err
+	}
+	return fromStoreRecords(recs, wantBodies), nil
+}
+
+// listMessages would enumerate raw ingested messages, and cannot, because NOTHING IN THIS BUILD
+// WRITES ONE.
+//
+// Channel ingestion turns a message into a TICKET (internal/channels/ingest.go) and stores no raw
+// message. This used to read `store.Kind("message")` anyway, which returned zero records from a
+// directory that has never existed and rendered as `message-inventory  collected (0)` — the same
+// asserted zero as Blocker 2, in the same bundle, and a support engineer reads it as "this person
+// has no ingested messages" (found in review of PR #92).
+//
+// So it answers with what is actually true. The INGESTION is the open work, tracked on Issue #32;
+// until it lands the bundle says it could not determine this rather than claiming a zero, because a
+// declaration of known debt must not also be what keeps a wrong answer on a person's screen.
+func listMessages(*store.Store, bool) ([]collectedRecord, error) {
+	return nil, errNoProducerInThisBuild
+}
+
+func fromStoreRecords(recs []store.Record, wantBodies bool) []collectedRecord {
+	out := make([]collectedRecord, 0, len(recs))
+	for _, r := range recs {
+		// SIZE ALWAYS, BODY ONLY ON REQUEST. r.Data is in hand here and its contents are
+		// deliberately reached only through wantBodies: this is the line where a body would enter a
+		// default bundle, and it is the line the mutation test changes to prove the negative search
+		// is live.
+		c := collectedRecord{ID: r.ID, Size: len(r.Data)}
+		if wantBodies {
+			c.Body = string(r.Data)
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// listDrafts enumerates the drafts in this store's outbox — the place `omw outbox draft` writes and
+// `omw outbox list` reads (Issue #67, criterion 3).
+//
+// IT CREATES NOTHING. drafts.InStore would materialise the outbox directory, which is right for a
+// command a person ran on purpose and wrong for a diagnostic read. A store whose outbox does not
+// exist yet has no drafts, and that is a DETERMINED zero: the outbox is created by the first draft,
+// so its absence is evidence and not ignorance. Anything else that goes wrong is undetermined.
+func listDrafts(st *store.Store, wantBodies bool) ([]collectedRecord, error) {
+	dir := filepath.Join(st.Path(), drafts.OutboxDirName)
+	if _, err := os.Stat(dir); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	// THE MARKER IS STATTED HERE RATHER THAN LEFT TO drafts.Open, so that "there is no outbox at
+	// that path" and "the outbox is there and would not be read" do not both arrive as Open's
+	// no-outbox refusal. An outbox whose directory denies access produced the detail "no draft
+	// outbox at that path", which is a determined negative standing in for a permission error —
+	// the same collapse this Issue is about, one layer down (noted in review of PR #92).
+	if _, err := os.Stat(filepath.Join(dir, drafts.MarkerName)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	o, err := drafts.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	ids, err := o.Drafts()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]collectedRecord, 0, len(ids))
+	for _, id := range ids {
+		versions, err := o.Timeline(id, "")
+		if err != nil {
+			// ONE UNREADABLE DRAFT MAKES THE CATEGORY UNDETERMINED, rather than being dropped from
+			// a count that then presents as complete. Half an inventory reported as all of it is
+			// wrong without looking wrong.
+			return nil, fmt.Errorf("draft %q: %w", string(id), err)
+		}
+		c := collectedRecord{ID: string(id)}
+		for _, v := range versions {
+			c.Size += len(v.Body)
+		}
+		if wantBodies && len(versions) > 0 {
+			// The draft AS IT STANDS. Its earlier revisions are the outbox's business and are not
+			// what a supporter is looking at.
+			c.Body = versions[len(versions)-1].Body
+		}
+		out = append(out, c)
+	}
+	return out, nil
+}
+
+// bodySources is exactly what the opt-in switch reaches.
+//
+// KindModelCredential IS NOT REACHABLE FROM HERE AND MUST NOT BE MADE SO. The opt-in is a person
+// saying "my tickets and drafts are less private to me than my broken client is important"; it is
+// not a person handing over a key, and §3.13 does not have a switch.
+var bodySources = map[string]recordSource{
+	CatTicketBodies:  {Noun: "ticket", List: listTickets},
+	CatDraftBodies:   {Noun: "draft", List: listDrafts},
+	CatMessageBodies: {Noun: "message", List: listMessages},
+}
+
+// inventorySources maps an inventory category to the subsystem it counts.
+var inventorySources = map[string]recordSource{
+	CatTicketInventory:  {Noun: "ticket", List: listTickets},
+	CatDraftInventory:   {Noun: "draft", List: listDrafts},
+	CatMessageInventory: {Noun: "message", List: listMessages},
 }
 
 // Options is a bundle run.
@@ -419,54 +585,48 @@ func gather(dir string, opts Options) (Manifest, error) {
 
 	// ---- inventories (metadata only; no payload is read here) --------------------------------
 	for _, name := range []string{CatTicketInventory, CatDraftInventory, CatMessageInventory} {
-		kind := inventoryKinds[name]
-		describes := "how many " + string(kind) + " records exist, their identifiers and their sizes — no content"
+		src := inventorySources[name]
+		describes := "how many " + src.Noun + " records exist, their identifiers and their sizes — no content"
 		if st == nil {
 			set(Category{
 				Name: name, Describes: describes,
 				State: StateUndetermined, Reason: ReasonNoStore,
-				Detail: "there is no readable store on this machine, so " + string(kind) + " records could not be counted; this is not a report that there are none",
+				Detail: "there is no readable store on this machine, so " + src.Noun + " records could not be counted; this is not a report that there are none",
 			})
 			continue
 		}
-		recs, err := st.List(kind)
+		recs, err := src.List(st, false)
 		if err != nil {
-			set(Category{
-				Name: name, Describes: describes,
-				State: StateUndetermined, Reason: ReasonCouldNotRead,
-				Detail: "the " + string(kind) + " records in " + st.Path() + " could not be listed: " + err.Error(),
-			})
+			set(Category{Name: name, Describes: describes}.undeterminedBy(err, src.Noun, st.Path(), "counted"))
 			continue
 		}
 		items := make([]map[string]any, 0, len(recs))
 		for _, r := range recs {
-			// ID AND SIZE ONLY. r.Data is in hand here and is deliberately not touched: this is the
-			// line where a body would enter a default bundle, and it is the line the mutation test
-			// changes to prove the negative search is live.
-			items = append(items, map[string]any{"id": r.ID, "size_bytes": len(r.Data)})
+			items = append(items, map[string]any{"id": r.ID, "size_bytes": r.Size})
 		}
-		f, err := writeCollected(dir, string(kind)+"-inventory.json", map[string]any{
-			"kind": string(kind), "count": len(items), "records": items,
+		f, err := writeCollected(dir, src.Noun+"-inventory.json", map[string]any{
+			"kind": src.Noun, "count": len(items), "records": items,
 		})
 		if err != nil {
 			return man, err
 		}
 		// Items is the count, and zero here means present-but-empty — a store with no tickets,
-		// which is a different manifest line from a machine with no store.
+		// which is a different manifest line from a machine with no store, and a different one
+		// again from records this build cannot enumerate at all.
 		set(Category{Name: name, Describes: describes, State: StateCollected, Items: len(items), Files: []string{f}})
 	}
 
 	// ---- bodies (withheld by default) --------------------------------------------------------
 	for _, name := range []string{CatTicketBodies, CatDraftBodies, CatMessageBodies} {
-		kind := bodyKinds[name]
-		describes := "the full text of every " + string(kind) + " record on this machine"
+		src := bodySources[name]
+		describes := "the full text of every " + src.Noun + " record on this machine"
 		if !opts.IncludeBodies {
 			// THE DEFAULT. PRD §2.3's containers do not leave the machine except by publication,
 			// and a support bundle is not a publication.
 			set(Category{
 				Name: name, Describes: describes,
 				State: StateWithheld, Reason: ReasonWithheldByDefault,
-				Detail: "no " + string(kind) + " content is in this bundle; it is included only when explicitly asked for",
+				Detail: "no " + src.Noun + " content is in this bundle; it is included only when explicitly asked for",
 			})
 			continue
 		}
@@ -478,21 +638,17 @@ func gather(dir string, opts Options) (Manifest, error) {
 			})
 			continue
 		}
-		recs, err := st.List(kind)
+		recs, err := src.List(st, true)
 		if err != nil {
-			set(Category{
-				Name: name, Describes: describes,
-				State: StateUndetermined, Reason: ReasonCouldNotRead,
-				Detail: "bodies were asked for, and the " + string(kind) + " records could not be listed: " + err.Error(),
-			})
+			set(Category{Name: name, Describes: describes}.undeterminedBy(err, src.Noun, st.Path(), "read"))
 			continue
 		}
 		items := make([]map[string]any, 0, len(recs))
 		for _, r := range recs {
-			items = append(items, map[string]any{"id": r.ID, "body": string(r.Data)})
+			items = append(items, map[string]any{"id": r.ID, "body": r.Body})
 		}
-		f, err := writeCollected(dir, filepath.Join("bodies", string(kind)+".json"), map[string]any{
-			"kind": string(kind), "count": len(items), "records": items,
+		f, err := writeCollected(dir, filepath.Join("bodies", src.Noun+".json"), map[string]any{
+			"kind": src.Noun, "count": len(items), "records": items,
 		})
 		if err != nil {
 			return man, err

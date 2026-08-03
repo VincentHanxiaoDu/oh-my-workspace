@@ -324,14 +324,10 @@ func reportRun(env cli.Env, args []string) int {
 func reportSubjects(env cli.Env) int {
 	fmt.Fprintf(env.Stdout, "subjects this build knows:\n")
 	for _, s := range reports.Catalog() {
-		marks := []string{}
-		if s.Root {
-			marks = append(marks, "named by *")
-		}
-		if s.HubOnly {
-			marks = append(marks, "supplied by the hub")
-		}
-		fmt.Fprintf(env.Stdout, "  %-16s %s [%s]\n", s.Name, s.About, strings.Join(marks, "; "))
+		// THE MARKS COME FROM THE SUBJECT (Issue #67, criterion 2). A subject nothing in this build
+		// writes says so here, where a person choosing what to subscribe to reads it, rather than
+		// leaving them to find out from a report that looks like a quiet day.
+		fmt.Fprintf(env.Stdout, "  %-16s %s [%s]\n", s.Name, s.About, strings.Join(s.Advertisement(), "; "))
 	}
 	fmt.Fprintf(env.Stdout, "granularities, most detailed first: %s\n", reports.GranularityNames())
 	return cli.Success

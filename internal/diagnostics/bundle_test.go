@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/drafts"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/health"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/store"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri"
@@ -43,9 +44,20 @@ func seededStore(t *testing.T) string {
 		}
 	}
 	put(KindTicket, "t1", "subject line\n"+secretTicketBody+"\n")
-	put(KindDraft, "d1", "draft heading\n"+secretDraftBody+"\n")
 	put(KindMessage, "m1", "from a channel\n"+secretMessageBody+"\n")
 	put(KindModelCredential, "key", `{"provider":"acme","api_key":"`+secretModelKey+`"}`)
+
+	// THE DRAFT IS SEEDED THE WAY THE PRODUCT WRITES ONE (Issue #67). It used to be put into a
+	// store kind called "draft" that nothing in the product has ever written to, which made every
+	// assertion below about drafts an assertion about a fixture. `omw outbox draft` revises a draft
+	// in the outbox inside the store, so that is what this does.
+	o, err := drafts.InStore(s)
+	if err != nil {
+		t.Fatalf("opening the outbox inside the seeded store: %v", err)
+	}
+	if _, err := o.Revise("d1", "draft heading\n"+secretDraftBody+"\n"); err != nil {
+		t.Fatalf("seeding a draft: %v", err)
+	}
 	return root
 }
 
@@ -227,13 +239,17 @@ func TestOptInIncludesBodiesAndTheManifestSaysSo(t *testing.T) {
 		t.Errorf("the two bundles' manifests render the request identically as %q, so they are not distinguishable from the manifest alone", dm.BodiesRequest)
 	}
 
-	// Criterion 7: the SAME field that reads withheld by default reads as included.
+	// EVERY BODY CATEGORY IS WITHHELD BY DEFAULT, whatever it can go on to establish.
 	for _, name := range []string{CatTicketBodies, CatDraftBodies, CatMessageBodies} {
-		d := category(t, dm, name)
-		o := category(t, om, name)
-		if d.State != StateWithheld {
+		if d := category(t, dm, name); d.State != StateWithheld {
 			t.Errorf("%s in the default bundle is %q, want %q", name, d.State, StateWithheld)
 		}
+	}
+
+	// Criterion 7: the SAME field that reads withheld by default reads as included, for the
+	// categories this build can actually produce.
+	for _, name := range []string{CatTicketBodies, CatDraftBodies} {
+		o := category(t, om, name)
 		if o.State != StateCollected {
 			t.Errorf("%s in the opt-in bundle is %q, want %q", name, o.State, StateCollected)
 		}
@@ -242,13 +258,25 @@ func TestOptInIncludesBodiesAndTheManifestSaysSo(t *testing.T) {
 		}
 	}
 
+	// MESSAGES ARE NOT A THING THIS BUILD CAN COLLECT, and asking for bodies does not change that.
+	// Nothing writes a raw message — channel ingestion stores tickets — so the opt-in reaches an
+	// undetermined category rather than a confident zero. The seeded `message` record below is a
+	// store record no part of the product wrote, and it stays out of the bundle for that reason.
+	msg := category(t, om, CatMessageBodies)
+	if msg.State != StateUndetermined || msg.Reason != ReasonNotInThisBuild {
+		t.Errorf("%s under an explicit opt-in is %q/%q, want undetermined/%q", CatMessageBodies, msg.State, msg.Reason, ReasonNotInThisBuild)
+	}
+
 	// And the bodies really are there — an opt-in that quietly withheld would satisfy the negative
 	// test above while making the feature useless.
 	files := bundleFiles(t, opt.Path)
-	for _, secret := range []string{secretTicketBody, secretDraftBody, secretMessageBody} {
+	for _, secret := range []string{secretTicketBody, secretDraftBody} {
 		if !containsAny(files, secret) {
 			t.Errorf("bodies were asked for and %s is nowhere in the bundle", secret)
 		}
+	}
+	if containsAny(files, secretMessageBody) {
+		t.Errorf("the bundle carried a record under a kind the product does not write, which it did not establish and cannot describe")
 	}
 }
 
@@ -626,12 +654,26 @@ func TestPlatformIsRecordedAndTheMissingDeviceLabelIsNamed(t *testing.T) {
 // ---------------------------------------------------------------------------------------------
 
 func TestTheOptInReachesOnlyBodies(t *testing.T) {
-	if len(bodyKinds) != 3 {
-		t.Fatalf("the opt-in reaches %d kinds, want the three body kinds: %v", len(bodyKinds), bodyKinds)
+	if len(bodySources) != 3 {
+		t.Fatalf("the opt-in reaches %d sources, want the three body categories: %v", len(bodySources), bodySources)
 	}
-	for cat, kind := range bodyKinds {
-		if kind == KindModelCredential {
-			t.Errorf("category %s would disclose the model credential on opt-in", cat)
+	// THE CREDENTIAL IS NOT REACHABLE FROM ANY OF THEM. Since Issue #67 a body source is a
+	// function rather than a kind, so this is driven rather than compared: each source is run
+	// against a store holding a real key, with bodies asked for, and none of them may return it.
+	root := seededStore(t)
+	s, err := store.Open(root)
+	if err != nil {
+		t.Fatalf("opening the seeded store: %v", err)
+	}
+	for cat, src := range bodySources {
+		recs, err := src.List(s, true)
+		if err != nil {
+			continue // an undetermined source discloses nothing, which is what this asserts
+		}
+		for _, r := range recs {
+			if strings.Contains(r.Body, secretModelKey) {
+				t.Errorf("category %s would disclose the model credential on opt-in", cat)
+			}
 		}
 	}
 }
