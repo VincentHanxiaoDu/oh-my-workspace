@@ -26,10 +26,18 @@
 
 - [x] Record `.workflow/bin/queue.sh` in `internal/machinery/framework-local-commits.txt` with its reason
 
-## Deliberately not done
+## Out of scope, stated rather than listed
 
-- [ ] Prevent two roles reviewing the same head concurrently — Issue #59 leaves this decision open
-      and criterion 2 forbids narrowing to one reviewer. The current behaviour is now pinned by a
-      test instead, so removing it must be deliberate.
-- [ ] Upstream the change into agent-dev-flow — outside this repository, and the reason the local
-      edit is declared rather than relied on.
+These are not unfinished tasks and they are not ticked. They are work this change deliberately does
+not contain, recorded so the omission is visible.
+
+**Preventing two roles from reviewing the same head concurrently.** Issue #59 says the redundancy
+was chosen on purpose, that doing nothing may be correct, and that the cost should be measured
+before a mechanism is spent on it; criterion 2 forbids narrowing to a single eligible reviewer, and
+criterion 3 forbids the pre-review claim that is the only thing which could close a true race. The
+decision stays open on #59, which stays open. The current behaviour is now pinned by
+`TestAnUnreviewedHeadReachesEveryIndependentRoleAndNoAuthor`, so removing it has to be deliberate.
+
+**Upstreaming the `queue.sh` change into agent-dev-flow.** That is another repository. The local
+edit is declared in `internal/machinery/framework-local-commits.txt` as a debt, and the Go test is
+what survives the refresh that will delete it.
