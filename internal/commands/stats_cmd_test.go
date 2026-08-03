@@ -551,3 +551,84 @@ func TestStatsSaysWhatRecencyMeans(t *testing.T) {
 		t.Fatalf("the report does not state what recency means:\n%s", w.out())
 	}
 }
+
+// --- --as is refused at the request, for BOTH halves ---------------------------------------------
+
+// TestStatsAsIsRefusedNotAnsweredAboutSomebodyElse is the defect that got this pull request
+// refused, driven at the surface a person uses.
+//
+// The local half took --as as the identity with no check, so `--as bob` counted the drafts of
+// whoever is signed in and labelled them bob's, and `--as bob --scope person:<signed-in>` printed a
+// DETERMINED `notes: 0` with `coverage: complete` about drafts sitting right there. A determined
+// statistic that is false is worse than an undetermined one: an agent builds a plan on it.
+//
+// The control is the first case. Without it, "everything is refused" and "the fix works" look the
+// same.
+func TestStatsAsIsRefusedNotAnsweredAboutSomebodyElse(t *testing.T) {
+	// CONTROL: signed in as alice, no --as, two drafts, counted and attributed to alice.
+	control := newStatsWorld(t).as("alice").withOutbox(t, "one", "two")
+	control.run(t, nil)
+	if got := statLine(t, control.out(), "local", "notes"); got != "2" {
+		t.Fatalf("control: local notes = %q, want 2 — without this the refusals below prove nothing:\n%s", got, control.out())
+	}
+	if got := statLine(t, control.out(), "local", "subjects"); got != "person:alice" {
+		t.Fatalf("control: subjects = %q, want person:alice", got)
+	}
+
+	// --as yourself is not impersonation and must still answer.
+	self := newStatsWorld(t).as("alice").withOutbox(t, "one", "two")
+	self.run(t, nil, "--as", "alice")
+	if got := statLine(t, self.out(), "local", "notes"); got != "2" {
+		t.Fatalf("--as with your own name was not answered: local notes = %q\n%s", got, self.all())
+	}
+
+	for _, tc := range []struct {
+		name string
+		args []string
+		code string
+	}{
+		{"reading as somebody else", []string{"--as", "bob"}, hub.ErrGrantWiderThanHolder.Code},
+		{"and scoped to the real owner of the material", []string{"--as", "bob", "--scope", "person:alice"}, hub.ErrGrantWiderThanHolder.Code},
+	} {
+		w := newStatsWorld(t).as("alice").withOutbox(t, "one", "two")
+		w.run(t, nil, tc.args...)
+		if w.code != cli.ExitFailure {
+			t.Fatalf("%s: exit %d, want %d — refused when requested, not answered narrowly\n%s", tc.name, w.code, cli.ExitFailure, w.all())
+		}
+		if !strings.Contains(w.all(), tc.code) {
+			t.Fatalf("%s: want the code %q:\n%s", tc.name, tc.code, w.all())
+		}
+		if strings.Contains(w.out(), "notes: 2") {
+			t.Fatalf("%s: another person's material was counted and reported:\n%s", tc.name, w.out())
+		}
+		if strings.Contains(w.out(), "notes: 0") {
+			t.Fatalf("%s: a DETERMINED zero was printed about material that is there — the wrong-zero defect:\n%s", tc.name, w.out())
+		}
+		if strings.Contains(w.out(), "person:bob") {
+			t.Fatalf("%s: one person's drafts were attributed to another:\n%s", tc.name, w.out())
+		}
+	}
+
+	// --as with nobody signed in has no identity that could be allowed to.
+	nobody := newStatsWorld(t).withOutbox(t, "one")
+	nobody.run(t, nil, "--as", "bob")
+	if nobody.code != cli.ExitFailure || !strings.Contains(nobody.all(), hub.ErrNotSignedIn.Code) {
+		t.Fatalf("--as with no identity: exit %d, want %d with %q:\n%s", nobody.code, cli.ExitFailure, hub.ErrNotSignedIn.Code, nobody.all())
+	}
+}
+
+// TestStatsBothHalvesNameTheSameReader. One request has one requesting identity, and criterion 4's
+// "the number says who it belongs to" is weakened the moment the two halves disagree about who that
+// is.
+func TestStatsBothHalvesNameTheSameReader(t *testing.T) {
+	w := newStatsWorld(t).as("alice").withOutbox(t, "one")
+	w.run(t, nil)
+	local := statLine(t, w.out(), "local", "reader")
+	hubHalf := statLine(t, w.out(), "hub", "reader")
+	if local != hubHalf {
+		t.Fatalf("one request, two readers: local says %q and hub says %q\n%s", local, hubHalf, w.out())
+	}
+	if local != "alice" {
+		t.Fatalf("reader = %q, want alice", local)
+	}
+}

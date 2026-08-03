@@ -146,9 +146,35 @@ func runStats(env cli.Env) int {
 		return cli.ExitUsage
 	}
 
+	// --as IS REFUSED AT THE REQUEST, NOT NARROWED AT THE EDGE, AND IT IS REFUSED FOR BOTH HALVES.
+	//
+	// THE BUG THIS REPLACES IS WORTH KEEPING WRITTEN DOWN. The local half took --as as the identity
+	// with no check at all, so `--as bob` counted alice's drafts and labelled them
+	// `subjects: person:bob`, and `--as bob --scope person:alice` printed a DETERMINED `notes: 0`
+	// with `coverage: complete` about two drafts sitting right there. A determined statistic that
+	// is false is the exact artefact this Issue exists to prevent — an agent builds a plan on it —
+	// and it was worse than the leak it sat next to, because a wrong zero looks like an answer.
+	//
+	// The hub half refuses this in hub.StatisticsThrough. That refusal was unreachable here: with
+	// no hub configured, or an unreachable one, the local half had already answered. So the check
+	// belongs BEFORE either half is computed, where no configuration can route around it. PRD §4.5:
+	// nothing is implicitly wider than what was asked for, and a request that would read as
+	// somebody else is refused when it is made.
+	me := hub.PersonID(strings.TrimSpace(env.Getenv(statsEnvIdentity)))
 	identity := f.as
 	if identity == "" {
-		identity = hub.PersonID(strings.TrimSpace(env.Getenv(statsEnvIdentity)))
+		identity = me
+	}
+	if f.as != "" && f.as != me {
+		if me == "" {
+			fmt.Fprintf(env.Stderr, "omw stats: %v (code: %s)\n", hub.ErrNotSignedIn, hub.ErrNotSignedIn.Code)
+			fmt.Fprintf(env.Stderr, "  --as asks to read as %q, and there is no identity here that could be allowed to.\n", string(f.as))
+			return cli.ExitFailure
+		}
+		fmt.Fprintf(env.Stderr, "omw stats: %v (code: %s)\n", hub.ErrGrantWiderThanHolder, hub.ErrGrantWiderThanHolder.Code)
+		fmt.Fprintf(env.Stderr, "  you are %q and this asked to read as %q. Refused, not answered narrowly:\n", string(me), string(f.as))
+		fmt.Fprintf(env.Stderr, "  a count computed over somebody else's material is a determined number that is false.\n")
+		return cli.ExitFailure
 	}
 
 	report := hub.Report{
@@ -156,7 +182,10 @@ func runStats(env cli.Env) int {
 		Local: statsLocal(scope, identity, f.outbox),
 	}
 
-	hubHalf, refusal := statsHub(env, scope, f.as)
+	// ONE identity for both halves. They were given different values — `identity` locally and the
+	// raw `--as` for the hub — so one report could say `reader: alice` in one half and
+	// `reader: undetermined` in the other about the same request.
+	hubHalf, refusal := statsHub(env, scope, identity)
 	if refusal != nil {
 		// The scope was refused by the hub itself — an unknown person or group. THAT IS NOT AN
 		// UNDETERMINED STATISTIC, it is a refusal of the request, so it does not get a report body

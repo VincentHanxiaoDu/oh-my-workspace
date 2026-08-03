@@ -86,7 +86,7 @@ var (
 	// looked and there is nothing" — the same distinction ErrNoHubConfigured draws for the hub half
 	// — so it appears as the REASON on an undetermined statistic rather than as a count of 0. PRD
 	// §4.2: omw does not conjure a store, so the honest answer is that local material is unknown.
-	ErrNoLocalStore = &Error{Code: "no-local-store", Msg: "no local outbox on this machine, so local corpus statistics could not be computed"}
+	ErrNoLocalStore = &Error{Code: "no-local-store", Msg: "no local outbox here (a directory becomes one when it carries the .omw-outbox marker, which `omw note draft create` writes), so local corpus statistics could not be computed"}
 
 	// ErrDaemonLivenessUndetermined — whether the daemon is running could not be established, so
 	// nothing was established about the hub corpus either.
@@ -101,6 +101,28 @@ var (
 
 // statisticsErrors is this file's contribution to the pairwise-distinctness test.
 var statisticsErrors = []*Error{ErrNoLocalStore, ErrDaemonLivenessUndetermined}
+
+// notesByID resolves note ids to the notes themselves, for [SettleWith].
+//
+// It is a method on *Store defined in THIS file rather than in store.go, because it exists for one
+// caller and one reason: statistics must be able to ask [Corpus.inScope] about a note whose
+// READABILITY could not be determined, so that a narrowed scope does not report material sitting
+// outside it. It performs no visibility check and it is unexported — the corpus it feeds keeps
+// these notes out of the readable set exactly as before.
+func (s *Store) notesByID(ids []NoteID) []*Note {
+	if len(ids) == 0 {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]*Note, 0, len(ids))
+	for _, id := range ids {
+		if n := s.notes[id]; n != nil {
+			out = append(out, n)
+		}
+	}
+	return out
+}
 
 // Count is how much: either a determined number or an explicit undetermined.
 //
@@ -371,16 +393,44 @@ type Statistics struct {
 func (c Corpus) Statistics(s SearchScope) (Statistics, error) {
 	// Criterion 2: a scope the hub does not know is REFUSED, not widened to company and not
 	// narrowed to nothing. Same resolver search uses, so the two cannot drift apart.
+	// THE DOOR, AND IT IS SHUT BEFORE ANYTHING IS COUNTED.
+	//
+	// An unidentified requester is NOT a requester whose readability is undetermined; it is a
+	// request that names nobody, and those are different facts. Letting it through produced a real
+	// oracle: [CanRead] answers Undetermined for an empty reader, so every note in the store lands
+	// in c.undetermined, and a DETERMINED count of them is a determined count of the whole store —
+	// "a count of 40 where I can read 12 has told me 28 things exist that I'm not allowed to know
+	// exist", arriving through the undetermined-notes door. A count is not made safe by being a
+	// count rather than a list of ids: here the count IS the disclosure, because it tracks corpus
+	// size. So this is refused at the door rather than softened downstream.
+	if strings.TrimSpace(string(c.reader)) == "" {
+		return Statistics{}, Refusedf(ErrNotSignedIn,
+			"corpus statistics are computed over one identity's readable set, and this request names none")
+	}
 	if err := c.resolveScope(s); err != nil {
 		return Statistics{}, err
+	}
+
+	// The unevaluable notes, RESTRICTED TO THE SCOPE THAT WAS ASKED ABOUT.
+	//
+	// A store-wide figure at a narrowed scope tells the asker that material exists outside it, and
+	// criterion 5 says a scope they cannot see into must be indistinguishable from one that is
+	// genuinely empty. A note whose readability is unknown but whose scope membership is a
+	// determined NO cannot be in this scope however its readability falls, so it is not counted
+	// here. Anything else — in scope, or unplaceable — is.
+	unevaluable := 0
+	for _, n := range c.unevaluableNotes() {
+		if c.inScope(n, s) != tri.No {
+			unevaluable++
+		}
 	}
 
 	st := Statistics{
 		Scope:             s,
 		Reader:            c.reader,
-		UndeterminedNotes: DeterminedCount(len(c.undetermined)),
+		UndeterminedNotes: DeterminedCount(unevaluable),
 	}
-	unknownReadability := len(c.undetermined) > 0
+	unknownReadability := unevaluable > 0
 
 	var (
 		inScope     []*Note
@@ -438,6 +488,25 @@ func (c Corpus) Statistics(s SearchScope) (Statistics, error) {
 		st.Coverage = tri.Undetermined
 	}
 	return st, nil
+}
+
+// unevaluableNotes are the notes whose readability could not be determined, as notes.
+//
+// If the pointer list and the id list ever disagree in length — a corpus built by some future path
+// that fills one and not the other — this refuses to under-report: it is better to count a note
+// that turned out to be elsewhere than to tell somebody a scope is clean when nothing established
+// that. It returns nil only when there is genuinely nothing to count.
+func (c Corpus) unevaluableNotes() []*Note {
+	if len(c.undeterminedNotes) == len(c.undetermined) {
+		return c.undeterminedNotes
+	}
+	out := make([]*Note, 0, len(c.undetermined))
+	out = append(out, c.undeterminedNotes...)
+	for len(out) < len(c.undetermined) {
+		// A note we cannot even look at is one we cannot place, so it counts everywhere.
+		out = append(out, &Note{})
+	}
+	return out
 }
 
 // couldBeNewer reports whether a note we could not place in scope might be more recent than the
@@ -527,6 +596,15 @@ func StatisticsThrough(s *Store, g Grant, reader PersonID, scope SearchScope) (S
 	}
 	if reader == "" {
 		reader = g.Holder
+	}
+	// REFUSED BEFORE SETTLING. Grant is a plain struct with exported fields, so a holder left at
+	// its zero value is exactly the "field somebody forgot to fill" case — and with both the reader
+	// and the holder empty the identity check below is vacuously satisfied. This is the outer of
+	// two layers; [Corpus.Statistics] shuts the same door again for any caller that settles a
+	// corpus without going through a grant at all.
+	if strings.TrimSpace(string(reader)) == "" {
+		return Statistics{}, Refusedf(ErrNotSignedIn,
+			"corpus statistics are computed over one identity's readable set, and this grant names none")
 	}
 	if reader != g.Holder {
 		return Statistics{}, Refusedf(ErrGrantWiderThanHolder,

@@ -3,6 +3,7 @@ package hub
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -212,6 +213,13 @@ func TestNoneAndUndeterminedNeverPrintTheSame(t *testing.T) {
 		{"subjects token", DeterminedSubjects(nil, nil).Token(), UndeterminedSubjects(ErrHubUnreachable).Token()},
 	}
 	for _, p := range pairs {
+		if strings.Contains(p.zeroish, UndeterminedToken) {
+			// STRICTER THAN INEQUALITY, and deliberately so: a mutation that renders the determined
+			// nothing as the bare undetermined token still differs from the undetermined rendering,
+			// because that one carries a trailing reason. Inequality alone would let it past the
+			// test named for the property.
+			t.Fatalf("%s: the determined nothing renders as %q, which carries the undetermined marker", p.what, p.zeroish)
+		}
 		if p.zeroish == p.undetermined {
 			t.Fatalf("%s: a determined nothing and an undetermined statistic rendered identically as %q", p.what, p.zeroish)
 		}
@@ -631,5 +639,141 @@ func TestStatisticsErrorsAreDistinguishable(t *testing.T) {
 		if e.Code == "" || e.Msg == "" {
 			t.Fatalf("an error is missing a code or a message: %#v", e)
 		}
+	}
+}
+
+// --- the empty-identity door -----------------------------------------------------------------------
+
+// TestAnUnidentifiedRequesterIsRefusedBeforeAnythingIsCounted closes an oracle that a count, rather
+// than a list of ids, was wrongly assumed to be safe from.
+//
+// [CanRead] answers Undetermined for an empty reader — correctly: nobody has been named, so nothing
+// about readability has been established. The consequence is that Settle puts EVERY note in the
+// store into c.undetermined, and a determined count of those is a determined count of the whole
+// store. The reader learns how much exists without being anybody, which is criterion 4 and 5 word
+// for word: "a count of 40 where I can read 12 has told me 28 things exist that I'm not allowed to
+// know exist".
+//
+// THE SIZE CONTROL IS THE TEST. "An identity-less caller is refused" passes against a build that
+// hands everybody a determined zero, and against a broken fixture. What must hold is that a 5-note
+// store and a 2-note store are INDISTINGUISHABLE to a caller who names nobody.
+func TestAnUnidentifiedRequesterIsRefusedBeforeAnythingIsCounted(t *testing.T) {
+	build := func(t *testing.T, n int) *statsWorld {
+		t.Helper()
+		w := newStatsWorld(t)
+		w.record.AddPerson("ada")
+		w.record.DefineGroup("platform", "ada")
+		for i := 0; i < n; i++ {
+			switch i % 4 {
+			case 0:
+				w.publish(t, "ada", fmt.Sprintf("note%d", i), CompanyWide())
+			case 1:
+				w.publish(t, "ada", fmt.Sprintf("note%d", i), SelfOnly())
+			case 2:
+				w.publish(t, "ada", fmt.Sprintf("note%d", i), mustGroup("platform"))
+			default:
+				w.publish(t, "ada", fmt.Sprintf("note%d", i), mustPeople("ada"))
+			}
+		}
+		return w
+	}
+	big, small := build(t, 5), build(t, 2)
+	if big.store.Count() != 5 || small.store.Count() != 2 {
+		t.Fatalf("fixture: stores hold %d and %d notes, want 5 and 2", big.store.Count(), small.store.Count())
+	}
+
+	describe := func(t *testing.T, w *statsWorld) string {
+		t.Helper()
+		st, err := Settle(w.store, "").Statistics(CompanyScope())
+		if err == nil {
+			t.Fatalf("an identity-less request was ANSWERED: undetermined notes = %s, notes = %s — over a store of %d",
+				st.UndeterminedNotes.Render(), st.Notes.Render(), w.store.Count())
+		}
+		if Code(err) != ErrNotSignedIn.Code {
+			t.Fatalf("refused with code %q, want %q", Code(err), ErrNotSignedIn.Code)
+		}
+		return err.Error() + "|" + Report{Scope: CompanyScope(), Hub: st}.Render()
+	}
+	if a, b := describe(t, big), describe(t, small); a != b {
+		t.Fatalf("a 5-note store and a 2-note store are distinguishable to a caller who names nobody:\n%s\nvs\n%s", a, b)
+	}
+}
+
+// TestAGrantThatNamesNobodyIsRefused is the same door, one layer out. Grant is a plain struct with
+// exported fields, so a holder left at its zero value reaches StatisticsThrough — and the
+// reader-versus-holder check is vacuously satisfied when both are empty.
+func TestAGrantThatNamesNobodyIsRefused(t *testing.T) {
+	w := newStatsWorld(t)
+	w.record.AddPerson("ada")
+	for i := 0; i < 3; i++ {
+		w.publish(t, "ada", fmt.Sprintf("note%d", i), CompanyWide())
+	}
+	st, err := StatisticsThrough(w.store, Grant{Scopes: []Scope{ScopeRead}}, "", CompanyScope())
+	if err == nil {
+		t.Fatalf("an empty-holder grant was answered: undetermined notes = %s over a %d-note store",
+			st.UndeterminedNotes.Render(), w.store.Count())
+	}
+	if Code(err) != ErrNotSignedIn.Code {
+		t.Fatalf("refused with code %q, want %q", Code(err), ErrNotSignedIn.Code)
+	}
+}
+
+// --- the unevaluable notes belong to the scope that was asked about ----------------------------------
+
+// TestUndeterminedNotesAreScopedToTheRequest is criterion 5's closing sentence: a scope the
+// requester has no visibility into must be indistinguishable from one that is genuinely empty of
+// readable material.
+//
+// A store-wide count of unevaluable notes breaks that on its own. Asked about bob's scope, over a
+// corpus whose only unevaluable notes are alice's, the honest answer is that bob's scope holds
+// none — however those notes' readability falls, they are not bob's.
+func TestUndeterminedNotesAreScopedToTheRequest(t *testing.T) {
+	w := newStatsWorld(t)
+	w.record.AddPerson("bob")
+	w.record.AddPerson("alice")
+	w.record.DefineGroup("platform", "alice")
+	w.publish(t, "alice", "unresolvable one", mustGroup("platform"))
+	w.publish(t, "alice", "unresolvable two", mustGroup("platform"))
+	w.record.Dissolve("platform")
+
+	c := Settle(w.store, "bob")
+	if len(c.UndeterminedIDs()) != 2 {
+		t.Fatalf("fixture: %d unevaluable notes, want 2", len(c.UndeterminedIDs()))
+	}
+
+	company, err := c.Statistics(CompanyScope())
+	if err != nil {
+		t.Fatalf("company statistics: %v", err)
+	}
+	if n, ok := company.UndeterminedNotes.Value(); !ok || n != 2 {
+		t.Fatalf("at company scope undetermined notes = %s, want 2 — they ARE in this scope and must not be dropped",
+			company.UndeterminedNotes.Render())
+	}
+
+	bobScope, err := PersonScope("bob")
+	if err != nil {
+		t.Fatalf("scope: %v", err)
+	}
+	mine, err := c.Statistics(bobScope)
+	if err != nil {
+		t.Fatalf("person statistics: %v", err)
+	}
+	if n, ok := mine.UndeterminedNotes.Value(); !ok || n != 0 {
+		t.Fatalf("at person:bob undetermined notes = %s, want a determined 0 — those notes are alice's and cannot be in bob's scope however their readability falls",
+			mine.UndeterminedNotes.Render())
+	}
+
+	// The whole point: indistinguishable from a scope that is genuinely empty.
+	empty := newStatsWorld(t)
+	empty.record.AddPerson("bob")
+	empty.record.AddPerson("alice")
+	bare, err := Settle(empty.store, "bob").Statistics(bobScope)
+	if err != nil {
+		t.Fatalf("statistics over the empty corpus: %v", err)
+	}
+	got := Report{Scope: bobScope, Hub: mine}.Render()
+	want := Report{Scope: bobScope, Hub: bare}.Render()
+	if got != want {
+		t.Fatalf("a scope holding nothing of the requester's, next to material they cannot evaluate, is distinguishable from a genuinely empty one:\n%s\nvs\n%s", got, want)
 	}
 }
