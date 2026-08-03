@@ -246,6 +246,9 @@ func (d *Daemon) Report() Report {
 		ControlSocket: d.control.Path(),
 		Model:         modelViewFor(d.opts.StorePath),
 	}
+	// The SAME function the CLI calls (criterion 23). Not a cached field: a cached one is a second
+	// answer, and a second answer goes stale.
+	rep.Auth, rep.AuthDetail, rep.AuthCode = authStateFor(d.opts.StorePath)
 	switch ph {
 	case phaseHealthy:
 		rep.Healthy = tri.Yes
@@ -310,6 +313,11 @@ func (d *Daemon) storeWrite() error {
 func (d *Daemon) Serve() error {
 	d.serving.Store(true)
 	defer close(d.doneCh)
+	// THE CAPABILITIES THAT ARE A PROPERTY OF THIS RUNNING (Issue #6). Registered background work
+	// starts here and is stopped and waited for before Serve returns, so "the daemon is stopped"
+	// and "ingestion is not happening" are the same instant rather than two nearby ones.
+	stopBackground := d.startBackground()
+	defer stopBackground()
 	interval := d.opts.Interval
 	if interval <= 0 {
 		interval = DefaultInterval

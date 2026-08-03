@@ -14,6 +14,45 @@ make ci          # build, vet, test — the gate runs this
 go test ./...
 ```
 
+## Which paths cannot hold your fix
+
+**Read this before you build a machinery Issue.** These paths are installed by agent-dev-flow and
+are **replaced wholesale by the next `install.sh` run**. A fix committed here is undone silently, as
+a normal part of refreshing the framework — not by a bug, but by the installer doing what it
+documents:
+
+| Path | Owner |
+| --- | --- |
+| `.workflow/bin/` | framework — replaced |
+| `.github/` | framework — replaced |
+| `.claude/commands/` | framework — replaced (and gitignored here) |
+| `.workflow/<role>/AGENT.md` | **yours** — created once, never overwritten |
+| `internal/`, `openspec/`, `Makefile`, `PRD.md` | **yours** |
+
+This is not hypothetical: #52 was found here, fixed here, reviewed here and merged here as #54, and
+the next install deleted it — 2 insertions, 24 deletions, no warning (#58).
+
+**So a fix that must survive an upgrade goes in a project-owned file.** In practice:
+
+- **An assertion about the machinery** goes in `internal/machinery/` as a Go test. It runs under
+  `make ci`, which the `Build and tests` gate invokes, so a refresh that reintroduces the defect
+  turns this repository's suite red instead of quietly restoring it. Execute the installed script —
+  do not reimplement it, or the test goes green while the real gate is broken.
+- **An instruction to a role** goes in that role's `.workflow/<role>/AGENT.md`.
+- **A change to the machinery itself** belongs upstream in agent-dev-flow. Send it there, reinstall,
+  and then declare the local commit in `internal/machinery/framework-local-commits.txt` with the
+  reason it is reconciled.
+
+`TestNoUndeclaredLocalCommitsOnFrameworkOwnedPaths` enforces this: it names any framework-owned file
+whose most recent commit is one of ours rather than a refresh. It fails on a name, not a count, so
+you can act on it.
+
+**It cannot answer on CI, and it says so rather than passing.** The job that runs `make ci` checks
+out at depth 1, so the history it needs is not there and it *skips with a reason*. **Run `make ci`
+locally in a full clone** — a green CI is not evidence this check looked. Anything else you add here
+that walks `git log` has the same problem; probe `git rev-parse --is-shallow-repository` and skip,
+do not assume.
+
 ## Conventions a newcomer gets wrong here
 
 - **`could not determine` and `determined to be nothing` are different values** — a product rule,
