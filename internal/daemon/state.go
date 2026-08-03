@@ -367,6 +367,17 @@ type Report struct {
 	ControlDetail string `json:"control_detail,omitempty"`
 	// ControlSocket is the path the control API listens on when it is open.
 	ControlSocket string `json:"control_socket,omitempty"`
+	// Auth is this machine's sign-in state, as one line (Issue #19 criterion 23, PRD §4.3).
+	//
+	// IT IS A STRING RATHER THAN A tri BECAUSE IT IS FOUR FACTS, NOT THREE: signed in, not signed
+	// in, no hub configured, and could not be determined. `internal/auth` owns the wording and both
+	// this report and the CLI take it from the same function — see authstate.go.
+	Auth string `json:"auth"`
+	// AuthCode is the stable machine-readable code behind Auth, so a script reading the control
+	// API tells "no hub configured" from "not signed in" without matching prose.
+	AuthCode string `json:"auth_code,omitempty"`
+	// AuthDetail says more. May be empty.
+	AuthDetail string `json:"auth_detail,omitempty"`
 }
 
 // wire fills the text fields from the tri values. Called on every path that produces a Report, so
@@ -538,6 +549,7 @@ func Inspect(storeRoot string) Report {
 
 	rep.Healthy, rep.HealthDetail = healthFromDisk(running, rep.HealthDetail)
 	rep.Control, rep.ControlDetail = controlFromDisk(p, running, rec, err)
+	rep.Auth, rep.AuthDetail, rep.AuthCode = authStateFor(storeRoot)
 	rep.wire()
 	return rep
 }
