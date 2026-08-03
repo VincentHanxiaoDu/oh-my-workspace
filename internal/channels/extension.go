@@ -141,8 +141,12 @@ func ExtensionFactory(s *store.Store, r *extension.Registry) Factory {
 		r = extension.Default
 	}
 	return func(c Connection) (Adapter, error) {
-		entries, _ := extension.Inventory(s, r)
-		e := extension.Find(entries, string(c.Kind))
+		// FindAs, NOT Find. A model provider registered under a channel kind's name must not be
+		// mistaken for that channel's adapter. The type assertion below would catch it, but only
+		// after this had already resolved it to Loaded — and it would then report "is registered as
+		// a channel adapter and does not implement one", which is not what happened. Asking for the
+		// interface up front makes the state and the sentence both right. See extension.FindAs.
+		e := extension.FindAs(extension.Read(s, r).Entries, string(c.Kind), extension.Channel)
 		switch e.Resolved() {
 		case extension.Loaded:
 			ext, ok := r.Find(e.Name)

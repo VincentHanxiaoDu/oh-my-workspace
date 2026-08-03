@@ -255,3 +255,81 @@ func mustReg(t *testing.T, s *store.Store, r *extension.Registry, name string) {
 		t.Fatalf("registering %s: %v", name, err)
 	}
 }
+
+// A CHANNEL ADAPTER NEVER SATISFIES THE MODEL-PROVIDER CHECK.
+//
+// # QA'S EXACT REPRODUCTION, TWO DOCUMENTED COMMANDS, NO FILE EDITING
+//
+//	omw ext register slack     # 0 — registered: slack (channel-adapter), registered and it loaded
+//	omw model use slack        # 0 — recorded; model.Use accepts any name, by Issue #18's design
+//
+// `Readiness` then said "the model provider slack is chosen and its extension loaded" — a confident
+// claim that a MODEL extension loaded, when what loaded is a channel adapter.
+//
+// # WHY THIS ISSUE IN PARTICULAR PRODUCED IT
+//
+// The two interfaces render identically on purpose (§2.5, criterion 3), so the INTERFACE is the only
+// thing left distinguishing them — and `Readiness` looked the provider up by name alone. Both arms
+// are driven here: the wrong interface must not report loaded, AND a real provider must still
+// report loaded, so this pins the distinction rather than merely breaking the lookup.
+func TestAChannelAdapterIsNotAModelProvider(t *testing.T) {
+	const name = "slack"
+
+	// ARM ONE: a channel adapter, registered and loading perfectly well, chosen as a model.
+	s := extStore(t)
+	r := extension.NewRegistry()
+	r.Offer(channelShaped{name: name})
+	mustReg(t, s, r, name)
+	if err := Use(s, name); err != nil {
+		t.Fatalf("choosing %s: %v — qa's reproduction relies on model.Use accepting any name", name, err)
+	}
+
+	// The fixture is checked: the channel adapter really is registered and really does load, so a
+	// pass below is the lookup being right rather than the extension being broken.
+	if got := extension.Find(extension.Read(s, r).Entries, name); got.Resolved() != extension.Loaded {
+		t.Fatalf("the channel adapter is %v, not Loaded — this test is not reproducing the "+
+			"situation it is about", got.StateText)
+	}
+
+	answer := Readiness(s, r, Read(withKey, s).View())
+	if answer.Situation == SituationReady {
+		t.Fatalf("a CHANNEL ADAPTER satisfied the model-provider check:\n%s\n"+
+			"That is a confident claim that a model extension loaded, when what loaded is a "+
+			"channel adapter.", answer.Reason)
+	}
+	if strings.Contains(answer.Reason, "its extension loaded") {
+		t.Errorf("the answer claims the provider's extension loaded:\n%s", answer.Reason)
+	}
+	// It is SAID, not silently reported as absence: a person who typed `omw model use slack` needs
+	// to know slack exists and is the wrong kind of thing, or they will hunt for a typo.
+	if !strings.Contains(answer.Reason, name) {
+		t.Errorf("the answer does not name what the person typed:\n%s", answer.Reason)
+	}
+	if !strings.Contains(answer.Reason, string(extension.Channel)) {
+		t.Errorf("the answer does not say that what IS registered under that name is a %s, so a "+
+			"person cannot tell this from a typo:\n%s", extension.Channel, answer.Reason)
+	}
+
+	// ARM TWO, THE CONTROL: a real model provider under the same name still reports ready. Without
+	// this, returning not-registered unconditionally would pass arm one.
+	s2 := extStore(t)
+	r2 := extension.NewRegistry()
+	r2.Offer(brokenProvider{name: name})
+	mustReg(t, s2, r2, name)
+	if err := Use(s2, name); err != nil {
+		t.Fatalf("choosing %s: %v", name, err)
+	}
+	ok := Readiness(s2, r2, Read(withKey, s2).View())
+	if ok.Situation != SituationReady {
+		t.Fatalf("a genuine model provider of the same name is %v, want SituationReady:\n%s\n"+
+			"The interface check has broken the case it was supposed to protect.", ok.Situation, ok.Reason)
+	}
+}
+
+// channelShaped is a CHANNEL-interface extension that loads cleanly — the thing that must not
+// satisfy a model-provider lookup.
+type channelShaped struct{ name string }
+
+func (c channelShaped) Name() string                   { return c.name }
+func (c channelShaped) Interface() extension.Interface { return extension.Channel }
+func (c channelShaped) Load() error                    { return nil }

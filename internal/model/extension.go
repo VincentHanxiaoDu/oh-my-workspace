@@ -147,8 +147,12 @@ func Readiness(s *store.Store, r *extension.Registry, v View) Answer {
 		}
 	}
 
-	entries, _ := extension.Inventory(s, r)
-	e := extension.Find(entries, v.Provider)
+	// FindAs, NOT Find. By name alone, a CHANNEL ADAPTER registered under the provider's name came
+	// back Loaded and this function said "the model provider is chosen and its extension loaded" —
+	// a confident claim about a model extension when what loaded was a channel adapter. Reachable
+	// with `omw ext register slack` followed by `omw model use slack`, both documented, both exit 0.
+	// See extension.FindAs.
+	e := extension.FindAs(extension.Read(s, r).Entries, v.Provider, extension.Model)
 	switch e.Resolved() {
 	case extension.FailedToLoad:
 		return Answer{
@@ -159,13 +163,22 @@ func Readiness(s *store.Store, r *extension.Registry, v View) Answer {
 				"extension behind it is broken: %s", v.Provider, e.Detail),
 		}
 	case extension.NotRegistered:
+		// THE ENTRY'S OWN DETAIL IS CARRIED, NOT REPLACED. `FindAs` distinguishes "nothing of that
+		// name is here" from "something of that name is here and it implements the OTHER
+		// interface", and the advice differs completely: the first person runs `omw ext register`,
+		// the second has already done that and needs to know they registered a channel adapter.
+		// Telling the second to register what they have registered sends them round a loop.
+		advice := fmt.Sprintf("'omw ext register %s' registers it", v.Provider)
+		if e.Detail != "" {
+			advice = e.Detail
+		}
 		return Answer{
 			Situation: SituationExtensionFailedToLoad,
 			Code:      ErrProviderFailedToLoad.Code,
-			Reason: fmt.Sprintf("the model provider %s IS chosen and no extension for it is "+
-				"registered on this machine. This is not 'no model configured' — your "+
-				"configuration is intact and the code to talk to it is not registered; "+
-				"'omw ext register %s' registers it.", v.Provider, v.Provider),
+			Reason: fmt.Sprintf("the model provider %s IS chosen and no model-provider extension "+
+				"for it is registered on this machine. This is not 'no model configured' — your "+
+				"configuration is intact and the code to talk to it is not registered: %s",
+				v.Provider, advice),
 		}
 	case extension.Undetermined:
 		return Answer{

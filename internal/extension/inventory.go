@@ -1,6 +1,7 @@
 package extension
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 
@@ -239,7 +240,16 @@ func Render(entries []Entry) string {
 	return b.String()
 }
 
-// Find returns the entry for one name out of an inventory.
+// Find returns the entry for one name out of an inventory, WHATEVER INTERFACE IT IMPLEMENTS.
+//
+// # USE [FindAs] IF YOU CARE WHICH INTERFACE IT IS, AND YOU ALMOST ALWAYS DO
+//
+// This is the right function for a surface that is showing a person whatever is registered under a
+// name they typed — `omw ext show slack` should describe slack, not tell them slack does not exist
+// because they guessed the wrong interface.
+//
+// It is the WRONG function for a caller asking "is my model provider loaded", and that mistake got
+// this branch refused. See [FindAs].
 //
 // AN ABSENT NAME COMES BACK AS A [NotRegistered] ENTRY, not as a false and not as a zero Entry.
 // Criterion 21: no extension state is ever rendered as an empty string or an absent line, and the
@@ -253,4 +263,61 @@ func Find(entries []Entry, name string) Entry {
 	}
 	return newEntry(name, "", NotRegistered,
 		"nothing on this machine offers it and no deliberate act has registered it")
+}
+
+// FindAs returns the entry for one name AS A GIVEN INTERFACE, and reports an extension of that name
+// implementing the OTHER interface as not registered — because, as the thing that was asked for, it
+// is not.
+//
+// # THE DEFECT THIS EXISTS FOR, AND WHY THIS ISSUE PRODUCED IT
+//
+// `model.Readiness` looked the chosen provider up with [Find], by name alone. Two documented
+// commands, no file editing:
+//
+//	omw ext register slack     # registered: slack (channel-adapter), registered and it loaded
+//	omw model use slack        # recorded — model.Use accepts any name, by Issue #18's design
+//
+// and the product then said "the model provider slack is chosen and its extension loaded". A
+// confident claim that a MODEL extension loaded, when what loaded is a channel adapter. §4.3 from
+// the direction that is easier to miss: not a determined thing rendered as undetermined, but an
+// undetermined thing rendered as a confident yes.
+//
+// [Registry.load] does check the interface, and correctly — but only against the interface the
+// record was registered UNDER, and a channel adapter registered as a channel adapter is legitimately
+// [Loaded]. Nothing was wrong with that check; the caller had simply stopped asking the question.
+//
+// # THIS IS THE COST OF CRITERION 3, AND IT IS WORTH PAYING
+//
+// The two interfaces share a state vocabulary and render identically ON PURPOSE (§2.5, criterion 3).
+// That is the whole point of this Issue — and it means the INTERFACE is the only thing left
+// distinguishing them, so a lookup that drops it has nothing left to be right about. The sameness
+// is correct; this is the one place the distinction still has to survive it, and it survives by
+// being a parameter a caller cannot forget rather than a check a caller must remember.
+//
+// The mismatch is SAID rather than silently reported as absence, because a person who typed
+// `omw model use slack` needs to know slack exists and is the wrong kind of thing — "no such
+// provider" would send them looking for a typo.
+func FindAs(entries []Entry, name string, iface Interface) Entry {
+	name = strings.TrimSpace(name)
+	var wrongInterface *Entry
+	for i, e := range entries {
+		if e.Name != name {
+			continue
+		}
+		if e.Interface == iface {
+			return e
+		}
+		wrongInterface = &entries[i]
+	}
+	if wrongInterface != nil {
+		// SAID, AND ACTIONABLE FOR THE SITUATION THE PERSON IS ACTUALLY IN. "Not registered" alone
+		// would send somebody who HAS registered it round a loop looking for a typo.
+		return newEntry(name, iface, NotRegistered, fmt.Sprintf(
+			"an extension called %s IS registered on this machine and it implements %s, not %s — "+
+				"so as a %s it is not registered, and registering it again will not help",
+			name, wrongInterface.Interface, iface, iface))
+	}
+	return newEntry(name, iface, NotRegistered, fmt.Sprintf(
+		"nothing on this machine offers a %s called %s, and no deliberate act has registered one; "+
+			"'omw ext register %s' registers it once it is present", iface, name, name))
 }

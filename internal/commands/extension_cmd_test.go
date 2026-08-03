@@ -1015,3 +1015,94 @@ func TestNoGeneratedDiagnosticsBundleContainsAnExtensionCredential(t *testing.T)
 			"product leaks it elsewhere:\n%s", out)
 	}
 }
+
+// QA'S REPRODUCTION AT THE COMMAND LINE: register a channel adapter, choose it as a model.
+//
+//	omw ext register slack
+//	omw model use slack
+//
+// Both documented, both exit 0, and `omw model show` then said the provider's extension had loaded.
+// Driven here through the real command path, because the defect is reachable by a person typing two
+// supported commands and no test-only seam should stand between this assertion and that.
+//
+// Both arms, so the interface check is pinned rather than the lookup merely broken.
+func TestChoosingAChannelAdapterAsAModelIsNotReportedAsLoaded(t *testing.T) {
+	const name = "slackish"
+
+	t.Run("a channel adapter chosen as a model", func(t *testing.T) {
+		xtRegistry(t, xtFake{name: name, iface: extension.Channel})
+		env := xtWorld(t)
+		mustExt(t, env, "register", name)
+
+		// The fixture: it really is registered and really does load.
+		if shown := mustExt(t, env, "show", name); !strings.Contains(shown.stdout, "registered, and it loaded") {
+			t.Fatalf("the channel adapter did not load, so this test is not reproducing the "+
+				"situation it is about:\n%s", shown.stdout)
+		}
+
+		var out, errb bytes.Buffer
+		if code := cli.Run([]string{"model", "use", name}, &out, &errb,
+			func(k string) string { return env[k] }); code != cli.Success {
+			t.Fatalf("`omw model use %s` exited %d; qa's reproduction relies on it being accepted\n%s%s",
+				name, code, out.String(), errb.String())
+		}
+
+		var sout, serr bytes.Buffer
+		cli.Run([]string{"model", "show"}, &sout, &serr, func(k string) string { return env[k] })
+		all := sout.String() + serr.String()
+		if strings.Contains(all, "is configured, with a credential") {
+			t.Errorf("`omw model show` reports a working model configuration when what is "+
+				"registered under that name is a CHANNEL ADAPTER:\n%s", all)
+		}
+	})
+
+	t.Run("a real model provider chosen as a model", func(t *testing.T) {
+		// THE CONTROL. Returning "not registered" for everything would pass the arm above.
+		//
+		// IT USES A GENUINELY REGISTERED PROVIDER — `model.Register`, the real door, which offers
+		// into the one extension registry as well. An `xtFake` with interface Model is not enough
+		// and an earlier version of this test used one: it never entered `model`'s own registry, so
+		// Issue #18's `View.Adapter` correctly reported "this build has no adapter", and the
+		// control failed for a reason that had nothing to do with the interface check. The fixture
+		// has to be a real provider because the thing being controlled for is the real path.
+		provider := xtStubProvider{name: name}
+		model.Register(provider)
+		t.Cleanup(func() { extension.Default.Withdraw(name) })
+		prev := extensionRegistry
+		extensionRegistry = extension.Default
+		t.Cleanup(func() { extensionRegistry = prev })
+
+		env := xtWorld(t)
+		mustExt(t, env, "register", name)
+
+		var out, errb bytes.Buffer
+		if code := cli.Run([]string{"model", "use", name}, &out, &errb,
+			func(k string) string { return env[k] }); code != cli.Success {
+			t.Fatalf("`omw model use %s` exited %d\n%s%s", name, code, out.String(), errb.String())
+		}
+		// Asserted through the command, against the store this invocation actually uses. An
+		// earlier version of this passed a nil store to extension.Read and failed because the
+		// registration was invisible — a test bug that looked exactly like the product bug it was
+		// meant to rule out.
+		var sout, serr bytes.Buffer
+		cli.Run([]string{"model", "show"}, &sout, &serr, func(k string) string { return env[k] })
+		all := sout.String() + serr.String()
+		if strings.Contains(all, "no extension for it is registered") ||
+			strings.Contains(all, "no model-provider extension for it is registered") {
+			t.Fatalf("a genuine model provider is reported as having no registered extension; the "+
+				"interface check has broken the case it was supposed to protect:\n%s", all)
+		}
+		if strings.Contains(all, "has no adapter for") {
+			t.Fatalf("a registered model provider is reported as having no adapter:\n%s", all)
+		}
+	})
+}
+
+// xtStubProvider is a real `model.Provider`, registered through the real door, for the control arm
+// above. It opens nothing — the control is about the interface check, not about talking to a model.
+type xtStubProvider struct{ name string }
+
+func (p xtStubProvider) Name() string { return p.name }
+func (p xtStubProvider) Open(string) (model.Session, error) {
+	return nil, errors.New("this provider is not opened in tests")
+}
