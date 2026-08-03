@@ -162,16 +162,22 @@ run_gate() {
   # This is `could not determine` rendered as `nothing to see`, which is the one thing this project
   # says a check must never do.
   local unplaceable="" other_shas
+  # THE POSTER IS CARRIED ALONGSIDE THE SHA, because the notice below has to say WHOSE verdict went
+  # stale. A reviewer told only that "a verdict" was invalidated cannot tell whether it was theirs.
   other_shas=$(jq -r --arg h "$head" "$JQ_STRIP_FENCES"'
     [ .[]
       | ((.body // "") | gsub("\r"; "")) as $raw
       | ($raw | strip_fences | split("\n")) as $lines
       | select($lines | any(test("^Reviewed-by:")))
       | select($lines | any(test("^Verdict:")))
+      | (($raw | split("\n")[0]
+                | capture("^\\[(?<r>[A-Za-z][A-Za-z0-9_-]*)\\][[:space:]]*$") | .r) // "") as $role
       | $lines[]
       | select(test("^Reviewed-sha:"))
-      | sub("^Reviewed-sha:[[:space:]]*"; "") | sub("[[:space:]]+$"; "")
-    ] | map(select(. != $h and . != "")) | unique | .[]' "$comments")
+      | sub("^Reviewed-sha:[[:space:]]*"; "") | sub("[[:space:]]+$"; "") as $sha
+      | select($sha != $h and $sha != "")
+      | [$role, $sha]
+    ] | unique | .[] | join("\u001f")' "$comments")
 
   if [ -n "$other_shas" ]; then
     # PROBE THE CHECKOUT, NEVER ASSUME IT. In a shallow clone an object can be absent because it
@@ -182,10 +188,34 @@ run_gate() {
     if [ "$(git rev-parse --is-shallow-repository 2>/dev/null || echo unknown)" != false ]; then
       echo "::notice::this clone is shallow or its depth could not be read, so whether any verdict names an unknown commit COULD NOT BE DETERMINED. That is not a finding that they are all fine (#84)." >&2
     else
-      local s
-      while IFS= read -r s; do
-        [ -n "$s" ] || continue
-        git cat-file -e "${s}^{commit}" 2>/dev/null || unplaceable="${unplaceable}${s} "
+      local orole osha
+      while IFS=$'\037' read -r orole osha; do
+        [ -n "$osha" ] || continue
+        if git cat-file -e "${osha}^{commit}" 2>/dev/null; then
+          # CASE 1: A STALE VERDICT, AND IT IS SAID OUT LOUD RATHER THAN LEFT AS AN ABSENCE.
+          #
+          # This exits nothing and changes no merge-eligibility. It exists because a stale verdict
+          # and an absent one were byte-identical — both `no review found for head <X>`, both exit 1
+          # — and they are opposite instructions: one is addressed to a reviewer who has already
+          # looked and whose verdict raced a push, the other is addressed to a board where nobody
+          # has looked. Rendering the first as the second is a determined-but-other state reported
+          # as an absence, inside the machinery that exists to enforce that they are different.
+          #
+          # A NOTICE AND NOT AN ERROR, DELIBERATELY. Case 2 — a sha naming no object — is the loud
+          # one, because it means somebody's verdict is not in force and never was. Announcing every
+          # ordinary post-push staleness at the same volume would bury it, and a stale verdict is a
+          # normal, expected consequence of pushing.
+          if [ -n "$orole" ]; then
+            echo "::notice::a verdict by '$orole' names $osha, which this repository knows but is not the head $head — it was invalidated by a push and needs re-posting against the current head." >&2
+          else
+            echo "::notice::a verdict names $osha, which this repository knows but is not the head $head — it was invalidated by a push and needs re-posting against the current head." >&2
+          fi
+        else
+          case " $unplaceable " in
+            *" $osha "*) : ;;
+            *) unplaceable="${unplaceable}${osha} " ;;
+          esac
+        fi
       done <<UNPLACEABLE_SCAN
 $other_shas
 UNPLACEABLE_SCAN
@@ -606,6 +636,43 @@ Agent: product"
     *) echo "SELF-TEST FAIL: the unplaceable verdict went unmentioned because a refusal outranked it" >&2; rc=1 ;;
   esac
 
+  #     (f) A STALE VERDICT AND AN ABSENT ONE MUST NOT RENDER THE SAME SENTENCE. Both exit 1 —
+  #         neither certifies this head — so the distinction lives entirely in what is said. They
+  #         were byte-identical: `no review found for head <X>` for both. One means "your verdict
+  #         raced a push, re-post it" and is addressed to a reviewer who has already looked; the
+  #         other means "nobody has looked". Opposite instructions from one sentence.
+  printf '[{"body":"[reviewer-a]\\nReviewed-by: reviewer-a\\nReviewed-sha: %s\\nVerdict: changes-requested"}]' "$base" > "$tmp/c.json"
+  local stale_out; urc=0
+  stale_out=$(_run) || urc=$?
+  [ "$urc" -eq 1 ] || { echo "SELF-TEST FAIL: a stale verdict exited $urc, not 1 — this must not move any exit code" >&2; rc=1; }
+  printf '[]' > "$tmp/c.json"
+  local absent_out; urc=0
+  absent_out=$(_run) || urc=$?
+  [ "$urc" -eq 1 ] || { echo "SELF-TEST FAIL: an absent review exited $urc, not 1" >&2; rc=1; }
+  [ "$stale_out" != "$absent_out" ] || { echo "SELF-TEST FAIL: a stale verdict and an absent review publish the identical output — a reviewer whose verdict raced a push reads it as 'nobody has looked'" >&2; rc=1; }
+  case "$stale_out" in
+    *"reviewer-a"*) : ;;
+    *) echo "SELF-TEST FAIL: the stale-verdict notice does not say WHOSE verdict went stale (got: $stale_out)" >&2; rc=1 ;;
+  esac
+  case "$stale_out" in
+    *"$base"*) : ;;
+    *) echo "SELF-TEST FAIL: the stale-verdict notice does not name the sha that went stale (got: $stale_out)" >&2; rc=1 ;;
+  esac
+  case "$stale_out" in
+    #         A NOTICE, NOT AN ERROR. Case 2 is the loud one; announcing every ordinary post-push
+    #         staleness at the same volume would bury it.
+    *"::notice::"*) : ;;
+    *) echo "SELF-TEST FAIL: the stale verdict was not reported as a ::notice:: (got: $stale_out)" >&2; rc=1 ;;
+  esac
+
+  #     (g) AND A VERDICT NAMING THE CORRECT HEAD SAYS NOTHING AT ALL. The ordinary path stays
+  #         silent, or every green pull request grows a paragraph nobody reads.
+  _cp reviewer-a "Reviewed-by: reviewer-a\\nReviewed-sha: $head\\nVerdict: approve"
+  local quiet_out; quiet_out=$(_run 2>&1) || true
+  case "$quiet_out" in
+    *"::notice::"*|*"::error::"*) echo "SELF-TEST FAIL: a verdict naming the correct head produced a notice or an error (got: $quiet_out)" >&2; rc=1 ;;
+  esac
+
   #     (e) AN ALL-ZEROS SHA IS UNPLACEABLE, NOT STALE — and this is a BEHAVIOUR CHANGE worth
   #         pinning rather than discovering. Arms 4 and 5 used to spell "some other head" as forty
   #         zeros, which named no object and so, since #84, is reported rather than passed over.
@@ -666,7 +733,7 @@ Agent: product"
     *) echo "SELF-TEST FAIL: an unattributable verdict was not distinguished from an absent one (got: $qout)" >&2; rc=1 ;;
   esac
 
-  [ "$rc" -eq 0 ] && echo "self-test passed: a missing file refuses, an author cannot certify its own work, a stale sha does not carry over, a short accurate review passes, a QUOTED verdict is not a verdict, a verdict that names somebody other than its poster is refused, a landed refusal survives every later verdict except its own reviewer's, and a verdict naming a sha this repository does not know is reported rather than dropped"
+  [ "$rc" -eq 0 ] && echo "self-test passed: a missing file refuses, an author cannot certify its own work, a stale sha does not carry over, a short accurate review passes, a QUOTED verdict is not a verdict, a verdict that names somebody other than its poster is refused, a landed refusal survives every later verdict except its own reviewer's, a verdict naming a sha this repository does not know is reported rather than dropped, and a stale verdict does not read as an absent one"
   return "$rc"
 }
 

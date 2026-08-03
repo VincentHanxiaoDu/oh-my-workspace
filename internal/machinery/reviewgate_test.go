@@ -994,3 +994,90 @@ func TestPublishDistinguishesTheUnplaceableVerdict(t *testing.T) {
 		}
 	}
 }
+
+// TestAStaleVerdictIsNotAnAbsentOne is the refusal on #98. Issue #84 left the gate with THREE
+// outputs for FOUR states: a verdict naming a real ancestor that is not the head, and no verdict at
+// all, both emitted `no review found for head <X>` and exited 1 — byte-identical.
+//
+// They are different facts and they need opposite responses. "Your verdict raced a push, re-post it"
+// is addressed to a reviewer who has already looked; "nobody has looked" is addressed to the board.
+// Rendering the first as the second is a determined-but-other state reported as an absence, which is
+// the rule this whole gate exists to enforce, broken inside it.
+//
+// THE REMEDY IS DELIBERATELY SMALL, and the size is the point: a `::notice::` on a path that already
+// computes the shas. No exit code moves, and nothing that was mergeable stops being mergeable.
+// Announcing a stale verdict the way an unplaceable one is announced would bury the unplaceable one;
+// a notice does not.
+func TestAStaleVerdictIsNotAnAbsentOne(t *testing.T) {
+	f := newReviewFixture(t)
+	ghost := ghostSha(t, f.dir, f.head)
+
+	// The four states, each driven through the installed gate.
+	staleRC, stale := f.checkOut(t, posted("qa", "qa", f.base, "changes-requested"))
+	absentRC, absent := f.checkOut(t)
+	unplaceableRC, unplaceable := f.checkOut(t, posted("qa", "qa", ghost, "changes-requested"))
+	currentRC, current := f.checkOut(t, posted("qa", "qa", f.head, "approve"))
+
+	// THE BLOCKER. Same exit code, and that is deliberate — neither is a certified head — so the
+	// distinction has to live in what is said.
+	if staleRC != 1 {
+		t.Errorf("a stale verdict exited %d, want 1 — this change must not move any exit code", staleRC)
+	}
+	if absentRC != 1 {
+		t.Errorf("an absent review exited %d, want 1", absentRC)
+	}
+	if stale == absent {
+		t.Errorf("a stale verdict and an absent review both say %q. One means 'your verdict raced a "+
+			"push, re-post it' and the other means 'nobody has looked'; a reader cannot act on the "+
+			"right one", strings.TrimSpace(stale))
+	}
+
+	// The notice has to be usable: whose verdict, which sha, and which head it should have named.
+	for _, want := range []string{"qa", f.base, f.head} {
+		if !strings.Contains(stale, want) {
+			t.Errorf("the stale-verdict notice %q does not carry %q, so the reviewer cannot tell "+
+				"which of its verdicts went stale or what to re-post it against",
+				strings.TrimSpace(stale), want)
+		}
+	}
+	if !strings.Contains(stale, "::notice::") {
+		t.Errorf("the stale-verdict report %q is not a ::notice:: — an ::error:: here would be the "+
+			"loud treatment the unplaceable case needs, and using it for both buries that one",
+			strings.TrimSpace(stale))
+	}
+
+	// AND THE OTHER TWO STATES KEEP THEIR OWN VOICES. Four states, four outputs.
+	if unplaceableRC != 4 {
+		t.Errorf("an unplaceable verdict exited %d, want 4 — unchanged by this fix", unplaceableRC)
+	}
+	if unplaceable == stale || unplaceable == absent {
+		t.Errorf("the unplaceable verdict says %q, which collides with the stale or absent case",
+			strings.TrimSpace(unplaceable))
+	}
+	if !strings.Contains(unplaceable, "COULD NOT BE PLACED") {
+		t.Errorf("the unplaceable verdict lost its own wording: %q", strings.TrimSpace(unplaceable))
+	}
+
+	// CASE 3 STAYS QUIET. A verdict naming the correct head must not be reported as anything; this
+	// is the direction the reviewer called the one that mattered most, and it is cheap to keep.
+	if currentRC != 0 {
+		t.Errorf("a verdict naming the correct head exited %d, want 0", currentRC)
+	}
+	if strings.Contains(current, "::notice::") || strings.Contains(current, "::error::") {
+		t.Errorf("a verdict naming the correct head produced %q — the ordinary path must stay silent",
+			strings.TrimSpace(current))
+	}
+
+	// A STALE VERDICT ALONGSIDE A GOOD ONE STILL PASSES, and still says the stale one went stale.
+	// Without this, the notice could have been wired only into the failing path.
+	rc, both := f.checkOut(t,
+		posted("qa", "qa", f.base, "changes-requested"),
+		posted("product", "product", f.head, "approve"))
+	if rc != 0 {
+		t.Errorf("a stale verdict alongside a current approve exited %d, want 0\n%s", rc, both)
+	}
+	if !strings.Contains(both, f.base) {
+		t.Errorf("a stale verdict went unmentioned because the head was certified anyway: %q",
+			strings.TrimSpace(both))
+	}
+}
