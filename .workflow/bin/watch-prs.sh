@@ -10,7 +10,8 @@
 #
 #   FAILING   #12  <title>  —  <which check>     a gate went red
 #   CHANGES   #12  <title>                       a reviewer asked for changes
-#   READY     #12  <title>                       green and mergeable
+#   READY     #12  <title>                       green and mergeable, on POSITIVE evidence
+#   NO-ANSWER #12  <title>                       nothing has reported yet — NOT a pass
 #   MERGED    #12  <title>                       it landed
 #   ISSUE-MOVED #12 <title>                     the Issue changed after this head was written
 #   NEEDS-REVIEW #12 <title>                    somebody else built it and it is waiting on a verdict
@@ -19,6 +20,13 @@
 # **Every terminal state emits, not only the good one.** A watch that reported only READY would be
 # silent through a red gate, and silence is indistinguishable from "still running" — which is how an
 # agent waits forever on something that already failed.
+#
+# **AND `READY` IS POSITIVE EVIDENCE, NEVER THE ABSENCE OF NEGATIVE EVIDENCE (Issue #89).** It is the
+# signal a verifier acts on to MERGE, so "no gate has spoken" must never reach it: a head with no
+# check runs at all has nothing pending, nothing failing and no review to refuse, and every one of
+# those tests passes vacuously. `NO-ANSWER` is that state, said out loud — because suppressing the
+# line would make silence mean both "nothing to report" and "no answer yet", which is the same
+# collapse one level up.
 #
 #   WATCHING  <role>  <n> open  —  poll #k        the watch is ALIVE and was answered
 #
@@ -107,7 +115,7 @@ self_test() {
   # documentation exists.
   local s code
   code=$(grep -v '^[[:space:]]*#' "${BASH_SOURCE[0]}")
-  for s in FAILING CHANGES READY MERGED NEEDS-REVIEW ISSUE-MOVED; do
+  for s in FAILING CHANGES READY MERGED NEEDS-REVIEW ISSUE-MOVED NO-ANSWER; do
     printf '%s' "$code" | grep -q "emit $s " \
       || { echo "SELF-TEST FAIL: state '$s' is never emitted — an agent would not learn about it" >&2; rc=1; }
   done
@@ -233,6 +241,96 @@ STUB
   kill "$wpid" 2>/dev/null || true
   rm -rf "$tmp"
 
+  # READY MUST NOT FIRE ON A HEAD WHERE NOTHING HAS REPORTED (Issue #89). **This is the arm whose
+  # absence let a 50% false-positive rate onto the merge signal.** The stub is the measured event:
+  # one open pull request belonging to this role, an EMPTY `check_runs` array, no statuses and no
+  # reviews — so there is nothing pending, nothing failing and nothing refusing, and every existing
+  # test passes vacuously.
+  #
+  # DRIVEN THROUGH BOTH ENTRY POINTS, because they share this branch: `--sweep` is the same loop
+  # with an `exit 0` at the end of one pass. Asserting only the sweep would leave the monitor —
+  # the path that actually runs all day — untested for the defect.
+  tmp=$(mktemp -d)
+  cat > "$tmp/gh" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *rate_limit*)        echo "4896 $(( $(date +%s) + 1500 ))" ;;
+  *"check-runs"*)      echo '{"check_runs":[]}' ;;
+  *"/status"*)         echo '{"statuses":[]}' ;;
+  *"/reviews"*)        echo '[]' ;;
+  *"state=closed"*)    echo '[]' ;;
+  *"pulls?state=open"*) echo '[{"number":46,"title":"t","head":{"ref":"dev/feat/46-x","sha":"4e9ca30c"}}]' ;;
+  *"pulls/46"*)        echo '{"body":""}' ;;
+  *)                   echo '[]' ;;
+esac
+STUB
+  chmod +x "$tmp/gh"
+  cp "${BASH_SOURCE[0]}" "$tmp/watch-prs.sh"
+  cp "$(dirname "${BASH_SOURCE[0]}")/pr-authors.sh" "$tmp/pr-authors.sh"
+  local nout ep
+  for ep in sweep monitor; do
+    if [ "$ep" = sweep ]; then
+      nout=$(PATH="$tmp:$PATH" REPO=x/y bash "$tmp/watch-prs.sh" dev --sweep 2>&1 || true)
+    else
+      ( PATH="$tmp:$PATH" REPO=x/y bash "$tmp/watch-prs.sh" dev 2 >"$tmp/mout" 2>&1 & echo $! > "$tmp/mpid" )
+      sleep 3
+      kill "$(cat "$tmp/mpid")" 2>/dev/null || true
+      nout=$(cat "$tmp/mout" 2>/dev/null || echo "")
+    fi
+    case "$nout" in
+      *"READY #46"*) echo "SELF-TEST FAIL ($ep): a head with NO check runs was announced READY. Nothing is pending because nothing exists, and READY is the signal a verifier acts on to MERGE (got: $nout)" >&2; rc=1 ;;
+      *) : ;;
+    esac
+    case "$nout" in
+      *NO-ANSWER*) : ;;
+      *) echo "SELF-TEST FAIL ($ep): a head with nothing reported emitted no NO-ANSWER. Suppressing the line makes silence mean both 'nothing to report' and 'no answer yet' (got: $nout)" >&2; rc=1 ;;
+    esac
+  done
+
+  # AND READY MUST STILL FIRE WHEN THE EVIDENCE IS ACTUALLY THERE. A fix that never says READY has
+  # replaced a false positive with a signal nobody can act on at all.
+  cat > "$tmp/gh" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *rate_limit*)        echo "4896 $(( $(date +%s) + 1500 ))" ;;
+  *"check-runs"*)      echo '{"check_runs":[{"name":"Build and tests","status":"completed","conclusion":"success"}]}' ;;
+  *"/status"*)         echo '{"statuses":[{"context":"Reviewed by an agent","state":"success","description":"ok"}]}' ;;
+  *"/reviews"*)        echo '[]' ;;
+  *"state=closed"*)    echo '[]' ;;
+  *"pulls?state=open"*) echo '[{"number":46,"title":"t","head":{"ref":"dev/feat/46-x","sha":"4e9ca30c"}}]' ;;
+  *"pulls/46"*)        echo '{"body":""}' ;;
+  *)                   echo '[]' ;;
+esac
+STUB
+  chmod +x "$tmp/gh"
+  nout=$(PATH="$tmp:$PATH" REPO=x/y bash "$tmp/watch-prs.sh" dev --sweep 2>&1 || true)
+  case "$nout" in
+    *"READY #46"*) : ;;
+    *) echo "SELF-TEST FAIL: a completed, passing check run with a success verdict did not produce READY — the signal has been replaced by one nobody can act on (got: $nout)" >&2; rc=1 ;;
+  esac
+  # A COMPLETED GREEN BUILD WITH NO VERDICT IS STILL NOT READY. The absence of a refusal is not the
+  # presence of an approval, and the verdict is the thing that actually blocks the merge.
+  cat > "$tmp/gh" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *rate_limit*)        echo "4896 $(( $(date +%s) + 1500 ))" ;;
+  *"check-runs"*)      echo '{"check_runs":[{"name":"Build and tests","status":"completed","conclusion":"success"}]}' ;;
+  *"/status"*)         echo '{"statuses":[]}' ;;
+  *"/reviews"*)        echo '[]' ;;
+  *"state=closed"*)    echo '[]' ;;
+  *"pulls?state=open"*) echo '[{"number":46,"title":"t","head":{"ref":"dev/feat/46-x","sha":"4e9ca30c"}}]' ;;
+  *"pulls/46"*)        echo '{"body":""}' ;;
+  *)                   echo '[]' ;;
+esac
+STUB
+  chmod +x "$tmp/gh"
+  nout=$(PATH="$tmp:$PATH" REPO=x/y bash "$tmp/watch-prs.sh" dev --sweep 2>&1 || true)
+  case "$nout" in
+    *"READY #46"*) echo "SELF-TEST FAIL: a green build with NO review verdict was announced READY — the absence of a refusal is not the presence of an approval (got: $nout)" >&2; rc=1 ;;
+    *) : ;;
+  esac
+  rm -rf "$tmp"
+
   # A DEATH MUST ANNOUNCE ITSELF. Driven by making the very first lookup fail in a mode the loop
   # does not catch, so the process really does exit non-zero.
   #
@@ -268,7 +366,7 @@ STUB
     && { echo "SELF-TEST FAIL: a sweep whose lookup failed exited 0 — an outage would read as an empty board" >&2; rc=1; }
   rm -rf "$tmp"
 
-  [ "$rc" -eq 0 ] && echo "self-test passed: every outcome emits including the failing ones, main's colour has three answers plus an outage, unknown roles refuse, a failed poll does not end the watch, an unfetched branch does not end it either, the heartbeat arrives, a death announces itself, and --sweep terminates and refuses to call an outage an empty board"
+  [ "$rc" -eq 0 ] && echo "self-test passed: READY requires positive evidence and a head with nothing reported says NO-ANSWER instead (both entry points), every outcome emits including the failing ones, main's colour has three answers plus an outage, unknown roles refuse, a failed poll does not end the watch, an unfetched branch does not end it either, the heartbeat arrives, a death announces itself, and --sweep terminates and refuses to call an outage an empty board"
   return $rc
 }
 
@@ -439,6 +537,11 @@ while true; do
   bmsg=$("$here_bin/gh-budget.sh" check 2>&1) && bok=0 || bok=$?
   if [ "${bok:-0}" -eq 1 ]; then
     echo "HOLDING — $bmsg"
+    # A SWEEP THAT HOLDS MUST STILL END. Found while building #89's fixture: a `--sweep` under a
+    # budget hold slept and continued forever, so the ONE-PASS fallback for a dead watch hung
+    # exactly like the watch it replaces — the failure this file's own self-test says it exists to
+    # prevent. Exit non-zero, because a hold is not an answer to a question asked once.
+    [ "$sweep" = no ] || exit 1
     sleep "$(HOLD_SLEEP)"
     continue
   fi
@@ -520,6 +623,11 @@ while true; do
     fi
     failing=$(printf '%s' "$runs" | jq -r '[.check_runs[]? | select(.conclusion=="failure" or .conclusion=="timed_out" or .conclusion=="cancelled") | .name] | join(", ")' 2>/dev/null || echo "")
     pending=$(printf '%s' "$runs" | jq -r '[.check_runs[]? | select(.status!="completed")] | length' 2>/dev/null || echo 0)
+    # HOW MANY GATES HAVE ACTUALLY SPOKEN (Issue #89). `pending` counts what is NOT finished, and on
+    # a head where NOTHING has reported that count is zero — the array is empty, its length is 0,
+    # and every test of the form "nothing is pending" is VACUOUSLY TRUE. This is the number that
+    # says something was there to be pending in the first place.
+    completed=$(printf '%s' "$runs" | jq -r '[.check_runs[]? | select(.status=="completed")] | length' 2>/dev/null || echo 0)
 
     # THE ISSUE MOVED UNDER AN OPEN PULL REQUEST. A ruling changes what an Issue asks for, and
     # nothing told the work already in flight: one pull request was cut three minutes before a
@@ -564,10 +672,18 @@ while true; do
     # job can stay green and auto-merge can arm. Watching check runs alone reported a pull request
     # as needing one fix when it had two, and the invisible one was the one blocking the merge.
     # Measured: a dev agent fixed what the event named, then found the blocker by hand.
-    if st=$(gh api "repos/$REPO/commits/$sha/status" 2>/dev/null); then
-      badst=$(printf '%s' "$st" | jq -r '[.statuses[]? | select(.state=="failure" or .state=="error") | "\(.context): \(.description)"] | join("; ")' 2>/dev/null || echo "")
-      [ -n "$badst" ] && { emit FAILING "$num" "$title" "[$branch] $badst"; continue; }
+    # READ ONCE, ANSWERING TWO QUESTIONS: is any status red, and did the review verdict pass. And a
+    # status lookup that FAILED is neither — it used to be `if st=$(...); then ... fi`, where a
+    # failed call fell straight through to the permissive answer below with nothing said.
+    if ! st=$(gh api "repos/$REPO/commits/$sha/status" 2>&1); then
+      echo "LOOKUP FAILED: commit statuses for #$num: $(reason "$st" 120)"
+      continue
     fi
+    badst=$(printf '%s' "$st" | jq -r '[.statuses[]? | select(.state=="failure" or .state=="error") | "\(.context): \(.description)"] | join("; ")' 2>/dev/null || echo "")
+    [ -n "$badst" ] && { emit FAILING "$num" "$title" "[$branch] $badst"; continue; }
+    # THE VERDICT, POSITIVELY. It lives only in the commit status, and `READY` is not entitled to
+    # assume it: the absence of a `changes-requested` is not the presence of an approval.
+    verdict=$(printf '%s' "$st" | jq -r '[.statuses[]? | select(.context|test("Reviewed by an agent"))][0].state // ""' 2>/dev/null || echo "")
 
     # A review asking for changes is a state the author must hear about — it is not visible in any
     # check run, and a PR sitting on it looks identical to one waiting for a reviewer.
@@ -576,7 +692,44 @@ while true; do
       [ "${cr:-0}" -gt 0 ] && { emit CHANGES "$num" "$title"; continue; }
     fi
 
-    [ "${pending:-0}" -eq 0 ] && emit READY "$num" "$title"
+    # READY IS POSITIVE EVIDENCE, NOT THE ABSENCE OF NEGATIVE EVIDENCE (Issue #89).
+    #
+    # This was `[ "${pending:-0}" -eq 0 ] && emit READY`, and `pending` counts check runs that are
+    # NOT YET COMPLETED. **With no check runs at all the array is empty, its length is 0, and READY
+    # fired.** The two reds above cannot save it, because both are existence-dependent in the same
+    # way: `FAILING` needs a `failure`/`error` to EXIST and `CHANGES` needs a review to EXIST. On a
+    # head where nothing has reported, all three fall through to the permissive answer.
+    #
+    # MEASURED, on one board in one sweep: six READY lines, three genuine and three for heads with
+    # NOTHING reported on them — a 50% false-positive rate on the signal a verifier acts on to
+    # MERGE. Two of the false ones were the release's blocking branches, one of them carrying an
+    # unaddressed `changes-requested` and a scope ruling. Reproduced deterministically on #46 head
+    # `4e9ca30c`, twice seconds apart, while `pr.sh state 46` said — correctly — "NOTHING HAS
+    # REPORTED on this head yet. That is not a pass — it is no answer."
+    #
+    # It fires most readily exactly when a branch is most in flux: in the seconds after a push,
+    # which is when a fix agent hands off and a verifier looks.
+    #
+    # So READY now requires a gate to have SPOKEN (`completed` ≥ 1) and the verdict to have PASSED.
+    #
+    # AND THE NO-ANSWER CASE GETS ITS OWN EVENT, NOT SILENCE. Suppressing the line would make
+    # silence mean both "nothing to report" and "no answer yet" — the same collapse one level up,
+    # and the state this whole file exists to remove. The wording is `pr.sh state`'s, carried
+    # across rather than reinvented, because the two derivations disagreeing is what made this
+    # findable at all.
+    if [ "${completed:-0}" -eq 0 ]; then
+      emit NO-ANSWER "$num" "$title" "[$branch] NOTHING HAS REPORTED on this head yet — no check run has completed. That is NOT a pass, it is no answer. Do not merge on this."
+      continue
+    fi
+    if [ "${pending:-0}" -gt 0 ]; then
+      emit NO-ANSWER "$num" "$title" "[$branch] $pending check run(s) still running on this head — not a pass, no answer yet. Do not merge on this."
+      continue
+    fi
+    if [ "$verdict" != success ]; then
+      emit NO-ANSWER "$num" "$title" "[$branch] the gates have reported and passed, but the review verdict has not: '${verdict:-none published}'. That is NOT a pass, it is no answer. Do not merge on this."
+      continue
+    fi
+    emit READY "$num" "$title"
   done < <(printf '%s' "$prs" | jq -r '.[] | [.number, .title, .head.ref, .head.sha] | @tsv' 2>/dev/null || true)
 
   # Recently merged ones, so an agent learns its work landed rather than polling for it.
