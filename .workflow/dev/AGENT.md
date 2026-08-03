@@ -21,12 +21,13 @@ says what the verdict is.
 
 ## Before you believe a green or a red, check the instrument
 
-**Eleven wrong measurements in one session, and the list below is how to count them: sum the instances,
-not the bullets — the first bullet is five.** Each is recorded on the pull request where it happened,
-so the number is re-derivable rather than asserted. It was first written here as "nine", which did not
-match its own list; that is the defect this section exists to prevent, in this section.
+**These are wrong measurements made here, in one session. There is deliberately no tally.** It was
+written first as "nine" and then as "eleven", and both times the headline disagreed with the list
+beneath it — the defect this section exists to prevent, reproduced twice in the correction to itself.
+**The shapes are what is useful; the count never was.** If you catch yourself reaching for a number,
+that is the same instinct that produced the two wrong ones.
 
-**Ten of the eleven were one shape: the instrument answered a question adjacent to the one that
+**Nearly all of them were one shape: the instrument answered a question adjacent to the one that
 mattered.** Not a wrong conclusion from good evidence — a confident answer to a question nobody asked.
 
 - A mutation whose pattern **matched nothing** — five times. `perl -0pi -e 's/os.Rename(tmp, path)/…/'`
@@ -53,7 +54,7 @@ mattered.** Not a wrong conclusion from good evidence — a confident answer to 
    the same query at something you know exists.
 6. **Reset the scratch tree before each run**, and check `git status` is clean first.
 
-**The eleventh was a different species, and the six rules above do not catch it.** Verifying a guard on
+**One was a different species, and the six rules above do not catch it.** Verifying a guard on
 #115, I planted a bypass using the guard's own sentinel names — and the guard matches on exactly those
 name strings. My mutation varied the thing the guard indexes on, so it could only ever exercise the
 half that works. A reviewer renamed the sentinel across the tree, left the guard's map stale the way a
