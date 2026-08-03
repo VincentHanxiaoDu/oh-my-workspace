@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// The six subsystems §2.1 names as part of a running client. Criterion 1: every one of them
+// The subsystems §2.1 names as part of a running client. Criterion 1: every one of them
 // appears on the screen, each as its own named line, and none is silently omitted.
 //
 // THEY ARE CONSTANTS AND THERE IS A LIST OF THEM because "no subsystem is silently omitted" is a
@@ -22,12 +22,20 @@ const (
 	Projects = "watched projects"
 	Devices  = "devices registration"
 	Hub      = "hub connection"
+	// Model is §2.1's model providers, and it is the SEVENTH (Issue #66).
+	//
+	// It is here because the six above were a closed list written before Issue #18 existed, and
+	// nothing anywhere noticed when it fell behind: `grep -rni model internal/status/` found
+	// nothing at all while `omw model show` and `omw daemon status` both exited 3 over a model
+	// state nobody could determine. The one screen answered 0 and never mentioned it — which §4.3
+	// names as its own failure, because silence is not one of the three answers.
+	Model = "model provider"
 )
 
-// Required is the six, in the order a person reads them: the process, then what it owns locally,
+// Required is the seven, in the order a person reads them: the process, then what it owns locally,
 // then what reaches off the machine.
 func Required() []string {
-	return []string{Daemon, Store, Channels, Projects, Devices, Hub}
+	return []string{Daemon, Store, Channels, Projects, Model, Devices, Hub}
 }
 
 // Item is one thing INSIDE a subsystem that has a state of its own: a channel, a project, a
