@@ -86,7 +86,7 @@ func lookupFailedLine(out string) string {
 // and kept it shipped.
 func TestALookupFailureShowsTheEndOfTheOutputNotTheBeginning(t *testing.T) {
 	dir := queueReasonFixture(t, longThenFailingQueue)
-	out := runWatchBriefly(t, dir, "watch-queue.sh", "dev", "1")
+	out := runWatchUntil(t, dir, "watch-queue.sh", atLeast("LOOKUP FAILED", 1), "dev", "1")
 	line := lookupFailedLine(out)
 	if line == "" {
 		t.Fatalf("the poll failed and no LOOKUP FAILED line was emitted at all\n%s", out)
@@ -104,7 +104,7 @@ func TestALookupFailureShowsTheEndOfTheOutputNotTheBeginning(t *testing.T) {
 // on something that was never truncated.
 func TestAShortLookupFailureIsShownWhole(t *testing.T) {
 	dir := queueReasonFixture(t, shortFailingQueue)
-	out := runWatchBriefly(t, dir, "watch-queue.sh", "dev", "1")
+	out := runWatchUntil(t, dir, "watch-queue.sh", atLeast("LOOKUP FAILED", 1), "dev", "1")
 	line := lookupFailedLine(out)
 	if line != "LOOKUP FAILED: boom" {
 		t.Errorf("a reason that fits in the budget was not rendered byte-identically.\n"+
@@ -198,7 +198,7 @@ func TestARedMainDoesNotTellTheLastMergerItIsTheirs(t *testing.T) {
 			"it is theirs to fix. That is an attribution derived from who merged last rather than from "+
 			"the diff — the error `pr-authors.sh` exists to end, one layer up.\n%s", got)
 	}
-	if !strings.Contains(got, "NOT DETERMINED") {
+	if !strings.Contains(got, "CAUSE NOT DETERMINED") {
 		t.Errorf("the cause could not be derived and the watch did not say so. An undetermined answer "+
 			"must not wear the face of a determined one.\n%s", got)
 	}
@@ -224,8 +224,12 @@ func TestAnUnreadableJobListIsNotAnAbsentFailingCheck(t *testing.T) {
 		t.Errorf("the jobs query failed and main stopped being reported as red at all — the colour was "+
 			"read from a different query and is still known\n%s", got)
 	}
-	if !strings.Contains(got, "NOT DETERMINED") {
-		t.Errorf("the jobs query failed and the watch did not say the failing check was undetermined\n%s",
-			got)
+	// MATCHED ON THE PHRASE THAT NAMES THIS LOOKUP, not on `NOT DETERMINED` alone. The first version
+	// of this arm did the latter and passed with the message deleted, because the ATTRIBUTION
+	// sentence on the same line already contains `CAUSE NOT DETERMINED` — a check whose corpus
+	// includes an unrelated answer to a different question. A mutation run found it; reading did not.
+	if !strings.Contains(got, "failing check NOT DETERMINED") {
+		t.Errorf("the jobs query failed and the watch did not say the failing check was undetermined. "+
+			"A red run with no failing job named reads as `there was nothing more to say`.\n%s", got)
 	}
 }
