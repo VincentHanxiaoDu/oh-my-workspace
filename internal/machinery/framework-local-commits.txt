@@ -13,7 +13,9 @@
 #
 # Blank lines and lines beginning with `#` are ignored.
 
-# There are no entries today, and that is the healthy state.
+283715b .workflow/bin/queue.sh Issue #59: `reviews_waiting` re-offered a head to the role that had already refused it, because a `changes-requested` verdict publishes `failure` and only `success` suppressed. The queue now reads the `Reviewed-by:`/`Reviewed-sha:` attestation. NOT YET UPSTREAMED — it belongs in agent-dev-flow and the next refresh will delete it. What survives the refresh is `internal/machinery/reviewassignment_test.go`, which executes the installed script and goes red the moment the fix is gone, and `queue.sh --self-test` carries matching arms so the upstream patch arrives with its own proof. This entry is a debt, not a dismissal.
+
+# The healthy state is no entries at all.
 #
 # There was one: 17c8f9c over `.workflow/bin/check-review.sh`, the #52 fix. It was upstreamed as
 # agent-dev-flow aa8c730, and the refresh 1889abd has since landed over that file — so the framework
