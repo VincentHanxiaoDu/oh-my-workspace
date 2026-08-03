@@ -158,6 +158,32 @@ refused.
 - **WHEN** a registration is refused for any reason
 - **THEN** no record of it exists afterwards
 
+### Requirement: An incomplete reading of the inventory is never reported as a complete one
+The product SHALL report an extension whose registration record cannot be read as one undetermined
+entry beside the extensions it could read, and SHALL NOT drop the others. Where the set of
+registrations cannot be established at all, every surface SHALL say so, and no summary, exit status
+or per-name answer derived from it SHALL claim a determined result.
+
+#### Scenario: One registration record is damaged
+- **WHEN** a person lists extensions with one registration record damaged and others intact
+- **THEN** every registration is still listed, the damaged one is undetermined, and any extension
+  that failed to load is still reported as failed to load
+
+#### Scenario: A summary is produced over an inventory that could not be read in full
+- **WHEN** a person lists extensions and part of the inventory could not be read
+- **THEN** the report does not state that every registered extension loaded, and the command does
+  not exit with the success status
+
+#### Scenario: One extension is asked about while the inventory cannot be enumerated
+- **WHEN** a person asks about an extension by name and the set of registrations could not be
+  established
+- **THEN** whether it is registered is reported as undetermined rather than as not registered
+
+#### Scenario: One extension is asked about while only a single record is damaged
+- **WHEN** a person asks about an extension by name, the set of registrations was established, and a
+  different record could not be read
+- **THEN** whether the named extension is registered is answered as a determined fact
+
 ### Requirement: The CLI and the control API report the same extension state
 The product SHALL report extension state identically through the command line and through the
 control API.
@@ -165,6 +191,11 @@ control API.
 #### Scenario: A failed-to-load extension is read through both surfaces
 - **WHEN** the same machine's extension state is read through the CLI and through the control API
 - **THEN** both report the same state and the same failure reason
+
+#### Scenario: The inventory cannot be read and both surfaces are consulted
+- **WHEN** the set of registrations cannot be established and the machine's extension state is read
+  through the CLI and through the control API
+- **THEN** both report that the inventory may be incomplete
 
 ### Requirement: No extension state is silence
 The product SHALL render every extension in the listing as exactly one non-empty entry, in every

@@ -73,6 +73,29 @@
       summaries are the same sentence, so a build that swapped one interface's bias for the other's
       cannot pass
 
+## Review round 2 — an incomplete read reported a determined answer
+
+- [x] Add `store.IDs`, which enumerates record names WITHOUT decoding any of them, so no record's
+      contents can fail the enumeration and a caller can degrade per record
+- [x] Rebuild `Registered` on it: one damaged record is one `Undetermined` entry beside the intact
+      ones, instead of `store.List` refusing the whole kind and erasing every registration
+- [x] Add `extension.Listing` — the entries AND whether they are all of them, in one value — and
+      `extension.Read` returning it, so the incompleteness travels inside the thing that gets
+      rendered and there is no second return value for a surface to drop
+- [x] Put the incompleteness in `Listing.Render` above the entries, carry it into `Listing.Summary`,
+      and make `Summary.AllLoaded` unable to answer yes over a partial read
+- [x] Point `omw ext list`, `omw ext show`, `omw ext register` and the control API's
+      `extensionsFor` at `Read` rather than `Inventory`
+- [x] Carry `extension.Listing` on `daemon.Report` in place of `[]extension.Entry`, so the
+      undetermined warning crosses the wire with the entries (criterion 20)
+- [x] Audit every path against "can this report a determined answer from an incomplete read?" and
+      fix the one more it found: `omw ext show` answered "not registered" for a name absent from an
+      inventory it had failed to ENUMERATE
+- [x] Keep `omw ext show` DETERMINATE when only a record was damaged — the enumeration still
+      established which names exist — with a control test so the hedge cannot spread
+- [x] Drive criterion 22's bundle clause against a REAL bundle now that `internal/diagnostics` has
+      landed on main, walking every file with `--include-bodies`
+
 ## Driven red on purpose
 
 - [x] A failed-to-load adapter returning a working-looking empty adapter — red: "the broken channel
@@ -92,3 +115,12 @@
       names one interface"
 - [x] The same defect with the bias SWAPPED to `channels.ErrAdapterFailedToLoad.Code` — red in all
       three, so the repair is neutrality and not a change of side
+- [x] `Registered` back on `store.List` — red with QA's exact symptom: "the failed-to-load extension
+      is not registered … a broken extension reported as absent is this Issue's opening story", and
+      the CLI's "the footer claims every registered extension loaded"
+- [x] `Summary.AllLoaded` ignoring incompleteness — red: "the summary claims every registered
+      extension loaded over an inventory it could not read"
+- [x] The control API blanking the incompleteness again — red: "the control API does not carry
+      \"may not be all of them\", which the CLI printed"
+- [x] `omw ext show` answering not-registered from a failed enumeration — red: "exit 0 for a name
+      looked up in an inventory that could not be enumerated"
