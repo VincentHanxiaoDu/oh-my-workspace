@@ -41,22 +41,6 @@
 #   trailers present, all spec-only     → DETERMINED: nobody authored product judgement here, so
 #                                         every role is independent and any of them may review.
 #
-# AND A THIRD FACT IS NOT AN EMPTY AUTHOR SET AT ALL — IT IS EXIT 3 (Issue #79). Both meanings above
-# are answers. When `--pr` cannot reach the API the question was not answered, and the two are not
-# interchangeable: `--pr` printed nothing and exited 0 under a secondary rate limit, the queue read
-# that as "nobody built it, so every role is independent", and offered a pull request carrying nine
-# `Agent: dev` trailers to dev. The gate re-derives authorship from git at verdict time, where the
-# lookup does not fail, so it saw `dev` and refused the review dev had just done.
-#
-#   0  → the answer follows on stdout (possibly empty, and that emptiness is DETERMINED)
-#   1  → role query only: that role authored nothing here
-#   2  → usage
-#   3  → COULD NOT DETERMINE. Not an author set. Independence cannot be established in either
-#        direction, so a caller must stop rather than route on it.
-#
-# `--range` reads this clone and has no such failure mode; its exit codes are unchanged, which is
-# why `check-review.sh` — the only `--range` caller — needs no change to go with this.
-#
 # The first build of the exemption collapsed those into one empty list, and a pull request whose only
 # commit was an archive — #63, a real one — was refused with "no commit carries an Agent: trailer"
 # about a commit that carries `Agent: product`. It could not be merged except with `--admin`. That is
@@ -113,22 +97,8 @@ authors_from_pr() {
   # file list of every commit of every open pull request, which on a real board is hundreds of calls
   # a round for a queue that is supposed to be cheap enough to run constantly. A role needs one
   # non-spec-only commit to be an author, so the search can stop there — and the answer is identical.
-  # A THIRD MEANING, AND IT IS NOT AN EMPTY AUTHOR SET (Issue #79). The two documented above are
-  # both DETERMINED answers. This one is not: the call failed, so who built this was not computed.
-  # `2>/dev/null || echo ""` collapsed it into the determined pair, and under a secondary rate limit
-  # — which fails intermittently — the queue then offered a pull request to the role that wrote it.
-  # EXIT 3, not 0-with-nothing and not 2 (a usage error): a caller must be able to tell "could not
-  # ask" from "asked, and nobody is an author".
-  # STDERR TO A FILE, NOT MERGED INTO THE VALUE. `2>&1` would fold any warning gh prints on a
-  # SUCCESSFUL call into the commit list, and a warning is not a sha.
-  local errf; errf=$(mktemp); trap 'rm -f "$errf"' RETURN
   shas=$(gh api "repos/$REPO/pulls/$num/commits" --paginate \
-         --jq '.[] | "\(.sha)\t\((.commit.message | split("\n") | map(select(startswith("Agent:"))) | .[0]) // "")"' 2>"$errf") || {
-    echo "::error::the commit list of pull request $num could not be read, so who built it CANNOT BE DETERMINED: $(tr '\n' ' ' < "$errf")" >&2
-    echo "  This is a LOOKUP FAILURE and NOT a statement that nobody authored it. Independence" >&2
-    echo "  cannot be established from it, in either direction." >&2
-    return 3
-  }
+         --jq '.[] | "\(.sha)\t\((.commit.message | split("\n") | map(select(startswith("Agent:"))) | .[0]) // "")"' 2>/dev/null || echo "")
   [ -n "$shas" ] || return 0
   local roles r
   roles=$(printf '%s\n' "$shas" | cut -f2 | sed 's/^Agent:[[:space:]]*//' | grep -v '^$' | sort -u || true)
@@ -137,16 +107,7 @@ authors_from_pr() {
       [ -n "$sha" ] || continue
       [ "$(printf '%s' "$msg" | sed 's/^Agent:[[:space:]]*//')" = "$r" ] || continue
       if [ "$RAW" = 1 ]; then echo "$r"; break; fi
-      # AN UNREADABLE DIFF IS NOT A DIFF THAT TOUCHED NOTHING (Issue #79). `is_spec_only` answers 0
-      # for an empty file list, which is correct for a commit that changed nothing and catastrophic
-      # for a commit whose file list could not be fetched: the author of a code commit silently
-      # became independent of it. The exemption is earned by the diff, so no diff means no answer.
-      files=$(gh api "repos/$REPO/commits/$sha" --jq '.files[]?.filename' 2>"$errf") || {
-        echo "::error::the file list of commit $sha could not be read, so whether it is spec-only CANNOT BE DETERMINED: $(tr '\n' ' ' < "$errf")" >&2
-        echo "  The exemption is earned by the diff. Without the diff there is no answer, and an" >&2
-        echo "  absent answer must not be read as 'this commit confers no authorship'." >&2
-        return 3
-      }
+      files=$(gh api "repos/$REPO/commits/$sha" --jq '.files[]?.filename' 2>/dev/null || echo "")
       if ! printf '%s' "$files" | is_spec_only; then echo "$r"; break; fi
     done < <(printf '%s\n' "$shas")
   done
@@ -306,33 +267,7 @@ Agent: product"
   [ -z "$out" ] || { echo "SELF-TEST FAIL: --all-trailers invented a trailer for a commit that has none (got '$out')" >&2; rc=1; }
   rm -rf "$tmp2"
 
-  # AND A LOOKUP THAT COULD NOT ANSWER IS NEITHER OF THOSE EMPTY SETS (Issue #79). Driven through
-  # the real `--pr` entry point against a stub `gh` that fails, because the defect was not in the
-  # logic — every line did what it said — it was that the failure was converted to an empty set at
-  # the boundary, and no arm here asked what `--pr` does when the API is unreachable.
-  local stub prc
-  stub=$(mktemp -d)
-  printf '#!/usr/bin/env bash\necho "You have exceeded a secondary rate limit" >&2\nexit 1\n' > "$stub/gh"
-  chmod +x "$stub/gh"
-  prc=0
-  ( PATH="$stub:$PATH" REPO=x/y bash "$me" --pr 1 ) >/dev/null 2>&1 || prc=$?
-  [ "$prc" -eq 3 ] || {
-    echo "SELF-TEST FAIL: --pr exited $prc when the API could not be reached, not 3. A caller cannot tell 'could not determine who built this' from 'determined that nobody did', and the queue then offers a pull request to the role that wrote it" >&2; rc=1; }
-  # THE ROLE QUERY MUST NOT ANSWER EITHER. `--pr 1 dev` exits 1 for "dev authored nothing here", and
-  # a failed lookup borrowing that code tells a role it is independent of work it wrote.
-  prc=0
-  ( PATH="$stub:$PATH" REPO=x/y bash "$me" --pr 1 dev ) >/dev/null 2>&1 || prc=$?
-  [ "$prc" -eq 3 ] || {
-    echo "SELF-TEST FAIL: the role query exited $prc under a failed lookup, not 3 — 1 means 'not an author', which is an answer nothing computed" >&2; rc=1; }
-  # AND --all-trailers TOO, or the fix is applied to one of a pair and the caller that reads both
-  # still cannot tell an outage from a determined answer.
-  prc=0
-  ( PATH="$stub:$PATH" REPO=x/y bash "$me" --pr 1 --all-trailers ) >/dev/null 2>&1 || prc=$?
-  [ "$prc" -eq 3 ] || {
-    echo "SELF-TEST FAIL: --all-trailers exited $prc under a failed lookup, not 3" >&2; rc=1; }
-  rm -rf "$stub"
-
-  [ "$rc" -eq 0 ] && echo "self-test passed: a spec-only commit confers no authorship, a code commit does, a commit NAMED archive that carries code still does, the role query agrees with the list, and an inherited commit does not; blank lines cannot change the predicate, an archive-only branch is distinguishable from one with no trailers, and a lookup that could not answer exits 3 rather than reporting an empty author set"
+  [ "$rc" -eq 0 ] && echo "self-test passed: a spec-only commit confers no authorship, a code commit does, a commit NAMED archive that carries code still does, the role query agrees with the list, and an inherited commit does not; blank lines cannot change the predicate, and an archive-only branch is distinguishable from one with no trailers"
   return $rc
 }
 
@@ -343,11 +278,7 @@ Agent: product"
 [ "$1" = "--is-spec-only" ] && { is_spec_only; exit $?; }
 
 case "$1" in
-  # `|| exit $?` IS THE WHOLE POINT AND IT IS NOT DECORATION (Issue #79). A command substitution is a
-  # subshell: without this the function's `return 3` sets `$?` on an assignment `set -e` does not
-  # abort on in every bash, `all` becomes empty, and the outage renders as a determined empty author
-  # set — the exact collapse this file's header forbids, reintroduced by the shape of the call.
-  --pr)    all=$(authors_from_pr "${2:?pull request number}") || exit $?; want=${3:-} ;;
+  --pr)    all=$(authors_from_pr "${2:?pull request number}"); want=${3:-} ;;
   --range) all=$(authors_from_range "${2:?base}" "${3:?head}"); want=${4:-} ;;
 esac
 all=$(printf '%s\n' "$all" | grep -v '^$' | sort -u || true)

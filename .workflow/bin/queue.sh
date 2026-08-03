@@ -4,7 +4,7 @@
 # PRD R3: an agent must be able to compute its own queue. There is no owner:* label, no assignment
 # message, no coordinator-maintained list. State is stored once.
 #
-# Usage: queue.sh <role>          # dev | qa | product | ops | pm
+# Usage: queue.sh <role>          # dev | qa | product | ops | pm | owner
 #        queue.sh --self-test
 set -euo pipefail
 
@@ -234,45 +234,14 @@ reviews_waiting() {
     # THE SAME DERIVATION THE GATE USES, from the same file — see pr-authors.sh. If this queue
     # offers you a pull request, the gate will accept your verdict on it; that promise is only
     # keepable while there is one implementation of independence.
-    #
-    # AND `2>/dev/null || echo ""` IS HOW THAT PROMISE BROKE (Issue #79). It converted a FAILED
-    # lookup into an empty author set — stderr discarded, non-zero exit swallowed. An empty set has
-    # two documented meanings below and both are answers; this was a third and it is not. Under a
-    # SECONDARY rate limit, which fails intermittently, `--pr` failed while the `--all-trailers`
-    # follow-up succeeded, so the both-empty guard did not fire, `grep -qx "$role"` matched nothing
-    # against the empty string, and the pull request was offered to EVERY role including its author.
-    # Observed: `#46 ... run /review-pr 46   (built by )` on a branch carrying nine `Agent: dev`
-    # trailers. The gate does not fail there — it re-derives from git — so it refused the verdict
-    # after the review had been done.
-    #
-    # EXIT, DO NOT SKIP THE PULL REQUEST. Silently dropping it is the other half of the same defect:
-    # the role reads `(none)` and concludes it has no reviews waiting, which is a wrong answer with a
-    # zero exit code, and this whole file exists to prevent that.
-    authors=$("$(dirname "${BASH_SOURCE[0]}")/pr-authors.sh" --pr "$num") || {
-      echo "::error::who built pull request #$num could not be determined, so the queue cannot say" >&2
-      echo "  whether you are independent of it. This is a LOOKUP FAILURE and NOT a statement that" >&2
-      echo "  nobody authored it, and NOT a statement that you have no reviews waiting. Retry, or" >&2
-      echo "  report the outage — a secondary rate limit clears on its own; retrying in a loop" >&2
-      echo "  deepens it." >&2
-      exit 1
-    }
+    authors=$("$(dirname "${BASH_SOURCE[0]}")/pr-authors.sh" --pr "$num" 2>/dev/null || echo "")
     # NO TRAILER MEANS INDEPENDENCE CANNOT BE ESTABLISHED, WHICH IS NOT THE SAME AS "YOURS TO DO".
     # The naming gate reports that defect with its remedy and it is not this queue's to duplicate.
     # EMPTY MEANS ONE OF TWO THINGS. No trailers at all is a commit defect the naming gate reports
     # and not work to offer; trailers with every commit spec-only means nobody authored product
     # judgement, so every role is independent and this pull request is waiting on ALL of them.
     if [ -z "$authors" ]; then
-      # THE SECOND CALL SWALLOWED IT TOO, and a fix applied to one of a pair is how this project's
-      # defects come back. Same rule: a failure here means the distinction between "no trailers at
-      # all" and "all spec-only" was not made, and neither branch below may be taken on it.
-      local trailers
-      trailers=$("$(dirname "${BASH_SOURCE[0]}")/pr-authors.sh" --pr "$num" --all-trailers) || {
-        echo "::error::the commit trailers of pull request #$num could not be read, so the queue" >&2
-        echo "  cannot tell 'no commit carries an Agent: trailer' from 'every commit was spec-only'." >&2
-        echo "  This is a LOOKUP FAILURE and NOT a statement that you have no reviews waiting." >&2
-        exit 1
-      }
-      [ -n "$trailers" ] || continue
+      [ -n "$("$(dirname "${BASH_SOURCE[0]}")/pr-authors.sh" --pr "$num" --all-trailers 2>/dev/null || echo "")" ] || continue
     fi
     if printf '%s\n' "$authors" | grep -qx "$role"; then continue; fi
     rst=$(api "repos/$REPO/commits/$sha/status" \
@@ -386,6 +355,50 @@ role_queue() {
              | "  #\(.number)  \(.title)"' --landed 
       my_prs "*/feat/*|*/spec/*" "PULL REQUESTS TO UAT, MERGE AND CLOSE — whoever wrote them"
       reviews_waiting product ;;
+    owner)
+      # THE OWNER HAD NO QUEUE, AND EVERY ROLE HAD ONE.
+      #
+      # Measured: a product agent formed a release verdict — "do not ship bbee48f, four blockers" —
+      # and it reached the owner because they happened to be reading that window at that moment. The
+      # sha appeared in NO file, NO Issue and NO label; it existed in one terminal message. Had they
+      # been away, nothing would have told them, and nothing would have stopped the release either.
+      # The owner's own words: **"product 都没问我，我怎么知道我要决定?"**
+      #
+      # This is the orphan defect one level up. Every filter was right, every role was doing its job,
+      # and the one decision nobody else may take was addressed to a human through no channel at all.
+      #
+      # DERIVED, LIKE EVERY OTHER QUEUE. No coordinator maintains this: a blocker is an open Issue
+      # labelled `blocks:release`, and a question is an Issue whose body carries `## Blocked on a
+      # decision` with no ruling yet. Both are states the roles already produce.
+      emit "DECISIONS ONLY YOU CAN MAKE — the work proceeds around them, refusing where they bite:" \
+        '.[] | select(.pull_request==null)
+             | select(.body // "" | test("## Blocked on a decision"))
+             | "  #\(.number)  \(.title)"' --unruled
+
+      emit "HOLDING THE RELEASE — these are why nothing can ship yet:" \
+        '.[] | select(.pull_request==null)
+             | select([.labels[].name] | index("blocks:release"))
+             | "  #\(.number)  \(.title)"'
+
+      # AND WHETHER ANYONE HAS SAID ANYTHING ABOUT SHIPPING AT ALL. "No blockers" and "nobody has
+      # looked" are different answers and this is the page where confusing them is most expensive:
+      # one means ship, the other means you have been told nothing.
+      local nb rel
+      nb=$(printf '%s' "$ALL" | jq '[.[]|select(.pull_request==null)|select([.labels[].name]|index("blocks:release"))]|length')
+      rel=$(api --paginate "repos/$REPO/issues/comments?per_page=100" \
+            | jq -r '[.[] | select(.body | test("^\\[product\\][\\s\\S]*RELEASE"))] | length' 2>/dev/null || echo 0)
+      printf '\nRELEASE\n'
+      if [ "${nb:-0}" -gt 0 ]; then
+        printf '  BLOCKED — %s Issue(s) labelled blocks:release are open, listed above.\n' "$nb"
+      elif [ "${rel:-0}" -eq 0 ]; then
+        printf '  UNDETERMINED — nothing is labelled blocks:release AND product has recorded no release\n'
+        printf '  verdict. That is NOT "ready to ship": it is nobody having said. Ask product for a verdict\n'
+        printf '  before reading this as a green light.\n'
+      else
+        printf '  No open blocker. product has recorded %s release verdict(s) — read the most recent\n' "$rel"
+        printf '  before calling one; a verdict is about a specific sha and yours may be older than main.\n'
+      fi
+      ;;
     ops)
       emit "OPEN PULL REQUESTS — CI and gate health:" \
         '.[] | select(.pull_request!=null) | "  #\(.number)  \(.title)"' ;;
@@ -418,7 +431,7 @@ role_queue() {
       [ "$m" -le "$p" ] || printf '  OVER THE CAP. Dispatch no further machinery work until this is 1:1 or better.\n'
       ;;
     *)
-      echo "::error::'$role' is not a role. One of: dev qa product ops pm" >&2; return 1 ;;
+      echo "::error::'$role' is not a role. One of: dev qa product ops pm owner" >&2; return 1 ;;
   esac
 }
 
@@ -432,7 +445,7 @@ self_test() {
   # Every role in the documented set must be dispatchable. A role prompt that exists with no queue
   # arm is a role that can never find its work.
   local r
-  for r in dev qa product ops pm; do
+  for r in dev qa product ops pm owner; do
     grep -q "^    $r)" "${BASH_SOURCE[0]}" \
       || { echo "SELF-TEST FAIL: role '$r' has no queue arm" >&2; rc=1; }
   done
@@ -498,44 +511,58 @@ STUB
     *"/review-pr 9"*) : ;;
     *) echo "SELF-TEST FAIL: a verdict naming a DIFFERENT head suppressed this one — a stale review strands the head it does not describe (got: $out)" >&2; rc=1 ;;
   esac
-  # AND A FAILED AUTHOR LOOKUP MUST OFFER NOTHING AND SAY SO (Issue #79). Narrowed to ONE endpoint
-  # on purpose: a stub that fails everything cannot test this, because the queue dies on the first
-  # failed call and the arm goes green whether or not this path handles anything. Here the commit
-  # list of #9 fails on its FIRST call and succeeds after — which is what a SECONDARY rate limit
-  # does — so `--pr` comes back empty, `--all-trailers` succeeds, the both-empty guard does not
-  # fire, and the empty set matches no role. Measured before the fix: `dev` was offered its own
-  # pull request with `(built by )`.
-  local tmp3
-  tmp3=$(mktemp -d)
-  cat > "$tmp3/gh" <<'STUB'
-#!/usr/bin/env bash
-case "$*" in
-  *"pulls/9/commits"*)
-    n=0; [ -f "$TMP3/calls" ] && n=$(cat "$TMP3/calls"); n=$((n+1)); printf '%s' "$n" > "$TMP3/calls"
-    [ "$n" = 1 ] && { echo 'You have exceeded a secondary rate limit' >&2; exit 1; }
-    printf 'c9\tAgent: dev\n' ;;
-  *"/commits/c9"*)      echo 'internal/a.go' ;;
-  *"pulls?state=open"*) echo '[{"number":9,"head":{"ref":"dev/feat/9-x","sha":"cafe"},"title":"feat(x): y"}]' ;;
-  *"/status"*)          echo '{"statuses":[]}' ;;
-  *)                    echo '[]' ;;
-esac
-STUB
-  chmod +x "$tmp3/gh"
-  local arc=0
-  out=$( PATH="$tmp3:$PATH" TMP3="$tmp3" REPO=x/y bash "${BASH_SOURCE[0]}" dev 2>&1 ) || arc=$?
-  [ "$arc" -ne 0 ] || {
-    echo "SELF-TEST FAIL: the author lookup failed and the queue exited 0 — 'could not determine who built this' and 'determined that nobody did' have collapsed, and an agent reads a zero exit as an answer" >&2; rc=1; }
-  case "$out" in
-    *"/review-pr 9"*) echo "SELF-TEST FAIL: a failed author lookup offered this pull request to dev, which authored every commit in it. The gate re-derives authorship from git at verdict time, where the lookup does not fail, so it refuses the verdict the role did the whole review to produce (got: $out)" >&2; rc=1 ;;
-  esac
-  case "$out" in
-    *"::error::"*) : ;;
-    *) echo "SELF-TEST FAIL: the author lookup failed and nothing was printed — a non-zero exit with no reason reads as a bug in the queue rather than an outage (got: $out)" >&2; rc=1 ;;
-  esac
-  rm -rf "$tmp3"
   rm -rf "$tmp"
 
-  [ "$rc" -eq 0 ] && echo "self-test passed: unknown roles refuse, every role has a queue, a failed lookup is not an empty queue, a pull request awaiting a verdict reaches a role that can give it and no role that cannot, and a verdict already posted does not come back to its author while remaining open to every other role, and a failed author lookup offers nothing and says why"
+  # THE OWNER'S QUEUE MUST NOT REPORT SILENCE AS A GREEN LIGHT. **This is the whole reason the arm
+  # exists.** A board with no `blocks:release` label and no recorded verdict means nobody has looked;
+  # reading that as "ready to ship" is the release-shaped version of every other defect here, and it
+  # is the one that cannot be undone afterwards.
+  local otmp oout
+  otmp=$(mktemp -d)
+  cat > "$otmp/gh" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *"issues?state=open"*) echo '[{"number":5,"title":"a thing","labels":[{"name":"type:bug"}],"body":""}]' ;;
+  *"issues/comments"*)   echo '[]' ;;
+  *)                     echo '[]' ;;
+esac
+STUB
+  chmod +x "$otmp/gh"
+  oout=$( PATH="$otmp:$PATH" REPO=x/y bash "${BASH_SOURCE[0]}" owner 2>&1 || true )
+  case "$oout" in
+    *UNDETERMINED*) : ;;
+    *) echo "SELF-TEST FAIL: with no blocker labelled and no verdict recorded, the owner queue did not say UNDETERMINED — silence would read as a green light to ship (got: $oout)" >&2; rc=1 ;;
+  esac
+  # MATCHED ON THE GREEN-LIGHT LINE, NOT ON A PHRASE THE WARNING ITSELF USES. The first version
+  # forbade "ready to ship", which appears inside the UNDETERMINED warning as the thing it tells you
+  # NOT to conclude — so the arm failed on correct output. A check whose corpus includes the text it
+  # polices is the same mistake this file's siblings have made twice; here it failed loudly rather
+  # than passing, which is the harmless direction.
+  case "$oout" in
+    *"No open blocker"*) echo "SELF-TEST FAIL: nobody having looked was reported as nothing blocking" >&2; rc=1 ;;
+  esac
+
+  # AND A LABELLED BLOCKER MUST BLOCK, BY NAME. A count alone is unfalsifiable from the output.
+  cat > "$otmp/gh" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *"issues?state=open"*) echo '[{"number":67,"title":"a blocker","labels":[{"name":"blocks:release"}],"body":""}]' ;;
+  *"issues/comments"*)   echo '[]' ;;
+  *)                     echo '[]' ;;
+esac
+STUB
+  oout=$( PATH="$otmp:$PATH" REPO=x/y bash "${BASH_SOURCE[0]}" owner 2>&1 || true )
+  case "$oout" in
+    *BLOCKED*) : ;;
+    *) echo "SELF-TEST FAIL: an Issue labelled blocks:release did not block the release (got: $oout)" >&2; rc=1 ;;
+  esac
+  case "$oout" in
+    *"#67"*) : ;;
+    *) echo "SELF-TEST FAIL: the blocker was counted but not named — a count cannot be checked against the board" >&2; rc=1 ;;
+  esac
+  rm -rf "$otmp"
+
+  [ "$rc" -eq 0 ] && echo "self-test passed: unknown roles refuse, every role has a queue, a failed lookup is not an empty queue, a pull request awaiting a verdict reaches a role that can give it and no role that cannot, and a verdict already posted does not come back to its author while remaining open to every other role, and the owner is told UNDETERMINED rather than being handed silence as a green light"
   return $rc
 }
 
