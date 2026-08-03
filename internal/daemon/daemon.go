@@ -245,6 +245,7 @@ func (d *Daemon) Report() Report {
 		ControlDetail: d.controlDetail,
 		ControlSocket: d.control.Path(),
 		Model:         modelViewFor(d.opts.StorePath),
+		Extensions:    extensionsFor(d.opts.StorePath),
 	}
 	// The SAME function the CLI calls (criterion 23). Not a cached field: a cached one is a second
 	// answer, and a second answer goes stale.

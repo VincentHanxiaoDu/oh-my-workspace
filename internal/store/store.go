@@ -508,6 +508,56 @@ func (s *Store) List(kind Kind) ([]Record, error) {
 	return out, nil
 }
 
+// IDs returns the id of every completed record of a kind, ordered, WITHOUT decoding any of them.
+//
+// # WHY THIS EXISTS BESIDE List, WHICH ALREADY ENUMERATES
+//
+// [List] fails the whole call when any single record is unreadable, and that is right for most
+// callers: a listing that is quietly one short reads as complete, and silently skipping the damaged
+// one is how a person loses a record without being told.
+//
+// But it makes "one damaged record" and "no records at all" indistinguishable to a caller that
+// wants to report PER RECORD — and some callers must. Issue #21's extension inventory is required
+// to render an unreadable registration as one undetermined entry sitting beside the intact ones
+// (criterion 14), and to keep reporting the others when one is broken (criterion 11). Built on
+// [List] it could not: one bad checksum erased every registration, and the listing then printed
+// "every registered extension loaded" over an inventory it had failed to read.
+//
+// So this enumerates NAMES ONLY. It opens no record and parses none, so no record's contents can
+// fail it, and a caller pairs it with [Get] to decide what to do about each id on its own. The
+// choice between "fail the listing" and "degrade per record" then belongs to the caller, which is
+// where it belongs — this function takes neither side.
+//
+// A kind that has never been written is empty and DETERMINED, exactly as [List] treats it. A
+// directory that cannot be read at all is still an error: that is a failure to enumerate, not a
+// record-level problem, and no per-record degradation can rescue it.
+func (s *Store) IDs(kind Kind) ([]string, error) {
+	dir, err := s.kindDir(kind, "list")
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil // No record of this kind has ever been written. Empty, and determined.
+		}
+		if errors.Is(err, fs.ErrPermission) {
+			return nil, pathErr("list", dir, ErrPermissionDenied, err.Error())
+		}
+		return nil, pathErr("list", dir, ErrUnreadable, err.Error())
+	}
+	var out []string
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !isRecordFile(name) {
+			continue
+		}
+		out = append(out, name[:len(name)-len(recordSuffix)])
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
 // isRecordFile reports whether a directory entry is a completed record.
 //
 // The temporary prefix is excluded explicitly as well as by the suffix rule, so that a future change

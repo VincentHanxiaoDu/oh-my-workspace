@@ -29,6 +29,7 @@ import (
 	"errors"
 	"os"
 
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/extension"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/model"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/store"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri"
@@ -40,8 +41,28 @@ import (
 // disk. The agreement test between the CLI and the control API deliberately does NOT stub it: a
 // stub proves two renderers agree about a value, and only the real resolution proves they agree
 // about the person's machine.
+// ModelRegistry is the registry the control API resolves model-extension state from. Nil means
+// [extension.Default], which is what the product uses.
+//
+// It exists for the reason `channels.LoopRegistry` does: a test that must control exactly what this
+// machine offers cannot mutate [extension.Default] without making "what does this machine offer" a
+// statement about whichever test ran last, which is why [extension.Registry] is a value and not a
+// global. Nothing in the product sets it.
+var ModelRegistry *extension.Registry
+
 var modelViewFor = func(storeRoot string) model.View {
-	return modelConfigFor(storeRoot, os.Getenv).View()
+	cfg, s := modelConfigFor(storeRoot, os.Getenv)
+	// ViewOn AND NOT View: the adapter fact is about THIS MACHINE's registered extensions, not about
+	// what this build ships (Issue #21 criterion 10). It is given the SAME store modelConfigFor
+	// opened, so the configuration and the extension state are read from one machine in one moment;
+	// on the two arms below where there is no readable store, it is nil, and `extension.Read(nil, …)`
+	// answers with what this build offers, which is the honest answer when nothing can be registered.
+	//
+	// The two rules do not fight. `ViewOn` returns immediately unless a provider is CHOSEN, and the
+	// unreadable-store arm below reports the provider as undetermined precisely because it must not
+	// claim one — so an unreadable store never acquires an adapter sentence, and #68's three
+	// outcomes stay three.
+	return model.ViewOn(s, ModelRegistry, cfg)
 }
 
 // modelConfigFor keeps the THREE outcomes of [store.Open] as three (Issue #68).
@@ -58,18 +79,24 @@ var modelViewFor = func(storeRoot string) model.View {
 // "The rest of the Report already says the store is unreadable" was the argument for the old
 // shape, and it is not enough: a caller filtering for the model answer — which is exactly what an
 // agent API consumer does — gets the determined negative alone, with nothing beside it.
-func modelConfigFor(storeRoot string, getenv func(string) string) model.Config {
+//
+// IT RETURNS THE STORE IT OPENED, and that is not a convenience: the extension state Issue #21's
+// criterion 10 depends on must be read from the same store as the configuration. Returning it is
+// what keeps `store.Open` called ONCE — a second open here is a second chance for the two halves
+// of one answer to disagree, and it is the shape §3.14 forbids. It is nil on both arms where there
+// is no store to read, which is the same nil [model.Read] is given there.
+func modelConfigFor(storeRoot string, getenv func(string) string) (model.Config, *store.Store) {
 	if getenv == nil {
 		getenv = os.Getenv
 	}
 	s, err := store.Open(storeRoot)
 	switch {
 	case err == nil:
-		return model.Read(getenv, s)
+		return model.Read(getenv, s), s
 	case errors.Is(err, store.ErrNotFound):
 		// THERE IS NO STORE, WHICH THE FILESYSTEM ANSWERED. `omw model show` treats this the same
 		// way: nothing is recorded anywhere, so the environment alone is the configuration.
-		return model.Read(getenv, nil)
+		return model.Read(getenv, nil), nil
 	default:
 		// THE WORDS ARE THE CLI'S WORDS, NOT A SECOND VOCABULARY. internal/commands' modelStore
 		// prints these two sentences and exits 3; carrying them in the Config's Why puts them
@@ -84,6 +111,6 @@ func modelConfigFor(storeRoot string, getenv func(string) string) model.Config {
 			Credential: tri.Undetermined,
 			Why: "the store at " + storeRoot + " could not be read: " + err.Error() +
 				"\n  An unreadable store is not one with no model recorded in it.",
-		}
+		}, nil
 	}
 }
