@@ -17,6 +17,15 @@
 - [x] The undetermined field is PRESENT in both renderings — never omitted, never null-as-absent
 - [x] `UndeterminedStatistics` — a whole half that could not be computed, with one reason on every field
 
+## The identity door, and the scope of what could not be evaluated
+
+- [x] A request naming no identity is refused before anything is counted, in `Corpus.Statistics` and again in `StatisticsThrough`
+- [x] Driven with the SIZE CONTROL: a 5-note store and a 2-note store are indistinguishable to a caller who names nobody
+- [x] A grant whose holder is unset — the exported-struct zero value — refused rather than reaching the corpus
+- [x] The count of unevaluable notes restricted to the requested scope, so a scope holding none of the requester's material is indistinguishable from a genuinely empty one
+- [x] `--as` refused at the request for BOTH halves, before either is computed, matching what `--help` promises
+- [x] Both halves of one report name the same reader
+
 ## Partial determination
 
 - [x] Three independent determinacy rules, so some statistics are determined while others are not in one response
@@ -45,4 +54,4 @@
 
 ## Driven red
 
-- [x] Ten mutations applied, each confirmed RED naming the defect, each reverted; recorded in the pull request body
+- [x] Sixteen mutations applied, each confirmed RED naming the defect, each reverted; recorded in the pull request body

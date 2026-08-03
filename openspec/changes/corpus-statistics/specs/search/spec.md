@@ -71,9 +71,30 @@ SHALL be present in the output rather than omitted.
   not absent-in-a-way-that-parses-as-nothing, and does not suppress the rest of the response
 
 #### Scenario: An unevaluable note is not counted as absent
-- **WHEN** the corpus contains a note whose readability could not be determined at all
+- **WHEN** the corpus contains a note, WITHIN THE REQUESTED SCOPE, whose readability could not be
+  determined at all
 - **THEN** it is neither counted among the notes the requester may read nor silently dropped: it is
   reported separately and the affected statistics are undetermined
+
+#### Scenario: The separate report of unevaluable notes is itself scoped
+- **WHEN** the only notes whose readability could not be determined lie outside the requested scope
+- **THEN** the count of unevaluable notes for that scope is a determined zero, and the response is
+  indistinguishable from one over a scope in which no such note exists anywhere
+
+### Requirement: Statistics are computed for a named identity, and a request naming none is refused
+Corpus statistics SHALL be computed over one identity's readable set, and a request that names no
+identity SHALL be refused before any statistic is computed.
+
+#### Scenario: A request that names nobody
+- **WHEN** corpus statistics are requested without an identity, whether directly or through a grant
+  whose holder is unset
+- **THEN** the request is refused with the not-signed-in code, and no statistic — including any
+  count of notes that could not be evaluated — is returned
+
+#### Scenario: The refusal discloses nothing about corpus size
+- **WHEN** the same identity-less request is made against two corpora of different sizes
+- **THEN** the two responses are identical, so that nothing about how much exists is learned by
+  asking as nobody
 
 ### Requirement: Statistics are requestable at each of the three search scopes and no other
 Statistics SHALL be requestable at person, group and company scope, and a scope that is not one of
