@@ -201,9 +201,24 @@ func modelBindings(file *ast.File) (names map[string]bool, dot bool) {
 	return names, dot
 }
 
-// reviewDecisionSites names every top-level declaration under `root/internal` that states the
-// ordering rule, as "<package path>.<declaration>". `internal/model` is skipped: it DECLARES these,
-// and a package cannot bypass itself.
+// reviewDecisionSites names every top-level declaration in the module that states the ordering rule,
+// as "<package path>.<declaration>". `internal/model` ITSELF is skipped — it DECLARES these, and a
+// package cannot bypass itself — and the comparison is for EXACT DIRECTORY EQUALITY, not a prefix.
+//
+// A prefix skip was the sixth reach failure: `internal/model/plantedsub` declares nothing, is a
+// different package, imports `internal/model` like any other caller, and is therefore exactly the
+// caller this rule is about — yet a `HasPrefix(slash, "internal/model/")` skip stepped over the whole
+// subtree, and a bypass planted there built clean and went green. The skip's own stated reason did
+// not cover it.
+//
+// AND THE WALK STARTS AT THE MODULE ROOT, not at `internal`. `cmd/omw/main.go` is 21 lines of
+// dispatch today, but "the only place the next bypass can be" is wherever the guard is not looking,
+// and a walk rooted at `internal` was not looking at any of `cmd/`. Excluded from the walk, each for
+// a reason that is not a scope judgement:
+//
+//	*_test.go        — tests plant these deliberately, including this file's own fixtures
+//	dot-directories  — `.git`, `.github`, `.workflow`: not module source
+//	testdata/        — the go tool ignores it, and so does the compiler; it is not built
 //
 // It takes a root rather than reading the repository directly so the guard can be pointed at a tree
 // with a bypass planted in it — including a tree where the identifiers are spelled differently. A
@@ -218,9 +233,19 @@ func reviewDecisionSites(t *testing.T, root string) []string {
 	fset := token.NewFileSet()
 	var found []string
 
-	err := filepath.WalkDir(filepath.Join(root, "internal"), func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") {
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
 			return err
+		}
+		if d.IsDir() {
+			// Not module source: skip whole subtrees rather than filtering their files.
+			if name := d.Name(); path != root && (strings.HasPrefix(name, ".") || name == "testdata") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") {
+			return nil
 		}
 		// PRODUCT FILES ONLY, and not the package that declares the codes.
 		if strings.HasSuffix(path, "_test.go") {
@@ -228,7 +253,8 @@ func reviewDecisionSites(t *testing.T, root string) []string {
 		}
 		rel, _ := filepath.Rel(root, path)
 		slash := filepath.ToSlash(rel)
-		if strings.HasPrefix(slash, modelPkgSuffix+"/") {
+		// EXACT DIRECTORY, NOT PREFIX. `internal/model/anything` is a caller like any other.
+		if filepath.ToSlash(filepath.Dir(slash)) == modelPkgSuffix {
 			return nil
 		}
 		file, perr := parser.ParseFile(fset, path, nil, 0)
@@ -519,6 +545,83 @@ func answerDraft() error { return ErrNoModel }
 					"ordering rule in another package. Found: %v", tc.name, sites)
 			}
 		})
+	}
+}
+
+// THE TWO REACH EVASIONS THE PREVIOUS ROUND WENT GREEN ON. Both compiled, both built clean in this
+// repository, and both stated the rule in a package that is not the decider.
+//
+//	internal/model/plantedsub  — a package UNDER internal/model, skipped by a prefix that was one
+//	                             character too broad. It declares nothing; it is a caller.
+//	cmd/omw                    — outside `internal` entirely, where the walk did not start.
+//
+// These are separate cases and not a table entry apiece by accident: the first is about WHICH
+// directories are skipped, the second about WHERE the walk begins, and a fix to either alone leaves
+// the other open.
+func TestTheGuardReachesPackagesUnderModelAndOutsideInternal(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		path string
+		pkg  string
+		site string
+	}{
+		{
+			name: "a package under internal/model, which declares nothing and is a caller like any other",
+			path: filepath.Join("internal", "model", "plantedsub", "bypass.go"),
+			pkg:  "plantedsub",
+			site: "internal/model/plantedsub.PlantedReviewDecision",
+		},
+		{
+			name: "package main under cmd, outside internal entirely",
+			path: filepath.Join("cmd", "omw", "bypass.go"),
+			pkg:  "main",
+			site: "cmd/omw.PlantedReviewDecision",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := plantedTree(t, "ErrNoModel", "ErrProviderFailedToLoad")
+			write(t, filepath.Join(root, tc.path), `package `+tc.pkg+`
+
+import "example.test/internal/model"
+
+func PlantedReviewDecision(configured bool) error {
+	if !configured {
+		return model.ErrNoModel
+	}
+	return model.ErrProviderFailedToLoad
+}
+`)
+			sites := reviewDecisionSites(t, root)
+			if !contains(sites, "internal/commands."+theOneDecider) {
+				t.Fatalf("control failed: the guard did not see the decider, so its verdict on the "+
+					"bypass means nothing. Found: %v", sites)
+			}
+			if !contains(sites, tc.site) {
+				t.Errorf("THE GUARD DOES NOT REACH %s. It compiles, it builds clean, and it states the "+
+					"ordering rule outside the one decider. Found: %v", tc.site, sites)
+			}
+		})
+	}
+}
+
+// AND internal/model ITSELF IS STILL NOT BLAMED. The fix above narrows a skip; this is the thing the
+// skip is for, and it must survive the narrowing — a guard that blames the declaring package for
+// declaring is one somebody switches off.
+func TestTheGuardStillDoesNotBlameTheDeclaringPackageItself(t *testing.T) {
+	root := plantedTree(t, "ErrNoModel", "ErrProviderFailedToLoad")
+	write(t, filepath.Join(root, modelPkgSuffix, "helpers.go"), `package model
+
+func WhichRefusal(configured bool) error {
+	if !configured {
+		return ErrNoModel
+	}
+	return ErrProviderFailedToLoad
+}
+`)
+	for _, s := range reviewDecisionSites(t, root) {
+		if strings.HasPrefix(s, modelPkgSuffix+".") {
+			t.Errorf("the package that DECLARES the refusals was blamed for referencing them: %v", s)
+		}
 	}
 }
 
