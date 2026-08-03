@@ -387,10 +387,25 @@ type Report struct {
 	// written carefully on the same afternoon. An Entry has no field a credential could occupy
 	// (criterion 22).
 	//
-	// It is `omitempty`-free ON PURPOSE. A machine with no extensions at all sends `[]`, and a
-	// reader can tell that from a field the sender did not fill; dropping the key would make "this
-	// build ships nothing" and "this daemon predates extensions" the same wire.
-	Extensions []extension.Entry `json:"extensions"`
+	// It is `omitempty`-free ON PURPOSE. A machine with no extensions at all sends an empty
+	// listing, and a reader can tell that from a field the sender did not fill; dropping the key
+	// would make "this build ships nothing" and "this daemon predates extensions" the same wire.
+	//
+	// IT IS A Listing AND NOT A []Entry so that "these may not be all of them" crosses the wire
+	// with them. See extension_report.go: the two surfaces disagreed because this side dropped it.
+	Extensions extension.Listing `json:"extensions"`
+
+	// Auth is this machine's sign-in state, as one line (Issue #19 criterion 23, PRD §4.3).
+	//
+	// IT IS A STRING RATHER THAN A tri BECAUSE IT IS FOUR FACTS, NOT THREE: signed in, not signed
+	// in, no hub configured, and could not be determined. `internal/auth` owns the wording and both
+	// this report and the CLI take it from the same function — see authstate.go.
+	Auth string `json:"auth"`
+	// AuthCode is the stable machine-readable code behind Auth, so a script reading the control
+	// API tells "no hub configured" from "not signed in" without matching prose.
+	AuthCode string `json:"auth_code,omitempty"`
+	// AuthDetail says more. May be empty.
+	AuthDetail string `json:"auth_detail,omitempty"`
 }
 
 // wire fills the text fields from the tri values. Called on every path that produces a Report, so
@@ -517,7 +532,7 @@ func (r Report) WriteTo(w io.Writer) (int64, error) {
 	// as the model line above and for the same reason: this does not word a state here, it calls
 	// the one renderer `omw ext list` calls, so the CLI and the control API cannot describe one
 	// machine two ways. An extension.Entry has no field a credential could occupy (criterion 22).
-	n, err = fmt.Fprint(w, extension.Render(r.Extensions))
+	n, err = fmt.Fprint(w, r.Extensions.Render())
 	total += int64(n)
 	if err != nil {
 		return total, err
@@ -582,6 +597,7 @@ func Inspect(storeRoot string) Report {
 	rep.Extensions = extensionsFor(storeRoot)
 	rep.Healthy, rep.HealthDetail = healthFromDisk(running, rep.HealthDetail)
 	rep.Control, rep.ControlDetail = controlFromDisk(p, running, rec, err)
+	rep.Auth, rep.AuthDetail, rep.AuthCode = authStateFor(storeRoot)
 	rep.wire()
 	return rep
 }

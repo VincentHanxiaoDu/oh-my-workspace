@@ -247,6 +247,9 @@ func (d *Daemon) Report() Report {
 		Model:         modelViewFor(d.opts.StorePath),
 		Extensions:    extensionsFor(d.opts.StorePath),
 	}
+	// The SAME function the CLI calls (criterion 23). Not a cached field: a cached one is a second
+	// answer, and a second answer goes stale.
+	rep.Auth, rep.AuthDetail, rep.AuthCode = authStateFor(d.opts.StorePath)
 	switch ph {
 	case phaseHealthy:
 		rep.Healthy = tri.Yes
