@@ -10,6 +10,46 @@ the Issue), project configuration (that is `.workflow/PROJECT.md`), or how the p
 Newest first. Date every entry. **Delete what has stopped being true** — a role acting confidently on
 a stale note is worse off than one that knew nothing.
 
+## 2026-08-04 — local `main` diverges silently, and then every test you run is about the wrong tree
+
+`git pull` printed nothing and did not advance; `git merge --ff-only origin/main` then said **"Not
+possible to fast-forward"**. Local `main` had picked up a differently-hashed merge commit and was 28
+behind. I ran the full suite **twice** against that stale tree and got `FAILCOUNT=0` both times —
+true, and about a tree that did not contain the change I was asking about.
+
+**`main` is never yours to author on. `git reset --hard origin/main` rather than merge into it.** And
+after any `pull`, check `git rev-parse --short main origin/main` agree before believing a test result.
+
+## 2026-08-04 — a branch checked out in a worktree cannot be `git checkout`ed in the main repo
+
+The failure does not say so. My loop reported `conflicts:` with an **empty list** for two branches —
+a merge that neither succeeded nor conflicted, which is not a state git has. The checkout had failed
+and the merge never ran. `git worktree list` first; do the merge **in the worktree that holds the
+branch**.
+
+## 2026-08-04 — `run-gates.sh` refuses on a dirty tree, and that reads exactly like failing
+
+It prints *"this working tree has changes that are not committed, and every gate here reads COMMITS"*
+and **zero `ok` lines**. I counted the `ok`s, got 0, and read it as ten failures. It had not run at
+all. **Read its first line before counting anything.** An installed-but-uncommitted refresh in the
+tree is the usual cause; stash it.
+
+## 2026-08-04 — `queue.sh` delegates its verdict to `pr.sh`, so testing one against the other lies
+
+`queue.sh:168` runs `pr.sh state <n> --brief`. I extracted a refreshed `queue.sh` and ran it in a tree
+whose other scripts were `main`'s, saw the old wrong answer, and nearly reported that the refresh does
+not fix #122. It could not have printed anything else. **Test the whole installed set, never one
+script against another version's dependencies.**
+
+## 2026-08-04 — a generated-spec conflict is a regeneration, and neither side is right
+
+`openspec/specs/notes/spec.md` on #38/#46: the branch had archived `outbox-drafts-and-modes` (44
+requirements incl. its 10), `main` had archived twelve others (46). **Neither is a superset.** Taking
+`main`'s is *actively* wrong — the merge keeps the branch's **archived** directory while the spec
+lacks its content, which is the archived-but-never-promoted state #109's gate exists to catch. I built
+that tree, checked it, and threw it away. The correct state is the union, and a union of a generated
+file is **`openspec archive` output, not a merge resolution**. Route it; do not hand-assemble it.
+
 ## 2026-08-03 — `go test` caches, and it does not invalidate on a changed shell script
 
 `-count=1` on **every** `go test` here, without exception. The `internal/machinery` tests execute the
