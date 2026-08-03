@@ -13,4 +13,9 @@
 #
 # Blank lines and lines beginning with `#` are ignored.
 
-17c8f9c .workflow/bin/check-review.sh Upstreamed as agent-dev-flow aa8c730 and reinstalled; the installed file now matches the framework and no longer carries a local-only fix (Issue #58, "Related").
+# There are no entries today, and that is the healthy state.
+#
+# There was one: 17c8f9c over `.workflow/bin/check-review.sh`, the #52 fix. It was upstreamed as
+# agent-dev-flow aa8c730, and the refresh 1889abd has since landed over that file — so the framework
+# has spoken for it and the declaration became unnecessary while this branch was open. The check
+# said so, in as many words, and the line was removed. That is the loop working.
