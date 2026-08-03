@@ -155,17 +155,74 @@ func damage(t *testing.T, s *store.Store, kind store.Kind, id string) {
 	}
 }
 
-// A store that holds no activity at all is a QUIET DAY, not an undetermined one. The opposite
-// mistake to the test above, and just as easy to make.
-func TestAnEmptyStoreIsAQuietDayNotAnUndeterminedOne(t *testing.T) {
+// withProducedSubject adds a subject that something really writes, for the duration of one test.
+//
+// IT EXISTS BECAUSE NO SUBJECT IN THIS BUILD HAS A PRODUCER (Issue #67). "Read it, and there was
+// genuinely nothing" is a state the catalog cannot currently reach, and a distinction one side of
+// which is unreachable is a distinction no test can hold. The subject is added rather than the
+// catalog faked, so everything else about it — resolution, granularity, exclusion — is the real
+// thing.
+func withProducedSubject(t *testing.T, name string) {
+	t.Helper()
+	prev := catalog
+	catalog = append(append([]Subject(nil), catalog...), Subject{
+		Name: name, Root: true, Producer: "this test", About: "a subject something writes",
+	})
+	t.Cleanup(func() { catalog = prev })
+}
+
+// A store that holds no activity FOR A SUBJECT SOMETHING WRITES is a QUIET DAY, not an undetermined
+// one. The opposite mistake to the test above, and just as easy to make.
+func TestAnEmptyStoreIsAQuietDayForASubjectSomethingWrites(t *testing.T) {
+	withProducedSubject(t, "watched")
 	s := newStore(t)
-	r := Build(mustParse(t, "git:count"), StoreSource{Store: s})
+	r := Build(mustParse(t, "watched:count"), StoreSource{Store: s})
 	out := r.Render()
 	if !r.Determined() {
-		t.Errorf("an empty store reported as undetermined:\n%s", out)
+		t.Errorf("an empty store reported as undetermined for a subject something writes:\n%s", out)
 	}
 	if !strings.Contains(out, noActivityLine) {
 		t.Errorf("an empty store did not report a quiet day:\n%s", out)
+	}
+}
+
+// ISSUE #67, BLOCKER 1, AT THE SOURCE: the SAME empty store answers differently for a subject
+// nothing writes, and the two renderings do not overlap.
+func TestAnEmptyStoreIsUndeterminedForASubjectNothingWrites(t *testing.T) {
+	withProducedSubject(t, "watched")
+	s := newStore(t)
+	produced := Build(mustParse(t, "watched:count"), StoreSource{Store: s})
+	unproduced := Build(mustParse(t, "git:count"), StoreSource{Store: s})
+
+	if _, err := (StoreSource{Store: s}).Activity("git"); !errors.Is(err, ErrNoProducer) {
+		t.Errorf("Activity(git) on an empty store = %v, want ErrNoProducer", err)
+	}
+	if unproduced.Determined() {
+		t.Errorf("a subject nothing writes is reported as determined:\n%s", unproduced.Render())
+	}
+	if strings.Contains(unproduced.Render(), noActivityLine) {
+		t.Errorf("a subject nothing writes is reported as a quiet period:\n%s", unproduced.Render())
+	}
+	// Same store, same granularity, same emptiness — two different answers, because the two
+	// questions are different.
+	if strings.TrimPrefix(produced.Render(), "watched") == strings.TrimPrefix(unproduced.Render(), "git") {
+		t.Errorf("a quiet day and an unobserved subject render alike:\n%s", produced.Render())
+	}
+}
+
+// AND RECORDS PRESENT STILL WIN. If something does write activity for a subject the catalog
+// believes has no producer, the report is about what is there.
+func TestActivityPresentOutranksTheCatalogsBelief(t *testing.T) {
+	s := newStore(t)
+	if err := WriteActivity(s, Item{ID: "c1", Subject: "git", Kind: "commit", Text: "a real commit"}); err != nil {
+		t.Fatalf("WriteActivity: %v", err)
+	}
+	r := Build(mustParse(t, "git:full"), StoreSource{Store: s})
+	if !r.Determined() {
+		t.Errorf("a subject with real records is reported as undetermined:\n%s", r.Render())
+	}
+	if !strings.Contains(r.Render(), "a real commit") {
+		t.Errorf("the report does not carry the activity that is there:\n%s", r.Render())
 	}
 }
 

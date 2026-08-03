@@ -70,6 +70,12 @@ var (
 // in for "I could not look".
 const marker = ".omw-outbox"
 
+// MarkerName is [marker], for the one caller outside this package that must tell "there is no
+// outbox here" from "the outbox is here and would not be read" before [Open] folds both into its
+// no-outbox refusal. Exported rather than respelled, because a second copy of this name is how a
+// reader and a writer end up looking at two different files.
+const MarkerName = marker
+
 // revisionSuffix is the extension every revision file carries.
 const revisionSuffix = ".body"
 

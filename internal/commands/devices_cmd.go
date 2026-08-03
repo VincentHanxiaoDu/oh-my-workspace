@@ -2,16 +2,17 @@
 // store (PRD §3.8).
 //
 // THE EXIT CODES ARE THREE FACTS, NOT TWO. This command can end in three genuinely different
-// places and the Issue asks for all three to be told apart without reading prose:
+// places and they are told apart without reading prose:
 //
 //	0  the listing is this person's whole inventory and every check-in state was determined
-//	1  the listing is KNOWN to be partial (no hub configured), or a registration was refused
-//	3  something could not be determined — a check-in state, the hub's reachability, or whether
-//	   the control API's socket is owner-only
+//	3  the screen was produced and something on it could not be established — the machines
+//	   registered on this person's other devices (no hub configured, or a hub that did not
+//	   answer), a check-in state, or whether the control API's socket is owner-only
+//	1  the command could not do what was asked — a registration was refused, or the inventory
+//	   could not be read at all and no listing was printed
 //
-// 1 and 3 are the project's standing rule applied to a listing: "this list is missing your other
-// machines and I know it" and "I could not tell whether this list is missing anything" are
-// different answers, and a script must not have to parse a sentence to tell them apart.
+// ISSUE #67 MOVED THE PARTIAL LISTING FROM 1 TO 3. See devicesCode for why, and for what was
+// given up.
 //
 // This file is the only file this Issue adds to package commands and it references nothing else in
 // it, so it never appears in another Issue's diff.
@@ -212,15 +213,27 @@ func devicesList(env cli.Env, f devicesFlags) int {
 	return devicesCode(snap)
 }
 
-// devicesCode is where the three endings are decided, and the order is the rule: an UNDETERMINED
-// anything outranks a determined incompleteness, because "I could not tell" must never be scripted
-// as the weaker, known fact.
+// devicesCode is where the endings are decided.
+//
+// ISSUE #67, BLOCKER 3. A partial listing used to exit ExitFailure, and that was wrong: the listing
+// was produced, every device on it is real, and 1 means "the command could not do what was asked".
+// Every script that treats non-zero as failure therefore reported a healthy device list as broken.
+// A listing that is not the person's whole inventory is the shape ExitUndetermined exists for —
+// `omw status --help` spells it out ("3 — the screen was produced and something on it could not be
+// determined") and `references scan` already uses 3 for exactly this partial answer.
+//
+// SO "KNOWN PARTIAL" AND "COULD NOT TELL" NOW SHARE 3, AND THAT IS DELIBERATE. Issue #17 split them
+// 1 and 3. The split was between two answers that a SCRIPT acts on identically — in both cases
+// there are machines this run cannot account for — and it bought that distinction by spending the
+// failure code on a command that succeeded. They remain distinguishable where the distinction is
+// actually read: the `listing complete:` line and the `missing:` lines say which of the two this
+// is, and a test asserts those renderings still differ.
+//
+// ExitFailure is left to this command's real refusals — a registration that was refused, an
+// inventory that could not be read at all and so printed no listing.
 func devicesCode(snap devices.Snapshot) int {
-	if snap.AnyUndetermined() {
+	if snap.Complete != tri.Yes || snap.AnyUndetermined() {
 		return cli.ExitUndetermined
-	}
-	if snap.Complete != tri.Yes {
-		return cli.ExitFailure
 	}
 	return cli.Success
 }

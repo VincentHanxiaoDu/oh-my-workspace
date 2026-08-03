@@ -331,27 +331,42 @@ func TestWithNoHubTheListingSaysWhatIsMissingAndExitsNonZero(t *testing.T) {
 	}
 }
 
-// An unreachable hub and a missing hub must not share an exit code: one is "I know this is
-// partial", the other is "I could not tell". That is the project's standing rule, applied here.
-func TestKnownPartialAndCouldNotTellDoNotShareAnExitCode(t *testing.T) {
+// An unreachable hub and a missing hub must not read alike: one is "I know this is partial", the
+// other is "I could not tell". That is the project's standing rule, applied here.
+//
+// ISSUE #67 CHANGED WHERE THE DISTINCTION LIVES. It used to be exit 1 versus exit 3, and #67's UAT
+// on `main` established that spending the FAILURE code on a listing that was produced makes every
+// script treating non-zero as failure call a healthy inventory broken. Both now exit 3, and the
+// distinction is asserted where it is actually read — the `listing complete:` line and the
+// `missing:` line, which must not collapse into one another.
+func TestKnownPartialAndCouldNotTellDoNotReadAlike(t *testing.T) {
 	noHub := devicesEnv(t, nil)
 	registerVia(t, noHub, "laptop", "store-A")
-	knownPartial, _, _ := runDevices2(t, noHub, "list")
+	knownPartial, knownOut, _ := runDevices2(t, noHub, "list")
 
 	unreachable := devicesEnv(t, map[string]string{"OMW_HUB": "https://hub.example"})
 	registerVia(t, unreachable, "laptop", "store-A")
 	// devicesDial is left at this build's real default: no transport, so a configured hub is
 	// unreachable.
-	couldNotTell, _, _ := runDevices2(t, unreachable, "list")
+	couldNotTell, couldNotOut, _ := runDevices2(t, unreachable, "list")
 
 	if knownPartial == cli.Success || couldNotTell == cli.Success {
 		t.Fatalf("one of the two incomplete listings exited 0 (%d, %d)", knownPartial, couldNotTell)
 	}
-	if knownPartial == couldNotTell {
-		t.Fatalf("'this list is known to be partial' and 'whether it is partial could not be determined' both exit %d", knownPartial)
+	if knownPartial != cli.ExitUndetermined {
+		t.Errorf("a no-hub listing exits %d, want ExitUndetermined (%d)", knownPartial, cli.ExitUndetermined)
 	}
 	if couldNotTell != cli.ExitUndetermined {
 		t.Errorf("an unreachable hub exits %d, want ExitUndetermined (%d)", couldNotTell, cli.ExitUndetermined)
+	}
+	if knownOut == couldNotOut {
+		t.Fatalf("'this list is known to be partial' and 'whether it is partial could not be determined' render identically:\n%s", knownOut)
+	}
+	if !strings.Contains(knownOut, "listing complete: no") {
+		t.Errorf("the known-partial listing does not report a DETERMINED incompleteness:\n%s", knownOut)
+	}
+	if !strings.Contains(couldNotOut, "listing complete: "+tri.Undetermined.String()) {
+		t.Errorf("the unreachable-hub listing does not report an UNDETERMINED completeness:\n%s", couldNotOut)
 	}
 }
 
@@ -619,8 +634,8 @@ func TestAnUnestablishableDaemonIsSaidAndTheListingIsNotCalledComplete(t *testin
 // which is what makes their exit codes meaningful — but that is invisible, and a future change that
 // made it answer Undetermined in a sandbox would silently reroute all of them onto the undetermined
 // exit code while they carried on passing. This pins the assumption: in a sandbox with no daemon,
-// the product's one answer is a DETERMINED negative, so a no-hub listing's exit 1 is the
-// known-partial code and not an undetermined one wearing it.
+// the product's one answer is a DETERMINED negative, so a no-hub listing's exit 3 is the missing
+// hub half speaking and not an unestablishable daemon wearing it.
 func TestTheDevicesListingUsesTheProductsRealLivenessAnswer(t *testing.T) {
 	env := devicesEnv(t, nil)
 	live, why := daemonLiveness(cli.Env{Getenv: func(k string) string { return env[k] }})
@@ -632,9 +647,15 @@ func TestTheDevicesListingUsesTheProductsRealLivenessAnswer(t *testing.T) {
 	}
 	registerVia(t, env, "laptop", "store-A")
 	code, out, _ := runDevices2(t, env, "list")
-	if code != cli.ExitFailure {
-		t.Errorf("a no-hub listing with a determinedly-stopped daemon exited %d, want ExitFailure (%d) — "+
-			"the KNOWN-partial code, not the undetermined one:\n%s", code, cli.ExitFailure, out)
+	if code != cli.ExitUndetermined {
+		t.Errorf("a no-hub listing with a determinedly-stopped daemon exited %d, want ExitUndetermined (%d):\n%s",
+			code, cli.ExitUndetermined, out)
+	}
+	// The point this test pins is unchanged by #67: the DETERMINED negative from the product's one
+	// liveness answer must be visible in the rendering, so a sandbox that silently started
+	// answering Undetermined cannot pass as this case.
+	if !strings.Contains(out, "daemon: not running") {
+		t.Errorf("the listing does not report the determined 'not running' the check above pinned:\n%s", out)
 	}
 }
 

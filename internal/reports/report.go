@@ -19,6 +19,12 @@ const (
 	StateUndetermined
 	// StateNoHub: the subject is supplied by a hub and no hub is configured (criterion 23).
 	StateNoHub
+	// StateNoProducer: nothing in this build writes activity for the subject, so its emptiness is a
+	// fact about this client and not about the period (Issue #67, Blocker 1). It is NOT
+	// StateNoActivity, which is a determined quiet day, and it is not StateUndetermined, which is a
+	// subject that could not be read — this one was read perfectly well and there was never
+	// anything to read.
+	StateNoProducer
 )
 
 // SubjectReport is one subject's line in a report.
@@ -137,6 +143,10 @@ func Build(sels []Selector, src Source) Report {
 	for i := range subjects {
 		items, err := src.Activity(subjects[i].Subject)
 		switch {
+		case errors.Is(err, ErrNoProducer):
+			subjects[i].State = StateNoProducer
+			subjects[i].Reason = err.Error()
+			continue
 		case errors.Is(err, ErrNoHubConfigured):
 			subjects[i].State = StateNoHub
 			subjects[i].Reason = err.Error()
@@ -176,9 +186,13 @@ func excludedSet(sels []Selector) map[string]bool {
 }
 
 // Determined reports whether every subject in the report was established one way or the other.
+//
+// StateNoProducer IS NOT DETERMINED. A subject nobody writes has not been established to be empty;
+// it has not been established at all. This is what carries Issue #67's Blocker 1 into the exit code
+// a script reads, and it is why the two states are separate rather than one "nothing here".
 func (r Report) Determined() bool {
 	for _, s := range r.Subjects {
-		if s.State == StateUndetermined {
+		if s.State == StateUndetermined || s.State == StateNoProducer {
 			return false
 		}
 	}
@@ -203,6 +217,11 @@ func (r Report) HasMissingHub() bool {
 // into the shape of another.
 const (
 	noActivityLine   = "no activity in this period"
+	// noProducerLine does NOT contain the words "no activity": the difference between it and the
+	// line above is the whole of Issue #67's Blocker 1, and a rewording of one into the shape of
+	// the other puts it straight back.
+	noProducerLine = "could not be determined: nothing in this build produces activity for this subject, " +
+		"so this is not a quiet period — it is a subject nobody has ever observed"
 	undeterminedLine = "could not be determined: this subject was not read, so it is neither empty nor full"
 	unmatchedPrefix  = "unmatched selector"
 )
@@ -226,6 +245,9 @@ func (r Report) Render() string {
 			if s.Reason != "" {
 				fmt.Fprintf(&b, "  reason: %s\n", s.Reason)
 			}
+		case StateNoProducer:
+			fmt.Fprintf(&b, "  %s\n", noProducerLine)
+			fmt.Fprintf(&b, "  when something starts writing this subject, this line becomes a real answer either way\n")
 		case StateNoHub:
 			fmt.Fprintf(&b, "  %s\n", ErrNoHubConfigured.Error())
 			fmt.Fprintf(&b, "  this is not an emptiness and not an unknown subject: nothing has been established here\n")
