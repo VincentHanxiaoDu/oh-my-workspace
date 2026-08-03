@@ -1047,12 +1047,30 @@ func TestChoosingAChannelAdapterAsAModelIsNotReportedAsLoaded(t *testing.T) {
 				name, code, out.String(), errb.String())
 		}
 
-		var sout, serr bytes.Buffer
-		cli.Run([]string{"model", "show"}, &sout, &serr, func(k string) string { return env[k] })
-		all := sout.String() + serr.String()
-		if strings.Contains(all, "is configured, with a credential") {
-			t.Errorf("`omw model show` reports a working model configuration when what is "+
-				"registered under that name is a CHANNEL ADAPTER:\n%s", all)
+		// THE ASSERTION IS ON Readiness, READING THE STORE THOSE TWO COMMANDS JUST WROTE.
+		//
+		// An earlier version asserted on `omw model show`'s output and STAYED GREEN under the
+		// mutation — `model show` renders `View.Render`, which asks Issue #18's own registry and
+		// never consults Readiness, so it was answering a different question honestly. The
+		// reachability this subtest is for is real; the assertion has to be on the thing that
+		// misreports. `omw outbox` under review mode is the surface that consumes Readiness, and it
+		// reaches it through this same call.
+		st, err := extensionOpenStoreQuietly(cli.Env{Getenv: func(k string) string { return env[k] }})
+		if err != nil {
+			t.Fatalf("opening the store those commands wrote: %v", err)
+		}
+		view := model.Read(func(k string) string { return env[k] }, st).View()
+		if view.Provider != name {
+			t.Fatalf("`omw model use %s` did not record the choice (provider is %q), so this "+
+				"assertion examines nothing", name, view.Provider)
+		}
+		answer := model.Readiness(st, extensionRegistry, view)
+		if answer.Situation == model.SituationReady {
+			t.Errorf("after two documented commands, the product reports a working model:\n%s\n"+
+				"What is registered under that name is a CHANNEL ADAPTER.", answer.Reason)
+		}
+		if strings.Contains(answer.Reason, "its extension loaded") {
+			t.Errorf("it claims the provider's extension loaded:\n%s", answer.Reason)
 		}
 	})
 
@@ -1080,19 +1098,28 @@ func TestChoosingAChannelAdapterAsAModelIsNotReportedAsLoaded(t *testing.T) {
 			func(k string) string { return env[k] }); code != cli.Success {
 			t.Fatalf("`omw model use %s` exited %d\n%s%s", name, code, out.String(), errb.String())
 		}
-		// Asserted through the command, against the store this invocation actually uses. An
-		// earlier version of this passed a nil store to extension.Read and failed because the
+		// Asserted on Readiness, against the store these commands actually wrote — the same
+		// discipline as the arm above, and for the same reason: an assertion on `omw model show`
+		// does not exercise the lookup being controlled for, so it would stay green when the
+		// interface check breaks the case it exists to protect.
+		//
+		// An earlier version also passed a nil store to extension.Read and failed because the
 		// registration was invisible — a test bug that looked exactly like the product bug it was
 		// meant to rule out.
+		st, err := extensionOpenStoreQuietly(cli.Env{Getenv: func(k string) string { return env[k] }})
+		if err != nil {
+			t.Fatalf("opening the store those commands wrote: %v", err)
+		}
+		view := model.Read(func(k string) string { return env[k] }, st).View()
+		answer := model.Readiness(st, extensionRegistry, view)
+		if answer.Situation == model.SituationExtensionFailedToLoad {
+			t.Fatalf("a genuine model provider, registered through model.Register, is reported as "+
+				"having no working extension; the interface check has broken the case it was "+
+				"supposed to protect:\n%s", answer.Reason)
+		}
 		var sout, serr bytes.Buffer
 		cli.Run([]string{"model", "show"}, &sout, &serr, func(k string) string { return env[k] })
-		all := sout.String() + serr.String()
-		if strings.Contains(all, "no extension for it is registered") ||
-			strings.Contains(all, "no model-provider extension for it is registered") {
-			t.Fatalf("a genuine model provider is reported as having no registered extension; the "+
-				"interface check has broken the case it was supposed to protect:\n%s", all)
-		}
-		if strings.Contains(all, "has no adapter for") {
+		if all := sout.String() + serr.String(); strings.Contains(all, "has no adapter for") {
 			t.Fatalf("a registered model provider is reported as having no adapter:\n%s", all)
 		}
 	})

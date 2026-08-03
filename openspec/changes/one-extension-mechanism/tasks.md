@@ -96,6 +96,22 @@
 - [x] Drive criterion 22's bundle clause against a REAL bundle now that `internal/diagnostics` has
       landed on main, walking every file with `--include-bodies`
 
+## Review round 3 — a channel adapter satisfied the model-provider check
+
+- [x] Add `extension.FindAs`, which takes the interface as a parameter a caller cannot forget rather
+      than leaving it a check a caller must remember
+- [x] Report an extension of the right name and the WRONG interface as not registered — as the thing
+      that was asked for, it is not — and SAY so, because "no such provider" sends somebody who has
+      registered it hunting for a typo
+- [x] Point `model.Readiness` at it, so `omw ext register slack` + `omw model use slack` no longer
+      reports "the model provider slack is chosen and its extension loaded"
+- [x] Point `channels.ExtensionFactory` at it too: the type assertion already caught the inverse,
+      but only after resolving it to Loaded and with a sentence describing something else
+- [x] Keep `Find`'s by-name behaviour for `omw ext show`, where describing whatever is registered
+      under a typed name is right, and document which callers want which
+- [x] Carry the entry's own detail into `Readiness`'s answer, so a person who registered a channel
+      adapter is not told to run `omw ext register` on the thing they already registered
+
 ## Driven red on purpose
 
 - [x] A failed-to-load adapter returning a working-looking empty adapter — red: "the broken channel
@@ -124,3 +140,10 @@
       \"may not be all of them\", which the CLI printed"
 - [x] `omw ext show` answering not-registered from a failed enumeration — red: "exit 0 for a name
       looked up in an inventory that could not be enumerated"
+- [x] `model.Readiness` back to `Find` (by name alone) — red with QA's own sentence: "a CHANNEL
+      ADAPTER satisfied the model-provider check: the model provider slack is chosen, its extension
+      loaded, and a credential is supplied"
+- [x] `FindAs` matching any interface — red in both packages
+- [x] `FindAs` never matching — red on the CONTROL arm: "a genuine model provider of the same name
+      is 3, want SituationReady … the interface check has broken the case it was supposed to
+      protect", so the repair is pinned in both directions rather than the lookup merely broken

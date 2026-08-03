@@ -158,6 +158,25 @@ refused.
 - **WHEN** a registration is refused for any reason
 - **THEN** no record of it exists afterwards
 
+### Requirement: An extension satisfies only the interface it implements
+The product SHALL resolve an extension by name AND by interface wherever the answer depends on which
+interface is meant. An extension registered under one interface SHALL NOT satisfy a question asked
+about the other, and where a name resolves to the other interface the report SHALL say so rather
+than reporting the name as absent.
+
+#### Scenario: A channel adapter is chosen as a model provider
+- **WHEN** a person registers a channel adapter and then chooses that name as their model provider
+- **THEN** the product does not report that a model provider's extension loaded, and it says that
+  what is registered under that name implements the channel adapter interface
+
+#### Scenario: A model provider is chosen as a model provider
+- **WHEN** a person registers a model provider and then chooses that name as their model provider
+- **THEN** the product reports it as ready
+
+#### Scenario: An extension is asked about without regard to interface
+- **WHEN** a person asks to see whatever is registered under a name
+- **THEN** the extension registered under that name is described, whichever interface it implements
+
 ### Requirement: An incomplete reading of the inventory is never reported as a complete one
 The product SHALL report an extension whose registration record cannot be read as one undetermined
 entry beside the extensions it could read, and SHALL NOT drop the others. Where the set of
