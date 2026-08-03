@@ -270,10 +270,19 @@ func extensionList(env cli.Env, args []string) int {
 //   - At least one FAILED: the question "did every registered extension load?" has been ANSWERED,
 //     and the answer is no. A determined negative is a successful determination of a failure, and
 //     it exits ExitFailure — not ExitUndetermined, which would say we did not find out.
-//   - Otherwise at least one UNDETERMINED: nothing failed, and we cannot claim everything loaded
-//     either. ExitUndetermined. This branch is second, not first, because a tree containing a
-//     known failure has a known answer whatever else is fuzzy.
+//   - Otherwise at least one UNDETERMINED, OR THE INVENTORY WAS NOT WHOLLY READ: nothing failed,
+//     and we cannot claim everything loaded either. ExitUndetermined. This branch is second, not
+//     first, because a tree containing a known failure has a known answer whatever else is fuzzy.
 //   - Otherwise Success.
+//
+// AN INCOMPLETE READ IS PART OF THE SECOND BRANCH, AND LEAVING IT OUT WAS THE DEFECT. `Incomplete`
+// says the ENUMERATION failed — there may be registered extensions no entry here stands for — so
+// zero failures and zero undetermined entries is not evidence that every registered extension
+// loaded, it is evidence about the ones we managed to see. `extensionSaySummary` had already been
+// taught this and the exit code had not, so `omw ext list` printed "could not be determined" over a
+// `$?` of 0: a healthy machine and a machine whose registry cannot be enumerated were
+// indistinguishable to the script criterion 12 exists for. That is `could not determine` and
+// `determined to be nothing` sharing an exit code, which is the rule this comment opens with.
 //
 // Not-registered entries count towards none of these; see `extension.Summary.AllLoaded`.
 func extensionExitFor(sum extension.Summary) int {
@@ -281,7 +290,7 @@ func extensionExitFor(sum extension.Summary) int {
 	case sum.Failed > 0:
 		return cli.ExitFailure
 
-	case sum.Undetermined > 0:
+	case sum.Undetermined > 0 || sum.Incomplete != "":
 		return cli.ExitUndetermined
 	default:
 		return cli.Success

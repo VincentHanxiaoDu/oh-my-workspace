@@ -164,3 +164,20 @@
 - [x] `LoopFactory` back to `= Builtin` — red: "`omw channels list` does not say the registered
       teams adapter FAILED TO LOAD … last attempt: COULD NOT BE REACHED: this build has no transport
       for Microsoft Teams", in both new tests
+
+## Review round 5 — the summary said undetermined and `$?` said success
+
+- [x] Consult `Summary.Incomplete` in `extensionExitFor`, which counted entries only: an inventory
+      that could not be ENUMERATED has no entries to count, so every count was zero and a machine
+      whose registry cannot be read exited 0 exactly as a healthy one does. The prose half had
+      already been taught this and the exit code had not
+- [x] Check for a second switch of that shape: `extensionExitFor` is the one exit-code function for
+      `list`, `show` and `register` alike, and the prose switch already reaches `Incomplete` through
+      the guard above it, so there is no second edit to make. Verified by driving the mutation —
+      the prose said "could not be determined" while `$?` was 0
+- [x] Add the `list` equivalent of `TestShowDoesNotClaimNotRegisteredWhenTheInventoryCouldNotBe
+      Enumerated`, with the healthy machine taken FIRST as the control, so a build that returned 3
+      unconditionally cannot pass it
+- [x] `extensionExitFor` back to `case sum.Undetermined > 0:` — red: "`omw ext list` exited 0 — THE
+      SAME CODE A HEALTHY MACHINE EXITS — over an inventory it could not enumerate", and "exit 0,
+      want 3"

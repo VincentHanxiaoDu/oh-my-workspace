@@ -818,6 +818,59 @@ func TestADamagedRecordAloneIsUndeterminedAndNotSuccess(t *testing.T) {
 	}
 }
 
+// `omw ext list` must not exit 0 from an inventory it could not ENUMERATE.
+//
+// THE DAMAGED-RECORD CASE ABOVE DOES NOT COVER THIS ONE. There, the enumeration succeeded and one
+// record inside it did not, so `Summary.Undetermined` is non-zero and the exit code follows from
+// counting entries. Here the ENUMERATION ITSELF fails: there are no entries to count, every count
+// is zero, and only `Summary.Incomplete` carries the fact. The prose had been taught to consult it
+// and `extensionExitFor` had not — so this machine and a healthy one both exited 0, which is
+// `could not determine` and `determined to be nothing` sharing an exit code.
+//
+// Modelled on TestShowDoesNotClaimNotRegisteredWhenTheInventoryCouldNotBeEnumerated, which asserts
+// the same state for the sibling subcommand.
+func TestListDoesNotExitSuccessWhenTheInventoryCouldNotBeEnumerated(t *testing.T) {
+	xtRegistry(t, xtFake{name: "someext", iface: extension.Channel})
+	env := xtWorld(t)
+	mustExt(t, env, "register", "someext")
+
+	// THE CONTROL, TAKEN FIRST, and it is what makes this load-bearing: a healthy machine exits 0.
+	// Without it, a build that returned 3 unconditionally would pass everything below.
+	if healthy := runExtCmd(t, env, "list"); healthy.code != cli.Success {
+		t.Fatalf("a healthy registry exited %d, want %d — the fixture is wrong before the "+
+			"interesting case starts\n%s", healthy.code, cli.Success, healthy.all())
+	}
+
+	dir := filepath.Join(env[store.PathEnv], "records", "extension")
+	if err := os.Chmod(dir, 0o000); err != nil {
+		t.Skipf("cannot make the directory unreadable here: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	got := runExtCmd(t, env, "list")
+	// The fixture is checked: if the directory is still readable, everything below passes for the
+	// wrong reason.
+	if !strings.Contains(got.all(), "may not be all of them") {
+		t.Skipf("the registrations directory is still readable (running as root?), so this test "+
+			"would prove nothing:\n%s", got.all())
+	}
+
+	if got.code == cli.Success {
+		t.Errorf("`omw ext list` exited %d — THE SAME CODE A HEALTHY MACHINE EXITS — over an "+
+			"inventory it could not enumerate, while its own output says the answer could not be "+
+			"determined. A script reading $? cannot tell 'every registered extension loaded' from "+
+			"'I could not find out', which is the one thing criterion 12 asks of this exit code, "+
+			"and it must not have to parse the prose to do it:\n%s", got.code, got.all())
+	}
+	if got.code != cli.ExitUndetermined {
+		t.Errorf("exit %d, want %d — a failure to READ the inventory is not a determined report "+
+			"that an extension failed to load\n%s", got.code, cli.ExitUndetermined, got.all())
+	}
+	if !strings.Contains(got.all(), "could not be determined") {
+		t.Errorf("nothing in the output says the inventory could not be determined:\n%s", got.all())
+	}
+}
+
 // `omw ext show` must not answer "not registered" from an inventory it could not ENUMERATE.
 //
 // `Find` answers not-registered for a name it did not see. Over a complete inventory that is a
