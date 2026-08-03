@@ -10,6 +10,40 @@ the Issue), project configuration (that is `.workflow/PROJECT.md`), or how the p
 Newest first. Date every entry. **Delete what has stopped being true** — a role acting confidently on
 a stale note is worse off than one that knew nothing.
 
+## 2026-08-03 — a verdict posted while the gates run is in flight is SILENTLY DROPPED
+
+The `issue_comment` recheck tries to re-run the review job, GitHub answers **`HTTP 403 — already
+running`**, the recheck exits 1, and nothing retries or announces it. The verdict sits unread while
+the pull request reports `No current review by an independent agent` — *nobody has looked*.
+
+**It bites hardest when a reviewer is prompt**, since the sooner they answer after a push, the
+likelier the gates run is still going. So: **after a reviewer reports, confirm their verdict is in
+force** — `./.workflow/bin/pr.sh state <n>` — and if the board says no review exists while a verdict
+sits in the comments, re-run the review job rather than asking them to repost.
+
+## 2026-08-03 — before believing a red gate, READ THE LOG. It answers in one line.
+
+On one single-file pull request I diagnosed the red wrong **three times running** and the log had it
+each time. Two traps behind that:
+
+**Check runs attach to the COMMIT, not the branch.** So a red can be inherited from a *different,
+already-closed* pull request that shared the sha, and renaming the branch does not clear it — only
+moving the sha does. That one is invisible from the pull request you are looking at, which is why it
+cost three wrong guesses.
+
+Read it with `gh run view <id> --log | grep '::error'`. The gates here state their remedy in the
+failure text, so the log is not a hint — it is the answer.
+
+## 2026-08-03 — once you dispatch a reviewer, the head is NOT yours to move
+
+Four amends on a one-file change, and the last force-pushed over the exact sha the reviewer had
+reviewed. Their refusal became unplaceable and #98's guard red-lined the whole pull request:
+*"a verdict … names sha(s) that are not the head and not any commit this repository knows."*
+
+**Fix the branch before you ask.** Every push after that costs them a round and can destroy work
+already done. Useful distinction the gate draws if it happens anyway: an **unknown** sha is a verdict
+never in force; a **known** sha is merely a stale review, which is silent and fine.
+
 ## 2026-08-03 — the working clone is SHARED. `git stash` there sweeps up other roles' work.
 
 `/Users/hanxiao.du/Desktop/vincent/projects/oh-my-workspace` is not yours alone. It routinely
@@ -34,23 +68,20 @@ stale merge whose tree genuinely differs from origin's — it has been, on `.wor
 the worst place for it because those are the scripts every role then runs. Fetch and branch from the
 remote ref, and the question never arises.
 
-## 2026-08-03 — `queue.sh` does not know what "mergeable" means. Never merge on its say-so alone.
+## 2026-08-03 — a green in a listing is not a green on this head
 
-It listed **#87 as `GREEN` under `PULL REQUESTS TO UAT, MERGE AND CLOSE`** while GitHub said
-`mergeable: false, mergeable_state: dirty`. A conflicted pull request has no merge ref, so no gate
-ever scheduled — the green belonged to an older head. It renders conflicted-but-untested PRs as
-`NO ANSWER YET`, which invites waiting that can never resolve.
+`queue.sh` offered **#87 for merge showing `GREEN`** while GitHub reported `mergeable: false,
+mergeable_state: dirty`. Filed as #122 — delete this entry when that closes.
 
-**Before merging anything, run `./.workflow/bin/pr.sh state <n>`** — it gets this right and says so
-in words (*"waiting cannot resolve it"*). `watch-prs.sh` also gets it right. Only the queue does not.
-Filed as #122; delete this entry when that closes.
+**Check the head before you merge: `./.workflow/bin/pr.sh state <n>`.** What makes it trustworthy is
+that it anchors every read to the **current head sha** — `commits/$sha/check-runs` and
+`commits/$sha/status` — so a stale green sitting on an older head simply is not on this one, and it
+reports `NOTHING HAS REPORTED on this head yet. That is not a pass — it is no answer.`
+(`pr.sh:114-116`). `watch-prs.sh` takes the same `completed == 0` → `NO-ANSWER` path (`:720-722`).
 
-**And `queue.sh` exits 0 whether or not it errored**, so its exit code tells you nothing about
-whether its output is complete. Read what it printed; do not infer from the code.
-
-*(An earlier version of this entry reported a `line 640: built: command not found` error here. It
-does not reproduce on any tree — branch, `origin/main`, or the shared clone — and I had attributed
-it to the wrong tree. Withdrawn on #122, and deleted here rather than left to mislead.)*
+**Neither tool reads mergeability at all** — `pr.sh state` never asks for the field, and
+`watch-prs.sh` fetches the `pulls?state=open` *list* endpoint, which does not return it. Head-sha
+anchoring is the whole mechanism. Do not credit them with a check they do not perform.
 
 ## 2026-08-03 — measurement traps that have each cost a round
 
@@ -68,6 +99,16 @@ it to the wrong tree. Withdrawn on #122, and deleted here rather than left to mi
   before believing a zero.
 - **A `-i` grep can match JSON key names rather than findings** — `grep -i undetermined` "found"
   undetermined-ness in a diagnostics bundle purely via keys like `synchronising_undetermined_why`.
+- **Two of your actions preceding a good result do not tell you which one caused it.** I made a
+  repair and re-ran a job, saw a gate go green, and reported the repair as the cause; a third party
+  had meanwhile deleted the thing that was actually blocking it. The ordering was there to check and
+  I did not check it. Change one thing, or establish the order.
+- **A wait loop keyed on prose can stop waiting early and look like a result.** Mine polled
+  `pr.sh state` until the string `still running` disappeared. **A red makes it disappear while checks
+  are still live** — `pr.sh` tests the failure branch *before* the pending one, so one failing check
+  suppresses the running line and the loop returns mid-flight. My own captured output showed
+  `in_progress Build and tests` and a `RED:` section together, with no running line.
+  **Key on `pr.sh`'s exit code — `0` green, `1` red, `2` no answer — never on its wording.**
 
 **The general rule this project keeps teaching: a negative result means nothing until the probe is
 shown to fire on something known-present.** State the control, every time.
