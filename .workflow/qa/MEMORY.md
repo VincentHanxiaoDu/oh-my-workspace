@@ -22,8 +22,11 @@ catch this produces a phantom difference on a file that is byte-identical. Use `
 
 **This presents identically to `AGENT.md` item 6, and item 6's remedy will not catch it.** Both show
 a phantom deletion; there the cause is a moved `main` and `git merge-base` finds it, here the cause
-is an untracked path and `merge-base` returns a clean answer while you are still wrong. Tell them
-apart by whether the path is tracked at `HEAD`, not by the diff.
+is an untracked path and `merge-base` *can* return a clean answer while you are still wrong — it does
+whenever the tree has **diverged** rather than merely fallen behind, which is the case that happened.
+In a tree that is a pure ancestor, item 6's test does fire — but for the wrong reason, saying nothing
+about a file that is on disk and byte-identical. **Tell them apart by whether the path is tracked at
+`HEAD`, not by the diff**; that works in both cases.
 
 The mirror case exists too: a file committed on `main` can be **absent** from the tree entirely.
 
