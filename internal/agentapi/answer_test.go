@@ -1,8 +1,12 @@
 package agentapi
 
 import (
+	"encoding/json"
 	"errors"
 	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -216,34 +220,200 @@ func TestANoteRestrictedAwayIsAbsentFromTheAgentAPIEntirely(t *testing.T) {
 // when it does not. Two hubs identical except for one restricted-away note must produce
 // byte-identical agent API output for that person."
 //
-// IT COMPARES BYTES, NOT FIELDS. A field-by-field comparison passes while a new field somebody adds
-// next month leaks the difference; the serialised form is what actually reaches the AI.
+// # It compares bytes, not fields
+//
+// A field-by-field comparison passes while a new field somebody adds next month leaks the
+// difference. The serialised form is what actually reaches the AI, so that is what is compared.
+//
+// # Why the note ids are normalised, and why that is not a weakening
+//
+// Note ids used to be `note-%d` from a shared counter, and this test was the thing that would have
+// caught what that cost: an unreadable note consumed an id, so the reader's second visible note was
+// `note-3` rather than `note-2`, and the gap disclosed the existence of a note they could not read.
+// The identifier was a function of the reader's own blind spots. That is fixed on main — ids are
+// now minted from crypto/rand — and the fix has a consequence for this test: two runs of an
+// IDENTICAL corpus now differ byte-wise, so a raw comparison measures the random number generator
+// rather than any information.
+//
+// So the ids are replaced by the order in which they first appear. What survives normalisation is
+// everything criterion 5 is actually about — WHICH notes, HOW MANY, in what ORDER, with which
+// fields — and what is removed is only the randomness. A leaked note still adds a token and still
+// fails.
+//
+// # Two corpora, and both controls
+//
+// A single corpus cannot tell "ids do not leak" from "these particular ids happened to line up", so
+// the whole comparison runs over two different corpora. And two controls run alongside, because a
+// normalisation that erased everything would pass the main assertion silently:
+//
+//   - CONTROL A: two IDENTICAL corpora must normalise identical. If they do not, the normalisation
+//     is not removing the randomness and every pass below is luck.
+//   - CONTROL B: a corpus with one extra READABLE note must NOT normalise identical. If it does,
+//     the normalisation has flattened the response and the main assertion proves nothing.
+//   - CONTROL C, in TestNormalisingNoteIDsKeepsWhatCriterion5IsAbout: the normalisation itself maps
+//     DISTINCT ids to DISTINCT tokens. This one is separate because it is the sharp one, and I
+//     found that out by driving it: a normalisation collapsing every id to a single token leaves
+//     CONTROL B GREEN, because an extra readable note also differs by its title. CONTROL B proves
+//     the response is still live; only CONTROL C proves the ids were not flattened. Recording that
+//     here because a control believed to be stronger than it is would be worse than none.
+//
+// # And it runs over every operation, not only the hub one
+//
+// Criterion 5 says "in any form". `tickets`, `drafts` and `model` do not consult the hub at all, so
+// a difference there would mean a restricted note had reached somewhere it has no business being.
 func TestTwoHubsDifferingOnlyByARestrictedNoteProduceIdenticalOutput(t *testing.T) {
-	build := func(withRestricted bool) []byte {
+	// corpus is the readable material both sides of a comparison share.
+	type corpus struct {
+		name  string
+		notes []string
+	}
+	corpora := []corpus{
+		{"one readable note", []string{"public one"}},
+		{"three readable notes", []string{"public one", "public two", "public three"}},
+	}
+
+	// build serves one operation against a hub holding the corpus, plus optionally one note
+	// restricted away from this person, plus optionally one extra readable note (control B).
+	build := func(t *testing.T, c corpus, op Op, withRestricted, withExtraReadable bool) []byte {
+		t.Helper()
 		f := newFixture(t)
 		g := f.issue(hub.ScopeRead)
-		f.publish(me, "shared", hub.CompanyWide())
-		if withRestricted {
-			f.publish(colleague, "restricted away", mustPeople(t, colleague))
+		f.putTicket("t-1", "a ticket")
+		if _, err := f.outbox.Revise("d-1", "a draft"); err != nil {
+			t.Fatal(err)
 		}
-		r := Answer(Request{Op: OpHub, Grant: g.ID}, f.src)
-		// The grant id is minted from crypto/rand and differs between the two fixtures by
-		// construction, so it is blanked: it is not part of what the hub's contents determine.
+		for _, title := range c.notes {
+			f.publish(me, title, hub.CompanyWide())
+			if withRestricted {
+				// INTERLEAVED, not appended. A restricted note published between two readable ones
+				// is what used to shift the ids of everything after it; publishing them all at the
+				// end would have missed exactly the defect this test is for.
+				f.publish(colleague, "ZARQUON restricted away", mustPeople(t, colleague))
+			}
+		}
+		if withExtraReadable {
+			f.publish(me, "an extra readable note", hub.CompanyWide())
+		}
+		r := Answer(Request{Op: op, Grant: g.ID}, f.src)
+		// The grant id and the note ids are minted from crypto/rand and differ between the two
+		// fixtures by construction. Person is blanked and ids are normalised; nothing else is.
 		r.Person = ""
 		b, err := MarshalResponse(r)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return b
+		return normaliseNoteIDs(b)
 	}
-	with, without := build(true), build(false)
-	if string(with) != string(without) {
-		t.Errorf("criterion 5: a note restricted away from this person changes the agent API's output.\n"+
-			"  with it:    %s\n  without it: %s\n"+
-			"  The existence of a note the person cannot read is itself something they cannot read (PRD §3.5).",
-			with, without)
+
+	for _, c := range corpora {
+		for _, op := range []Op{OpHub, OpTickets, OpDrafts, OpModel} {
+			name := c.name + "/" + string(op)
+
+			// --- CONTROL A: identical corpora normalise identical. -----------------
+			if a, b := build(t, c, op, false, false), build(t, c, op, false, false); string(a) != string(b) {
+				t.Fatalf("%s: CONTROL A failed — two IDENTICAL corpora do not normalise identical, so the "+
+					"normalisation is not removing crypto/rand and nothing below this line proves anything.\n"+
+					"  run 1: %s\n  run 2: %s", name, a, b)
+			}
+
+			// --- CONTROL B: an extra READABLE note must still show. ----------------
+			if a, b := build(t, c, op, false, false), build(t, c, op, false, true); op == OpHub && string(a) == string(b) {
+				t.Fatalf("%s: CONTROL B failed — adding a note this person CAN read changed nothing, so the "+
+					"normalisation has erased the signal and the assertion below is vacuous.\n"+
+					"  without: %s\n  with:    %s", name, a, b)
+			}
+
+			// --- THE ASSERTION. -----------------------------------------------------
+			with, without := build(t, c, op, true, false), build(t, c, op, false, false)
+			if string(with) != string(without) {
+				t.Errorf("criterion 5 (%s): a note restricted away from this person changes the agent API's "+
+					"output.\n  with it:    %s\n  without it: %s\n"+
+					"  The existence of a note the person cannot read is itself something they cannot read "+
+					"(PRD §3.5), and that includes the gaps it leaves in what they can.", name, with, without)
+			}
+			// AND NO FRAGMENT OF IT, in the un-normalised bytes.
+			raw := build(t, c, op, true, false)
+			if containsBytes(raw, "ZARQUON") {
+				t.Errorf("criterion 5 (%s): the restricted note's title reached the response:\n%s", name, raw)
+			}
+		}
 	}
 }
+
+// normaliseNoteIDs replaces every minted note id with the order in which it first appears.
+//
+// IT IS DELIBERATELY NOT A BLANKET REDACTION. `note-<32 hex>` and nothing else is matched, and each
+// DISTINCT id gets a DISTINCT token, so the count of ids, their order, and which fields refer to
+// which all survive. Replacing them all with one constant would pass this test with a leak present,
+// which is the failure mode CONTROL B exists to catch.
+func normaliseNoteIDs(b []byte) []byte {
+	seen := map[string]string{}
+	return noteIDPattern.ReplaceAllFunc(b, func(m []byte) []byte {
+		id := string(m)
+		if tok, ok := seen[id]; ok {
+			return []byte(tok)
+		}
+		tok := "note-#" + strconv.Itoa(len(seen))
+		seen[id] = tok
+		return []byte(tok)
+	})
+}
+
+// TestNormalisingNoteIDsKeepsWhatCriterion5IsAbout is CONTROL C, and it is the control that a
+// blanket redaction actually fails.
+//
+// The property the byte comparison rests on: how many distinct note ids a response mentions, and in
+// what order, survives normalisation. Only the 128 random bits are removed. A normalisation that
+// mapped every id to one token would satisfy the whole test above — driven and confirmed — and
+// would then also pass with a leaked note present.
+func TestNormalisingNoteIDsKeepsWhatCriterion5IsAbout(t *testing.T) {
+	const a = "note-" + "00112233445566778899aabbccddeeff"
+	const b = "note-" + "ffeeddccbbaa99887766554433221100"
+	const c = "note-" + "0123456789abcdef0123456789abcdef"
+
+	got := string(normaliseNoteIDs([]byte(`{"x":"` + a + `","y":"` + b + `","z":"` + a + `","w":"` + c + `"}`)))
+
+	// THREE DISTINCT IDS MUST STAY THREE DISTINCT TOKENS.
+	tokens := map[string]bool{}
+	for _, m := range regexp.MustCompile(`note-#\d+`).FindAllString(got, -1) {
+		tokens[m] = true
+	}
+	if len(tokens) != 3 {
+		t.Errorf("three distinct note ids normalised to %d distinct token(s): %s\n"+
+			"  Collapsing them would make the criterion 5 comparison pass with a leak present.", len(tokens), got)
+	}
+	// THE REPEATED ID MUST STAY THE SAME TOKEN, so "which field refers to which note" survives.
+	if x, z := fieldOf(got, "x"), fieldOf(got, "z"); x != z {
+		t.Errorf("the same id normalised to %q and %q; a response's internal references are part of "+
+			"what the comparison must see", x, z)
+	}
+	if x, y := fieldOf(got, "x"), fieldOf(got, "y"); x == y {
+		t.Errorf("two different ids both normalised to %q", x)
+	}
+	// FIRST-APPEARANCE ORDER, not hash order, so the token sequence is stable across runs.
+	if fieldOf(got, "x") != "note-#0" || fieldOf(got, "y") != "note-#1" || fieldOf(got, "w") != "note-#2" {
+		t.Errorf("tokens are not assigned in first-appearance order: %s", got)
+	}
+	// AND NOTHING ELSE IS TOUCHED. A blanket redaction over the whole payload would erase the
+	// titles and bodies the comparison also depends on.
+	if !strings.Contains(got, `"x":`) || strings.Contains(got, a) {
+		t.Errorf("the normalisation changed something other than the ids, or missed one: %s", got)
+	}
+}
+
+// fieldOf reads back one string field from the tiny JSON above.
+func fieldOf(s, key string) string {
+	var m map[string]string
+	if json.Unmarshal([]byte(s), &m) != nil {
+		return ""
+	}
+	return m[key]
+}
+
+// noteIDPattern matches an id as internal/hub mints it: the `note-` prefix and 128 bits of hex.
+// The length is pinned so that a future shorter or non-hex id fails to normalise and shows up as a
+// CONTROL A failure, rather than being silently left in place.
+var noteIDPattern = regexp.MustCompile(`note-[0-9a-f]{32}`)
 
 // ---------------------------------------------------------------------------
 // Criteria 6, 8 — an agent's token can never exceed its person's
