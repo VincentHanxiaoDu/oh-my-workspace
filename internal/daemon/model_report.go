@@ -59,10 +59,21 @@ var modelViewFor = func(storeRoot string) model.View {
 // shape, and it is not enough: a caller filtering for the model answer — which is exactly what an
 // agent API consumer does — gets the determined negative alone, with nothing beside it.
 func modelConfigFor(storeRoot string, getenv func(string) string) model.Config {
+	s, err := store.Open(storeRoot)
+	return modelConfigFrom(storeRoot, s, err, getenv)
+}
+
+// modelConfigFrom is the same decision for a caller that has ALREADY opened the store, so that
+// [agentSources] — the agent API's half of this, which needs the open store for its other sources
+// too — shares this one definition instead of keeping a second copy of the same three sentences.
+//
+// There is one rule here, in one place, and both surfaces reach it. Two copies that agreed on the
+// day they were written is the shape criterion 18 exists to prevent, and it is how the CLI and the
+// control API came to disagree about an unreadable store in the first place.
+func modelConfigFrom(storeRoot string, s *store.Store, err error, getenv func(string) string) model.Config {
 	if getenv == nil {
 		getenv = os.Getenv
 	}
-	s, err := store.Open(storeRoot)
 	switch {
 	case err == nil:
 		return model.Read(getenv, s)

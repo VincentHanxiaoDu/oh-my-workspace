@@ -23,7 +23,6 @@ package daemon
 
 import (
 	"encoding/json"
-	"errors"
 	"io"
 	"net"
 	"os"
@@ -125,29 +124,12 @@ func agentSources(storeRoot string, getenv func(string) string) agentapi.Sources
 	// and it is a lie for a machine whose store is there and would not open: passing nil in that
 	// case turns a failure to determine into a confident negative, which is Issue #68's collapse
 	// and exactly what §4.3 forbids. So the three outcomes of store.Open stay three here.
-	switch {
-	case storeErr == nil:
-		src.Model = func() model.Config { return model.Read(getenv, s) }
-	case errors.Is(storeErr, store.ErrNotFound):
-		// THERE IS NO STORE, WHICH THE FILESYSTEM ANSWERED. `omw model show` treats this the same
-		// way: nothing is recorded anywhere, so the environment alone is the configuration.
-		src.Model = func() model.Config { return model.Read(getenv, nil) }
-	default:
-		// THE WORDS ARE THE CLI'S WORDS, NOT A FOURTH VOCABULARY. internal/commands' modelStore
-		// prints these two sentences and exits 3; this surface carries them into the View's Detail
-		// so that model.View.Render — the one renderer both surfaces call — says the same thing,
-		// and agentapi.answerModel turns the undetermined Configured() into OutcomeUndetermined,
-		// whose Exit() is the same 3.
-		//
-		// THE ENVIRONMENT IS NOT CONSULTED ON THIS PATH, DELIBERATELY. `omw model show` does not
-		// read it either once the store failed: half of the configuration could not be seen, so
-		// what the other half says is not the answer to "which provider is configured".
-		why := "the store at " + storeRoot + " could not be read: " + storeErr.Error() +
-			"\n  An unreadable store is not one with no model recorded in it."
-		src.Model = func() model.Config {
-			return model.Config{Provider: tri.Undetermined, Credential: tri.Undetermined, Why: why}
-		}
-	}
+	//
+	// THE THREE ARMS THEMSELVES LIVE IN modelConfigFrom, which the control API's Report also calls
+	// (Issue #68 was that same collapse on that surface). The wording and the exit status are one
+	// definition rather than two that agree today: this file used to hold its own copy, and a copy
+	// is how the CLI and the control API drifted apart to begin with.
+	src.Model = func() model.Config { return modelConfigFrom(storeRoot, s, storeErr, getenv) }
 	return src
 }
 

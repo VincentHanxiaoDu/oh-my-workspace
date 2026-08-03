@@ -9,6 +9,19 @@
 - [x] 1.3 Read #48's `agentSources` and record its three-arm shape and its exact wording, so this
       change reuses them instead of inventing a second vocabulary.
 
+## 1a. Re-establish it against MERGED `main` once #48 landed
+
+- [x] 1a.1 Fetch `origin/main` and confirm #48 merged at `9b17eaa`.
+- [x] 1a.2 Confirm `model_report.go`'s most recent commit on merged `main` is still `3d7a69c`
+      (Issue #18's original), so the merge did not reach it.
+- [x] 1a.3 Do NOT conclude from the diff. Build `omw` from `9b17eaa` and drive both arms: the
+      `model:` blocks are `cmp`-identical, so the defect is on `main`.
+- [x] 1a.4 Run this change's test against `9b17eaa` and watch it go RED there, with `-count=1`.
+- [x] 1a.5 MUTATE, as the positive control: remove #48's three-arm switch on a scratch copy of
+      `9b17eaa`, confirm the removal by grep, and watch #48's OWN two tests go PASS -> FAIL. This is
+      what rules out a broken harness behind 1a.3.
+- [x] 1a.6 Rebase onto merged `main` and confirm the predicted absence of conflict.
+
 ## 2. The assertion, red first
 
 - [x] 2.1 Add `internal/daemon/model_report_unreadable_test.go` with both arms: the CONTROL is a
@@ -37,6 +50,12 @@
 - [x] 3.6 Confirm the mutation applied by grep before believing the green.
 - [x] 3.7 Drive the real `omw` binary in both arms and confirm the `model:` blocks differ under
       `cmp`, and that the control API's reason line is byte-identical to `omw model show`'s.
+- [x] 3.8 De-duplicate against merged #48: the three arms live once, in `modelConfigFrom`, and
+      `agentSources` calls it instead of keeping its own copy of the same sentences.
+- [x] 3.9 `modelConfigFrom` takes the store `agentSources` has already opened, so sharing the rule
+      does not cost a second `store.Open`.
+- [x] 3.10 Confirm #48's own two tests — which this change did not write — still pass against the
+      shared helper.
 
 ## 4. Specification
 
@@ -50,8 +69,7 @@
 
 ## Not done, deliberately
 
-- **Making #48's `agentSources` call `modelConfigFor`.** #48 is open and approved; editing
-  `internal/daemon/agent.go` here would conflict with it for no gain, since that surface is already
-  correct. The duplication is named in the proposal and belongs to whichever pull request lands
-  second.
+- **`internal/commands/publish_cmd.go`**, which QA refused PR #46 over: the MIRROR of this defect,
+  collapsing a DETERMINED absence (`ErrNotFound`) into `ExitUndetermined`. Same rule, opposite
+  direction, another agent's branch. Touching it here would collide with that work.
 - **Archiving this change.** Not this role's act.

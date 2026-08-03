@@ -43,24 +43,37 @@ for the model answer — exactly what an agent API consumer does — got the det
   goes through `model.View.Render`, the single renderer both surfaces call, so the CLI and the
   control API cannot word this state differently.
 
-## Relationship to PR #48 (`dev/feat/16-agent-api`), which is open and approved
+## Relationship to PR #48, now MERGED to `main` at `9b17eaa`
 
-**#48 does not fix this.** It fixes the same class of defect one surface out: it adds a new file,
-`internal/daemon/agent.go`, whose `agentSources` keeps the three outcomes of `store.Open` as three
-for the agent API. It does not touch `internal/daemon/model_report.go`, and `modelViewFor` — called
-from `daemon.go:247` and `state.go:568` — was left as it was. Verified by diffing the fetched branch
-against `main`: `model_report.go` is not in it.
+**#48 did not fix this, and its merge did not fix it.** #48 fixed the same class of defect one
+surface out: it added a new file, `internal/daemon/agent.go`, whose `agentSources` keeps the three
+outcomes of `store.Open` as three for the AGENT API. It never touched
+`internal/daemon/model_report.go`. On merged `main`, `git log -- internal/daemon/model_report.go`
+still shows `3d7a69c` — Issue #18's original commit — as its most recent change.
 
-**There is no file conflict.** #48 touches `internal/daemon/{agent.go,agent_model_test.go,control.go,
-daemon.go}`, `internal/agentapi/`, `internal/commands/agent_cmd*.go` and `openspec/`. This change
-touches `internal/daemon/model_report.go` and adds one test file. The two sets are disjoint, so
-either may land first.
+Established by driving merged `main`, not by reading the diff:
 
-**One follow-up is left deliberately undone**, because doing it here would create the conflict this
-avoids: after #48 merges, `agentSources`' inline undetermined arm and `modelConfigFor` are the same
-three sentences written twice. `agentSources` should call `modelConfigFor`. That is a one-line
-change against a file this branch does not have, and it belongs to whichever pull request lands
-second.
+- An `omw` built from `9b17eaa`: readable-store-with-no-model and the same store at `chmod 000`
+  produce `model:` blocks that are `cmp`-identical. The defect is on `main`.
+- The test in this change is RED against `9b17eaa`.
+- **Mutation, as the positive control.** On a scratch copy of `9b17eaa`, #48's three-arm switch in
+  `agentSources` was replaced by the collapsing form and the removal confirmed by grep. #48's own
+  two tests went from PASS to FAIL, naming the collapse. So those tests do guard their surface, the
+  harness can see a fixed surface, and the identical bytes above are the defect rather than a broken
+  rig. Two independent surfaces.
+
+**The duplication #48 left is now closed here, since it can be.** While #48 was open, `agentSources`
+holding its own copy of the three arms and this change holding another was unavoidable without a
+conflict. With #48 merged, this branch rebases cleanly onto it (no conflict, as predicted) and the
+arms move into one function, `modelConfigFrom`, which both surfaces call:
+
+- `modelConfigFor(storeRoot, getenv)` opens the store — the control API's Report path.
+- `modelConfigFrom(storeRoot, s, err, getenv)` takes an already-open store — `agentSources`, which
+  needs that handle for its other sources anyway, so nothing is opened twice.
+
+The wording and the exit status are now one definition rather than two that agree today. #48's own
+two tests, which this change did not write, still pass against the shared helper — that is the
+evidence the de-duplication preserved its behaviour.
 
 ## Out of scope
 
