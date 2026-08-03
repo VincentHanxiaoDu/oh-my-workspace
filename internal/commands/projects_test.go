@@ -578,21 +578,49 @@ func TestARunningDaemonPollsProjectsWithNoCommandRun(t *testing.T) {
 		t.Fatalf("`omw daemon start` exited %d\n%s%s", start.code, start.stdout, start.stderr)
 	}
 	t.Cleanup(func() { runBinary(t, bin, storePath, "daemon", "stop") })
-	if got := statusClaim(t, getenv); got != tri.Yes {
+	// THE ENVIRONMENT IS PROBED, AND A PROBE THAT CANNOT ANSWER SKIPS RATHER THAN PASSES. tri.No is
+	// a determined negative and a real defect — start returned and nothing is running. tri.Undetermined
+	// establishes nothing either way, so this test has not verified criterion 4 and must not report
+	// that it has.
+	switch got := statusClaim(t, getenv); got {
+	case tri.Yes:
+	case tri.No:
 		t.Fatalf("`omw daemon start` returned but `omw daemon status` says %v", got)
+	default:
+		t.Skipf("whether the daemon is running could not be determined on this machine, so nothing " +
+			"was established about criterion 4 here. THIS TEST HAS NOT PASSED: it could not determine " +
+			"anything, which is not a report that the daemon polls.")
 	}
 
 	// The daemon must record a poll of its own accord. Nothing below runs a project command.
-	polled := func() int { return polledFileCount(t, storePath, dir) }
-	waitUntil(t, 10*time.Second, func() bool { return polled() == 1 },
-		"the daemon's first poll of the project (nothing has been run)")
+	//
+	// one.txt was written before the daemon was ever started, so ANY poll at all must see exactly one
+	// file. Waiting for a specific COUNT would be waiting for the answer; waiting for a poll and then
+	// asserting the count is the assertion.
+	if _, files := waitForPoll(t, storePath, dir, time.Time{},
+		"the daemon's first poll of the project (nothing has been run)"); files != 1 {
+		t.Fatalf("the daemon's first poll recorded %d files; one.txt was written before it started, so it must record 1", files)
+	}
 
-	// NOW THE CRITERION ITSELF: change a file, run nothing, wait past the interval.
+	// NOW THE CRITERION ITSELF: change a file, run nothing, and read what the daemon recorded.
+	//
+	// THE WAIT IS FOR PROGRESS, NOT FOR THE ANSWER, AND THAT IS THE WHOLE POINT (Issue #72). The
+	// earlier form waited up to a fixed 10s for `count == 2`, so a machine slow enough to need 11s
+	// failed a test about whether the daemon polls at all — a FALSE RED, and a false red on this
+	// suite teaches a reader to re-run until green. Lengthening that 10s is not a fix; it only moves
+	// the same cliff. So the wall clock is out of the assertion entirely: we wait for a poll that
+	// BEGAN AFTER the write — such a poll's scan necessarily saw two.txt — and then the count MUST be
+	// 2, with no second chances. On a loaded box this takes longer and still passes; on a build where
+	// nothing polls, no poll ever appears and it fails naming that.
+	mark := time.Now().UTC()
 	if err := os.WriteFile(filepath.Join(dir, "two.txt"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	waitUntil(t, 10*time.Second, func() bool { return polled() == 2 },
-		"the daemon to reflect a change with NO command run — criterion 4")
+	if _, files := waitForPoll(t, storePath, dir, mark,
+		"a daemon poll that began after the file was written — criterion 4"); files != 2 {
+		t.Fatalf("a daemon poll that started after two.txt was written recorded %d files, want 2: "+
+			"the daemon did NOT reflect a change with no command run (criterion 4)", files)
+	}
 
 	// And the listing then serves the polled state, stamped as the daemon's. This is criterion 6's
 	// other branch, which could not be reached at all while nothing polled.
@@ -609,13 +637,13 @@ func TestARunningDaemonPollsProjectsWithNoCommandRun(t *testing.T) {
 	assertNoStaleBecauseNothingIsWatchingClaim(t, "omw projects list", out+errOut)
 }
 
-// polledFileCount reads the file count a DAEMON POLL recorded, straight out of the store, and
-// returns -1 when no poll has recorded anything yet.
+// polledRecord reads what a DAEMON POLL recorded, straight out of the store: when the poll ran and
+// how many files it saw. ok is false when no poll has recorded anything yet.
 //
 // Deliberately not via `omw projects list`: with nothing polled that command scans the directory
 // itself and would report the new count on a build where the daemon never polls at all — which is
 // exactly the build that was refused.
-func polledFileCount(t *testing.T, storePath, projectPath string) int {
+func polledRecord(t *testing.T, storePath, projectPath string) (at time.Time, files int, ok bool) {
 	t.Helper()
 	s, err := store.Open(storePath)
 	if err != nil {
@@ -625,28 +653,58 @@ func polledFileCount(t *testing.T, storePath, projectPath string) int {
 		State struct {
 			Files int `json:"files"`
 		} `json:"state"`
+		PolledAt time.Time `json:"polled_at"`
 	}
 	if err := s.GetJSON(projects.KindState, projects.ProjectID(projectPath), &ss); err != nil {
-		return -1
+		return time.Time{}, 0, false
 	}
-	return ss.State.Files
+	return ss.PolledAt, ss.State.Files, true
 }
 
-// waitUntil polls a condition until it holds, and fails naming what it waited for.
+// pollStallBudget is how long the daemon may record NO poll at all before this is a failure.
 //
-// A fixed sleep tuned to one machine is either slow everywhere or flaky on a loaded box. The
-// DIRECTION carries the meaning: this waits for something to APPEAR, and the criterion-5 test
-// sleeps a fixed span and requires that nothing appeared — only the second can honestly be a sleep.
-func waitUntil(t *testing.T, limit time.Duration, cond func() bool, what string) {
+// IT IS NOT A TIME LIMIT ON THE TEST, and that distinction is Issue #72's whole fix. It bounds a
+// STALL — a span in which the daemon recorded nothing — and it is reset by every poll observed. A
+// machine ten times slower runs every step ten times slower and never trips it, because polls keep
+// arriving; a build in which nothing polls trips it immediately, because none do. That is why it can
+// be generous without widening any window: no amount of slowness turns a polling daemon into a
+// stalled one under this rule, whereas under a total-elapsed deadline it always eventually does.
+const pollStallBudget = 60 * time.Second
+
+// waitForPoll waits for a poll the daemon recorded STRICTLY AFTER `after`, and returns when it ran
+// and what it saw. Pass the zero time for "any poll at all".
+//
+// A poll stamped after an instant necessarily began after it, so its scan of the directory saw
+// everything written before that instant. That is what lets the CALLER assert an exact count rather
+// than wait for one: waiting until the count reaches the expected value would pass on a build that
+// only ever gets there by accident, and would report a timeout — not a wrong count — on one that
+// records the wrong number forever.
+func waitForPoll(t *testing.T, storePath, projectPath string, after time.Time, what string) (time.Time, int) {
 	t.Helper()
-	deadline := time.Now().Add(limit)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
+	var last time.Time
+	stallUntil := time.Now().Add(pollStallBudget)
+	for {
+		at, files, ok := polledRecord(t, storePath, projectPath)
+		if ok && at.After(after) {
+			return at, files
 		}
-		time.Sleep(50 * time.Millisecond)
+		if ok && at.After(last) {
+			// The daemon is polling; it has simply not yet reached the poll we need. That is
+			// progress, so the stall budget starts again.
+			last = at
+			stallUntil = time.Now().Add(pollStallBudget)
+		}
+		if time.Now().After(stallUntil) {
+			if last.IsZero() {
+				t.Fatalf("the daemon recorded no poll at all within %v while waiting for %s: "+
+					"nothing is advancing project state in the background", pollStallBudget, what)
+			}
+			t.Fatalf("the daemon stopped recording polls for %v while waiting for %s "+
+				"(its last poll was stamped %s, and this waited for one after %s)",
+				pollStallBudget, what, last.Format(time.RFC3339Nano), after.Format(time.RFC3339Nano))
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("timed out after %v waiting for %s", limit, what)
 }
 
 // CRITERION 4's OTHER HALF: the polling is REGISTERED as daemon background work, so it happens
