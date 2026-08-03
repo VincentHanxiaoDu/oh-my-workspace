@@ -69,6 +69,12 @@ type Store struct {
 	notes   map[NoteID]*Note
 	order   []NoteID
 	now     func() time.Time
+	// roster is Issue #15's record of who is still with the company, attached by [Store.SetRoster]
+	// (Issue #22). It gates the WRITE paths only — publishing and amending as somebody who has
+	// left — and is NEVER consulted when deciding who may READ a note. Nil means no roster is
+	// attached and every author is treated as active, which is the state of a hub nobody has told
+	// about a departure.
+	roster *Roster
 }
 
 // NewStore returns a store over the given membership record. A nil record means the hub knows no
@@ -120,6 +126,12 @@ func (s *Store) Publish(p Publication) (*Note, error) {
 
 	if p.Author == "" {
 		return nil, ErrNoAuthor
+	}
+	// ISSUE #22 CRITERION 16. Nothing publishes a new note as a person who has left. Checked here,
+	// in the one function that stores a note, rather than in a wrapper a caller has to remember —
+	// and checked BEFORE the id counter is touched, so a refusal stores nothing.
+	if err := s.checkAuthorWritableLocked(p.Author); err != nil {
+		return nil, err
 	}
 
 	v := p.Visibility
@@ -186,6 +198,11 @@ func (s *Store) Amend(id NoteID, body string) (*Note, error) {
 	n, ok := s.notes[id]
 	if !ok {
 		return nil, Refusedf(ErrNoSuchNote, "%q", string(id))
+	}
+	// ISSUE #22 CRITERION 16, the other half: the archive is readable, not writable. No version is
+	// added to a departed person's note — not by them, and not by anything acting as them.
+	if err := s.checkAuthorWritableLocked(n.Author); err != nil {
+		return nil, err
 	}
 	n.Versions = append(n.Versions, Version{Number: len(n.Versions) + 1, Body: body, At: s.now()})
 	return n, nil
