@@ -144,10 +144,20 @@ type Device struct {
 	Source string
 }
 
-// Sources.
+// Sources: WHERE THIS ENTRY WAS LEARNT FROM, WHICH IS NOT WHICH MACHINE IT IS.
+//
+// THE WORDING IS THE FIX FOR A REAL MISREADING. These used to render as "this machine" and "the
+// hub", and "this machine" reads at a glance as a statement about the device's IDENTITY — so a box
+// registered with --machine <another store's id>, which is precisely NOT this machine, carried the
+// label "[this machine]". A person scanning the listing for the laptop they are typing on would
+// have found it against every entry.
+//
+// Provenance is still worth showing: a device this machine has a registration for and a device only
+// the hub knows about are different facts, and §4.4's "what is missing" is easier to read when you
+// can see which entries came from where. So the fact stays and the wording says what it is.
 const (
-	SourceLocal = "this machine"
-	SourceHub   = "the hub"
+	SourceLocal = "from this machine's inventory"
+	SourceHub   = "from the hub"
 )
 
 // Render is one device, as one line, for a person.

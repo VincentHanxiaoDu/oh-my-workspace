@@ -587,3 +587,51 @@ func TestACheckInWithNoInstantIsNeverAValidYes(t *testing.T) {
 		t.Error("a listing holding a check-in with no instant reports everything as determined")
 	}
 }
+
+// THE PROVENANCE LABEL MUST NOT READ AS A MACHINE IDENTITY.
+//
+// Product's UAT stopped at this field: every entry carried "[this machine]", including a box
+// registered under ANOTHER machine's store id — a device that is definitively not this machine.
+// The field means "this entry came from this machine's inventory", and it now says so.
+//
+// The test is about what a reader can conclude, so it asserts the label does not claim identity for
+// a device known not to be this machine, and that the two provenances stay distinguishable.
+func TestTheSourceLabelDescribesProvenanceNotIdentity(t *testing.T) {
+	getenv, _ := sandbox(t, map[string]string{EnvHub: "h"})
+	r := mustRegistry(t, getenv)
+	// A machine that is NOT this one: registered by naming another store's id outright.
+	mustRegister(t, r, "the-box-elsewhere", "store-SOMEWHERE-ELSE")
+
+	s := loadOrFail(t, getenv, dialing(fakeHub{devices: []Device{
+		{Label: "only-the-hub-knows", CheckIn: NeverCheckedIn()},
+	}}, nil))
+
+	var local, remote Device
+	for _, d := range s.Devices {
+		switch d.Label {
+		case "the-box-elsewhere":
+			local = d
+		case "only-the-hub-knows":
+			remote = d
+		}
+	}
+	if local.Label == "" || remote.Label == "" {
+		t.Fatalf("this test needs both entries to be listed, got %+v", s.Devices)
+	}
+	// A device registered under another machine's id must not be labelled as being this machine.
+	line := local.Render()
+	if strings.Contains(line, "[this machine]") {
+		t.Errorf("a device registered as machine %q renders as %q — the provenance label is being "+
+			"read as a claim about which machine this is", local.Machine, line)
+	}
+	if !strings.Contains(line, "inventory") {
+		t.Errorf("the provenance label does not say it is about a record's origin: %q", line)
+	}
+	// The two provenances are still different facts and still render differently.
+	if local.Source == remote.Source {
+		t.Errorf("a locally-registered device and a hub-only device share the provenance %q", local.Source)
+	}
+	if strings.TrimSpace(local.Source) == "" || strings.TrimSpace(remote.Source) == "" {
+		t.Error("a provenance rendered blank")
+	}
+}

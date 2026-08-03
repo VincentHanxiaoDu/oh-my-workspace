@@ -82,3 +82,5 @@
       never-started device in the same listing
 - [x] Assert the empty-listing HEADLINE sentence, not only the lines beneath it
 - [x] Re-drive review's surviving mutations (M2, M3, M11, M12) and confirm each now goes red
+- [x] Word the provenance label so it cannot be read as a machine identity — UAT found every entry
+      carrying "[this machine]", including a box registered under another machine's store id
