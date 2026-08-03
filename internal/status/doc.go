@@ -2,8 +2,16 @@
 //
 // WHAT THIS PACKAGE IS FOR. A person who has just installed the client wants one answer, not five
 // commands: is the daemon up, is the store there, are my channels connected, are my projects
-// watched, are my devices registered, is the hub reachable. §2.1 names those six components; this
-// package renders exactly those six, each on its own named line, and never silently drops one.
+// watched, is a model provider configured, are my devices registered, is the hub reachable. §2.1
+// names those components; this package renders every one of them, each on its own named line, and
+// never silently drops one.
+//
+// THE LIST IS NOT CLOSED, AND THAT IS ISSUE #66. It was written as exactly six before Issue #18's
+// model provider existed, and nothing anywhere noticed when it fell behind: `omw model show` and
+// `omw daemon status` both exited 3 over a model state that could not be determined while this
+// screen exited 0 and never mentioned it — a false SILENCE, which §4.3 names as its own failure.
+// The model line is the seventh, and status_test's structural guard is what will notice the eighth:
+// a capability the daemon's report renders and this screen does not carry fails by name.
 //
 // THREE OUTCOMES, PLUS "NOT CONFIGURED", AND THEY ARE FOUR VALUES. §4.3 puts the three-valued
 // answer first: working, not working, and could-not-be-determined are three different facts and a
@@ -24,8 +32,10 @@
 // THIS PACKAGE DETERMINES NOTHING IT CAN BORROW. Daemon liveness comes from the product's one
 // answer, passed in (Issue #41). The last run's ending comes from [daemon.Report]. Project state
 // comes from [projects.Take], device state from [devices.Load], channel state from
-// [channels.Connection.Health]. Re-deriving any of those here would be a second opinion about a
-// fact that already has an owner, and the six lines would then disagree with the six commands.
+// [channels.Connection.Health], and the model configuration is the [model.View] carried on that
+// same report — the one `omw model show` and `omw daemon status` render (Issue #66 criterion 1).
+// Re-deriving any of those here would be a second opinion about a fact that already has an owner,
+// and these lines would then disagree with the commands they came from.
 //
 // AND IT CHANGES NOTHING. Criterion 4: status is a report. Nothing in this package writes to the
 // store, starts a process, creates a store or opens a network connection — with no hub configured

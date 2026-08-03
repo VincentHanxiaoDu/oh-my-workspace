@@ -10,6 +10,7 @@ import (
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/daemon"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/devices"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/health"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/model"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/projects"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/store"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri"
@@ -82,7 +83,7 @@ func (q Query) now() time.Time {
 
 // Collect produces the whole screen.
 //
-// IT PRODUCES ALL SIX LINES ON EVERY PATH (criteria 1, 7, 14, 18). There is no early return in this
+// IT PRODUCES EVERY LINE ON EVERY PATH (criteria 1, 7, 14, 18). There is no early return in this
 // function: each subsystem is asked separately, an unanswerable one becomes an undetermined line,
 // and the next one is asked anyway. A dependency that is absent — no daemon, no store, no hub —
 // costs exactly the facts that genuinely needed it and nothing else.
@@ -107,6 +108,7 @@ func Collect(q Query) Screen {
 			storeSubsystem(root, rootErr, opened, now, q.Health),
 			channelsSubsystem(opened, root, rootErr, openErr, now, q.Daemon),
 			projectsSubsystem(opened, root, rootErr, openErr, getenv, now, q),
+			modelSubsystem(q.Report.Model, now),
 			devicesSubsystem(q, getenv, now),
 			hubSubsystem(q, getenv, now),
 		},
@@ -389,6 +391,45 @@ func projectsSubsystem(opened *store.Store, root string, rootErr, openErr error,
 		snap.Watching.Render("yes", "no — nothing is watching them right now"))
 	if snap.WatchingDetail != "" {
 		sub.Detail += " (" + snap.WatchingDetail + ")"
+	}
+	return sub
+}
+
+// modelSubsystem is Issue #66, and it is the seventh line.
+//
+// IT DERIVES NOTHING. The sentence is [model.View.Render], the same call `omw model show` prints
+// and the same call [daemon.Report]'s own rendering makes — and the View itself arrives on
+// [Query.Report], so this screen is looking at the value `omw daemon status` looked at rather than
+// resolving a second one from the environment. #66 criterion 1 asks for exactly that, and #41 is
+// the standing reason: four surfaces once each made their own guess and all four were wrong
+// together.
+//
+// THE STATE IS NEVER NotWorking, AND THAT IS CRITERION 3. Every determined answer here is a fact
+// about a person's configuration, not a broken subsystem: nobody has chosen a provider, somebody
+// has chosen one and not supplied a credential, somebody has chosen one this build has no adapter
+// for. None of those is a thing that has failed, and rendering any of them as "NOT working" would
+// send a person to fix what is not broken. Only a state that could not be ESTABLISHED clouds the
+// line — which then reaches the summary and the exit code through the ordinary route, so the one
+// screen says so and exits 3 exactly as `omw model show` and `omw daemon status` already do
+// (criterion 2).
+//
+// The two undetermined branches are separate on purpose. "Which provider is configured could not
+// be determined" and "a provider is chosen and whether it has a credential could not be
+// determined" are different facts about a machine; they share a state and they do not share a
+// sentence, because View.Render words them differently.
+func modelSubsystem(v model.View, now time.Time) Subsystem {
+	sub := Subsystem{Name: Model, ObservedAt: now, Detail: v.Render()}
+	switch {
+	case v.Chosen() == tri.Undetermined, v.Present() == tri.Undetermined:
+		sub.State = Undetermined
+	case v.Chosen() == tri.No, v.Present() == tri.No:
+		// NOT CONFIGURED, NOT FAILING. A person who has chosen nothing and a person who has chosen
+		// a provider and not yet supplied a key have both been answered — and neither has a broken
+		// client (§3.13: "No model configured is not a broken client"). The two are still
+		// distinguishable on the line, by the sentence the View wrote for each.
+		sub.State = NotConfigured
+	default:
+		sub.State = Working
 	}
 	return sub
 }

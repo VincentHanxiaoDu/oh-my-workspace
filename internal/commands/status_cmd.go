@@ -9,7 +9,7 @@
 //
 // IT STARTS NOTHING (§4.2, criteria 4, 13, 16). There is no call in this file that starts a
 // daemon, creates a store or opens a network connection. `omw status` against a machine with
-// nothing set up prints six lines and leaves the machine exactly as it found it.
+// nothing set up prints every subsystem's line and leaves the machine exactly as it found it.
 package commands
 
 import (
