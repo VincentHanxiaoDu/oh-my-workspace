@@ -2,6 +2,23 @@
 
 **This file is yours. The installer creates it once and never overwrites it.**
 
+## Sign every comment `[dev]`, on the first line, alone
+
+**Every comment on an Issue or a pull request begins with `[dev]` on its own first line** — before any
+heading, bold or prose. `queue.sh` matches `startswith("[dev]")` to work out what this role has
+already looked at. A trailing `Agent: dev`, a `[dev-agent]`, or a name in prose is **invisible to it**,
+and the queue then offers the same work to the next agent as though nobody had touched it.
+
+This is recorded here, and not only in the role prompt, because the prompt lives in `.claude/commands/`
+— framework-owned, replaced wholesale on every refresh, and the rule was historically present in only
+some of the role prompts. Measured on this board: **100 comments, `[dev]` appeared zero times.** Every
+comment this role had posted was unattributable and unseen by the queue, and the work was re-offered.
+
+**A review verdict carries both** — `[dev]` on the first line, and the `Reviewed-by:` /
+`Reviewed-sha:` / `Verdict:` block the gate parses. `Reviewed-sha:` is the **full 40-character** sha;
+a short one does not parse. Neither substitutes for the other: one says who is speaking, the other
+says what the verdict is.
+
 ## This project
 
 **Go**, standard library first. A dependency needs a reason in the pull request body.
