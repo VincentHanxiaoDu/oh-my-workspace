@@ -67,7 +67,13 @@ func newFixture(t *testing.T, personScopes ...hub.Scope) *fixture {
 		Drafts:       func() ([]DraftView, error) { return f.listDrafts() },
 		ReviseDraft:  func(id, body string) (DraftView, error) { return f.revise(id, body) },
 		Hub:          func() (*hub.Store, hub.Membership, error) { return h, members, nil },
-		Model:        func() model.Config { return model.Read(func(string) string { return "" }, nil) },
+		// THE FIXTURE'S STORE IS A REAL ONE, AND THE MODEL SOURCE READS IT. It used to pass nil
+		// here, which model.Read documents as "this caller has no store" — so no test in this
+		// package exercised the model against a store at all, and a daemon seam that discarded its
+		// store went unnoticed on this side of the boundary too. An empty real store answers the
+		// same "no provider is chosen" these tests already expect; what changes is that the store
+		// is now on the path.
+		Model: func() model.Config { return model.Read(func(string) string { return "" }, s) },
 	}
 	return f
 }

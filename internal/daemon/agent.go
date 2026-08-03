@@ -23,6 +23,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -116,10 +117,37 @@ func agentSources(storeRoot string, getenv func(string) string) agentapi.Sources
 		return tri.Yes
 	}
 	src.Hub = func() (*hub.Store, hub.Membership, error) { return agentHubSource(getenv) }
-	// THE STORE MAY BE NIL HERE, and model.Read documents that nil means "this caller has no
-	// store" rather than "the store could not be read" — which is the honest distinction when the
-	// daemon's own store failed to open and has already said so.
-	src.Model = func() model.Config { return model.Read(getenv, s) }
+	// AN UNREADABLE STORE IS NOT A STORE WITH NO MODEL IN IT — the same sentence the CLI already
+	// prints, because it is the same fact (criterion 18; §4.3).
+	//
+	// model.Read takes a nil store to mean "this caller has no store", which is a DETERMINED fact
+	// and renders as "no provider is chosen". That reading is correct for a machine with no store,
+	// and it is a lie for a machine whose store is there and would not open: passing nil in that
+	// case turns a failure to determine into a confident negative, which is Issue #68's collapse
+	// and exactly what §4.3 forbids. So the three outcomes of store.Open stay three here.
+	switch {
+	case storeErr == nil:
+		src.Model = func() model.Config { return model.Read(getenv, s) }
+	case errors.Is(storeErr, store.ErrNotFound):
+		// THERE IS NO STORE, WHICH THE FILESYSTEM ANSWERED. `omw model show` treats this the same
+		// way: nothing is recorded anywhere, so the environment alone is the configuration.
+		src.Model = func() model.Config { return model.Read(getenv, nil) }
+	default:
+		// THE WORDS ARE THE CLI'S WORDS, NOT A FOURTH VOCABULARY. internal/commands' modelStore
+		// prints these two sentences and exits 3; this surface carries them into the View's Detail
+		// so that model.View.Render — the one renderer both surfaces call — says the same thing,
+		// and agentapi.answerModel turns the undetermined Configured() into OutcomeUndetermined,
+		// whose Exit() is the same 3.
+		//
+		// THE ENVIRONMENT IS NOT CONSULTED ON THIS PATH, DELIBERATELY. `omw model show` does not
+		// read it either once the store failed: half of the configuration could not be seen, so
+		// what the other half says is not the answer to "which provider is configured".
+		why := "the store at " + storeRoot + " could not be read: " + storeErr.Error() +
+			"\n  An unreadable store is not one with no model recorded in it."
+		src.Model = func() model.Config {
+			return model.Config{Provider: tri.Undetermined, Credential: tri.Undetermined, Why: why}
+		}
+	}
 	return src
 }
 

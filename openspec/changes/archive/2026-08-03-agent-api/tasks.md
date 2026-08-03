@@ -83,3 +83,25 @@ Every box below is ticked because it happened. Nothing is ticked for being inten
 - [x] A bug of mine fixed by consuming the one answer: a missing credential file is a determined
       no, not undetermined. The undetermined fixture now stages a file that is present and
       unreadable.
+
+## After qa's second refusal of #48 — the store a person could not read
+
+- [x] `agentSources` keeps `store.Open`'s three outcomes three. A store that opened, a store that
+      is not there (determined: the environment is the whole configuration), and a store that would
+      not open (undetermined) are three branches, where the third used to pass a nil store to
+      `model.Read` — which documents nil as "this caller has no store", a determined fact.
+- [x] The undetermined branch carries the CLI's own two sentences, not a fourth vocabulary: the
+      store's path, the error, and "An unreadable store is not one with no model recorded in it."
+      Both surfaces render through `model.View.Render` and both land on exit 3.
+- [x] Driven through the agent API surface, not through `internal/model` in isolation, with real
+      stores from `store.Create` in every arm: readable-with-nothing-configured and unreadable no
+      longer produce the same bytes, and `agentapi.Answer` no longer answers `OutcomeOK` for the
+      second.
+- [x] A third arm — a store with a provider recorded in it — because two arms alone do not notice a
+      seam that ignores the store entirely. It is what kills qa's surviving mutation M3.
+- [x] `internal/agentapi`'s fixture reads its own real store instead of passing nil, so no test in
+      that package leaves the store off the model path either.
+- [ ] The binary-level CLI/control-API agreement test still has no unreadable-store configuration.
+      `omw daemon status` answers that condition through `modelViewFor`, which is Issue #68's
+      collapse and not this branch's seam; adding the case here would go red on #68's defect. Left
+      for #68, deliberately, rather than widened into this branch.
