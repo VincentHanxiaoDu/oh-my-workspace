@@ -119,8 +119,16 @@ run_gate() {
   # So: this closes the accident, and it does not make a verdict unforgeable by a role that sets
   # out to forge one. Anything stronger needs distinct posting identities, which is not this
   # script's to decide.
-  local sel block role declared
-  sel=$(jq -c --arg h "$head" '
+  #
+  # EVERY VERDICT FOR THIS HEAD IS READ, NOT ONLY THE LAST (Issue #82). The previous build took
+  # `| last` and computed everything from that one block, so an earlier `changes-requested` was
+  # never looked at — and an author erased an independent refusal by posting a self-approve after
+  # it, with no code change and no new commit. The outcome was byte-identical to there never having
+  # been a refusal, down to publishing "NO INDEPENDENT AGENT HAS LOOKED AT THIS" while one had
+  # looked and had said no. `11605b5` enabled self-review claiming it widened WHO may certify and
+  # never WHAT counts as certified; that is the claim this restores.
+  local records
+  records=$(jq -r --arg h "$head" '
     def strip_fences:
       split("\n")
       | reduce .[] as $l ({inb:false, out:[]};
@@ -128,61 +136,103 @@ run_gate() {
           elif .inb then .
           else .out += [$l] end)
       | .out | join("\n");
+    def field($n):
+      [ .[] | select(test("^" + $n + ":"))
+            | sub("^" + $n + ":[[:space:]]*"; "") | sub("[[:space:]]+$"; "") ] | first // "";
     [ .[]
       | ((.body // "") | gsub("\r"; "")) as $raw
+      | ($raw | strip_fences | split("\n")) as $lines
+      | select($lines | any(test("^Reviewed-by:")))
+      | select($lines | any(test("^Reviewed-sha:[[:space:]]*" + $h)))
       | { role: (($raw | split("\n")[0]
-                       | capture("^\\[(?<r>[A-Za-z][A-Za-z0-9_-]*)\\][[:space:]]*$") | .r) // null),
-          body: ($raw | strip_fences) }
-      | select(.body | test("(^|\n)Reviewed-by:"))
-      | select(.body | test("(^|\n)Reviewed-sha:[[:space:]]*" + $h))
-    ] | last // empty' "$comments")
+                       | capture("^\\[(?<r>[A-Za-z][A-Za-z0-9_-]*)\\][[:space:]]*$") | .r) // ""),
+          declared: ($lines | field("Reviewed-by")),
+          verdict:  ($lines | field("Verdict")) }
+    ] | .[] | [.role, .declared, .verdict] | join("\u001f")' "$comments")
 
-  [ -n "$sel" ] || {
+  [ -n "$records" ] || {
     echo "::error::no review found for head $head. A push invalidates any earlier review — this head needs its own." >&2
     echo "  A verdict QUOTED inside a code fence or a '>' block is not a verdict and is not counted (#65)." >&2
     return 1
   }
 
-  role=$(printf '%s' "$sel" | jq -r '.role // ""')
-  block=$(printf '%s' "$sel" | jq -r '.body')
-
-  declared=$(printf '%s' "$block" | sed -n 's/^Reviewed-by:[[:space:]]*//p' | head -1 | sed 's/[[:space:]]*$//')
-  verdict=$(printf  '%s' "$block" | sed -n 's/^Verdict:[[:space:]]*//p'     | head -1 | sed 's/[[:space:]]*$//')
-
-  # WHO POSTED IT IS ESTABLISHED BEFORE WHAT IT SAYS IS READ. An unattributable verdict is not a
-  # weak verdict, it is not a verdict — so the block below returns rather than setting rc and
-  # carrying on. Its three refusals are three DIFFERENT facts and none of them is "no review
+  # WHO POSTED IT IS ESTABLISHED BEFORE WHAT IT SAYS IS READ, FOR EVERY BLOCK. An unattributable
+  # verdict is not a weak verdict, it is not a verdict — so this loop returns rather than setting rc
+  # and carrying on. Its three refusals are three DIFFERENT facts and none of them is "no review
   # exists"; they share exit 1 with that only because all four mean this head is not certified.
-  [ -n "$role" ] || {
-    echo "::error::a review block for $head was found, but WHO POSTED IT COULD NOT BE DETERMINED, so it certifies nothing. REFUSING." >&2
-    echo "  THIS IS NOT A FINDING THAT THE REVIEW IS ABSENT OR FORGED. It is an inability to attribute it." >&2
-    echo "  The remedy is the convention every role already follows: '[<role>]' ALONE on the comment's" >&2
-    echo "  very first line, above the Reviewed-by:/Reviewed-sha:/Verdict: block. Re-post it and this clears." >&2
-    echo "  The name inside the block is NOT read as a fallback: that is exactly the hole #65 is about." >&2
-    return 1
-  }
-  [ -n "$declared" ] || { echo "::error::the review names no reviewer" >&2; return 1; }
-  if [ "$role" != "$declared" ]; then
-    # NOT SILENTLY RE-ATTRIBUTED TO THE POSTER. Quietly correcting the name would let an attempt to
-    # certify somebody else's work — or one's own under another name — pass unremarked, and the
-    # attempt is the thing worth seeing.
-    echo "::error::this verdict was posted by '[$role]' but declares 'Reviewed-by: $declared'. THE TWO DISAGREE, so it is REFUSED — not re-attributed to either of them." >&2
-    echo "  Its Verdict: line was not acted on at all, because a verdict whose author is in doubt is not a verdict." >&2
-    echo "  If '[$role]' wrote this review, correct the Reviewed-by: line to '$role' and re-post." >&2
-    return 1
-  fi
-  reviewer=$role
-  case "$verdict" in
-    approve) : ;;
+  #
+  # IT SWEEPS EVERY BLOCK RATHER THAN THE CERTIFYING ONE, and that is deliberate: a block that
+  # cannot be attributed might be a refusal, and skipping over it to reach a later approve is the
+  # #82 defect wearing a different hat. This is bounded — it only ever looks at verdicts naming THIS
+  # head, so a push clears it and the remedy is named in the message.
+  local role declared verdict_
+  # US (0x1f), NOT A TAB. A tab is IFS whitespace, so `read` strips a LEADING EMPTY field and an
+  # unattributable block — role empty — shifted every field left and was reported as a
+  # disagreement rather than as undetermined. The script's own arm 7e caught it.
+  while IFS=$'\037' read -r role declared verdict_; do
+    [ -n "$role" ] || {
+      echo "::error::a review block for $head was found, but WHO POSTED IT COULD NOT BE DETERMINED, so it certifies nothing. REFUSING." >&2
+      echo "  THIS IS NOT A FINDING THAT THE REVIEW IS ABSENT OR FORGED. It is an inability to attribute it." >&2
+      echo "  The remedy is the convention every role already follows: '[<role>]' ALONE on the comment's" >&2
+      echo "  very first line, above the Reviewed-by:/Reviewed-sha:/Verdict: block. Re-post it and this clears." >&2
+      echo "  The name inside the block is NOT read as a fallback: that is exactly the hole #65 is about." >&2
+      return 1
+    }
+    [ -n "$declared" ] || { echo "::error::the review names no reviewer" >&2; return 1; }
+    if [ "$role" != "$declared" ]; then
+      # NOT SILENTLY RE-ATTRIBUTED TO THE POSTER. Quietly correcting the name would let an attempt to
+      # certify somebody else's work — or one's own under another name — pass unremarked, and the
+      # attempt is the thing worth seeing.
+      echo "::error::this verdict was posted by '[$role]' but declares 'Reviewed-by: $declared'. THE TWO DISAGREE, so it is REFUSED — not re-attributed to either of them." >&2
+      echo "  Its Verdict: line was not acted on at all, because a verdict whose author is in doubt is not a verdict." >&2
+      echo "  If '[$role]' wrote this review, correct the Reviewed-by: line to '$role' and re-post." >&2
+      return 1
+    fi
+    case "$verdict_" in
+      approve|changes-requested) : ;;
+      "") echo "::error::the review by '$role' carries no Verdict:" >&2; rc=1 ;;
+      *) echo "::error::unknown verdict '$verdict_' from '$role' — expected approve or changes-requested" >&2; rc=1 ;;
+    esac
+  done <<EOF
+$records
+EOF
+
+  # A REFUSAL IS CLEARED ONLY BY A LATER VERDICT FROM THE SAME REVIEWER. Each reviewer's most
+  # recent verdict for this head is kept, and the gate refuses while ANY of them requests changes.
+  #
+  # WHY THIS RULE AND NOT ANOTHER. "A reviewer changed its mind" is the only thing that should
+  # retire that reviewer's refusal, and it must stay possible or a refused branch could never be
+  # cleared by the reviewer that refused it. Nobody else gets a vote on it: not the author, which is
+  # #82 itself, and not a second independent reviewer, which #82 records as the pre-existing half of
+  # the same defect and which is the same act — overriding somebody else's judgement by posting
+  # after them. Two reviewers who disagree resolve it the way people do, and the one who refused
+  # withdraws. THE ESCAPE IS THE PUSH: a verdict is bound to a head sha, so fixing the code makes a
+  # new head and every verdict above stops applying. A refused branch is never trapped; it is fixed.
+  local refusers
+  refusers=$(printf '%s\n' "$records" | awk -F'\037' '
+    { latest[$1] = $3; seen[$1] = 1 }
+    END { for (r in seen) if (latest[r] == "changes-requested") print r }' | sort | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+  if [ -n "$refusers" ]; then
     # EXIT 2, NOT 1. A refused review and an absent one are different facts, and they shared an
     # exit code — so the workflow could only publish one description for both, and a reviewer that
     # had just refused a pull request read "No current review by an independent agent" and could not
     # tell its verdict had landed from its comment never being parsed. Caught by a reviewer that
     # checked the fix rather than the claim; the previous attempt grepped a log file and did not work.
-    changes-requested) echo "::error::the current review requests changes" >&2; refused=1 ;;
-    "") echo "::error::the review carries no Verdict:" >&2; rc=1 ;;
-    *) echo "::error::unknown verdict '$verdict' — expected approve or changes-requested" >&2; rc=1 ;;
-  esac
+    #
+    # AND IT NAMES WHO REFUSED. "changes were requested" alone sends the author reading every
+    # comment on the pull request to find out whose objection is outstanding.
+    echo "::error::the current review requests changes — outstanding refusal(s) by: $refusers" >&2
+    echo "  A LATER APPROVE DOES NOT CLEAR THIS (#82). Only a new verdict from the same reviewer" >&2
+    echo "  retires its refusal, or a push, which makes a new head that these verdicts do not name." >&2
+    refused=1
+  fi
+
+  # The certifying verdict is the most recent one, as before. It decides WHO is being checked for
+  # independence; it no longer decides whether anything was refused.
+  local last_record
+  last_record=$(printf '%s\n' "$records" | tail -1)
+  reviewer=$(printf '%s' "$last_record" | cut -d$'\037' -f1)
+  verdict=$(printf '%s' "$last_record" | cut -d$'\037' -f3)
 
   # INDEPENDENCE. An agent that wrote any commit in this range cannot certify it — including the pm.
   if printf '%s\n' "$authors" | grep -qx "$reviewer"; then
@@ -191,6 +241,12 @@ run_gate() {
     # comment. A `changes-requested` verdict records itself in `refused` and only becomes rc=2
     # further down, which is after this; that conversion wins, so removing this clause does not
     # currently change any outcome and arm 5e stays green under that mutation.
+    #
+    # #82 MADE IT MATTER MORE WITHOUT MAKING IT LOAD-BEARING. `refused` can now be set by a
+    # DIFFERENT reviewer's outstanding refusal while the certifying verdict is the author's
+    # self-approve — which is the whole of #82 — so this clause is now the difference between
+    # reaching rc=3 and rc=1 on that path. The conversion below still wins either way and still
+    # makes it 2.
     #
     # It earned its place all the same: the first version of this block `return`ed as soon as it set
     # rc=3, which skipped the conversion entirely and DID turn a refusal into a pass. Arm 5e caught
@@ -359,6 +415,48 @@ Agent: product"
   drc=0
   ( cd "$tmp" && REVIEW_POLICY_FILE="$pdir/ok" bash "$me" "$head" "$tmp/c.json" "$base" ) >/dev/null 2>&1 || drc=$?
   [ "$drc" -eq 2 ] || { echo "SELF-TEST FAIL: a self-review requesting changes exited $drc, not 2 — the policy turned a refusal into a pass" >&2; rc=1; }
+
+  #     (f) ISSUE #82: A SELF-APPROVE DOES NOT ERASE AN INDEPENDENT REFUSAL. 5e covers a refusal that
+  #         is the ONLY verdict; this covers a refusal that a later self-approve tries to bury. The
+  #         gate used to select one block with `| last`, so the earlier refusal was never read and
+  #         the outcome was byte-identical to there never having been one — including publishing
+  #         "NO INDEPENDENT AGENT HAS LOOKED AT THIS" while one had looked and had said no.
+  #         BOTH CONTROLS ARE HERE, because the defect's signature is the test agreeing with the
+  #         no-refusal control.
+  local ctl=0
+  #         CONTROL: an independent refusal alone refuses with 2.
+  _cp reviewer-a "Reviewed-by: reviewer-a\\nReviewed-sha: $head\\nVerdict: changes-requested"
+  ctl=0; ( cd "$tmp" && REVIEW_POLICY_FILE="$pdir/ok" bash "$me" "$head" "$tmp/c.json" "$base" ) >/dev/null 2>&1 || ctl=$?
+  [ "$ctl" -eq 2 ] || { echo "SELF-TEST FAIL: control — an independent refusal alone exited $ctl, not 2, so the #82 arms below prove nothing" >&2; rc=1; }
+  #         CONTROL: a self-approve alone passes with 3.
+  _cp dev-a "Reviewed-by: dev-a\\nReviewed-sha: $head\\nVerdict: approve"
+  ctl=0; ( cd "$tmp" && REVIEW_POLICY_FILE="$pdir/ok" bash "$me" "$head" "$tmp/c.json" "$base" ) >/dev/null 2>&1 || ctl=$?
+  [ "$ctl" -eq 3 ] || { echo "SELF-TEST FAIL: control — a self-approve alone exited $ctl, not 3" >&2; rc=1; }
+  #         TEST: the refusal first, then the author's self-approve. Must still be 2.
+  printf '[{"body":"[reviewer-a]\\nReviewed-by: reviewer-a\\nReviewed-sha: %s\\nVerdict: changes-requested"},{"body":"[dev-a]\\nReviewed-by: dev-a\\nReviewed-sha: %s\\nVerdict: approve"}]' "$head" "$head" > "$tmp/c.json"
+  ctl=0; local cout
+  cout=$( cd "$tmp" && REVIEW_POLICY_FILE="$pdir/ok" bash "$me" "$head" "$tmp/c.json" "$base" 2>&1 ) || ctl=$?
+  [ "$ctl" -eq 2 ] || { echo "SELF-TEST FAIL: an author erased an independent refusal with a self-approve (exit $ctl, want 2)" >&2; rc=1; }
+  case "$cout" in
+    *SELF-REVIEWED*) echo "SELF-TEST FAIL: a head carrying an outstanding refusal published as SELF-REVIEWED" >&2; rc=1 ;;
+  esac
+  case "$cout" in
+    *reviewer-a*) : ;;
+    *) echo "SELF-TEST FAIL: the refusal did not name who refused (got: $cout)" >&2; rc=1 ;;
+  esac
+
+  #     (g) A SECOND INDEPENDENT REVIEWER CANNOT VOTE AWAY THE FIRST ONE'S REFUSAL EITHER. #82
+  #         records this as the pre-existing half of the same defect; it is the same act.
+  printf '[{"body":"[reviewer-a]\\nReviewed-by: reviewer-a\\nReviewed-sha: %s\\nVerdict: changes-requested"},{"body":"[reviewer-b]\\nReviewed-by: reviewer-b\\nReviewed-sha: %s\\nVerdict: approve"}]' "$head" "$head" > "$tmp/c.json"
+  ctl=0; ( cd "$tmp" && REVIEW_POLICY_FILE="$pdir/ok" bash "$me" "$head" "$tmp/c.json" "$base" ) >/dev/null 2>&1 || ctl=$?
+  [ "$ctl" -eq 2 ] || { echo "SELF-TEST FAIL: a second reviewer voted away the first reviewer's refusal (exit $ctl, want 2)" >&2; rc=1; }
+
+  #     (h) AND A REVIEWER MAY WITHDRAW ITS OWN REFUSAL. This is the direction that keeps a refused
+  #         branch clearable; without it the fix above traps every refused pull request forever.
+  printf '[{"body":"[reviewer-a]\\nReviewed-by: reviewer-a\\nReviewed-sha: %s\\nVerdict: changes-requested"},{"body":"[reviewer-a]\\nReviewed-by: reviewer-a\\nReviewed-sha: %s\\nVerdict: approve"}]' "$head" "$head" > "$tmp/c.json"
+  ( cd "$tmp" && REVIEW_POLICY_FILE="$pdir/ok" bash "$me" "$head" "$tmp/c.json" "$base" ) >/dev/null 2>&1 \
+    || { echo "SELF-TEST FAIL: a reviewer could not withdraw its own refusal, so a refused branch can never be cleared" >&2; rc=1; }
+
   rm -rf "$pdir"
 
   # 6. AN ACCURATE SHORT REVIEW MUST PASS. The previous build's character floor rejected a
@@ -413,7 +511,7 @@ Agent: product"
     *) echo "SELF-TEST FAIL: an unattributable verdict was not distinguished from an absent one (got: $qout)" >&2; rc=1 ;;
   esac
 
-  [ "$rc" -eq 0 ] && echo "self-test passed: a missing file refuses, an author cannot certify its own work, a stale sha does not carry over, a short accurate review passes, a QUOTED verdict is not a verdict, and a verdict that names somebody other than its poster is refused"
+  [ "$rc" -eq 0 ] && echo "self-test passed: a missing file refuses, an author cannot certify its own work, a stale sha does not carry over, a short accurate review passes, a QUOTED verdict is not a verdict, a verdict that names somebody other than its poster is refused, and a landed refusal survives every later verdict except its own reviewer's"
   return "$rc"
 }
 

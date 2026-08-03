@@ -178,6 +178,25 @@ func publish(t *testing.T, dir, selftest, check, reviewRC string) (state, desc s
 // commit authored by `dev`.
 type reviewFixture struct {
 	dir, head, base string
+
+	// policy, when set, is written to a file the gate is pointed at with REVIEW_POLICY_FILE.
+	// `.workflow/review-policy` is PROJECT-owned and this repository's says `self-allowed`, so a
+	// fixture that does not say which policy it is under is testing whichever one the temp
+	// directory happens to imply — the strict default. Issue #82 lives entirely in the permissive
+	// one, so it says so.
+	policy string
+}
+
+// selfAllowed returns the fixture under the `self-allowed` policy — the one 11605b5 enabled and
+// the one Issue #82 is about.
+func (f reviewFixture) selfAllowed(t *testing.T) reviewFixture {
+	t.Helper()
+	path := filepath.Join(f.dir, "policy")
+	if err := os.WriteFile(path, []byte("self-allowed\n"), 0o644); err != nil {
+		t.Fatalf("cannot write the policy file: %v", err)
+	}
+	f.policy = path
+	return f
 }
 
 func newReviewFixture(t *testing.T) reviewFixture {
@@ -238,6 +257,9 @@ func (f reviewFixture) checkOut(t *testing.T, bodies ...string) (int, string) {
 	script := filepath.Join(repoRoot(t), ".workflow", "bin", "check-review.sh")
 	cmd := exec.Command("bash", script, f.head, "comments.json", f.base)
 	cmd.Dir = f.dir
+	if f.policy != "" {
+		cmd.Env = append(os.Environ(), "REVIEW_POLICY_FILE="+f.policy)
+	}
 	out, err := cmd.CombinedOutput()
 	rc := 0
 	if err != nil {
@@ -583,4 +605,162 @@ func TestCheckerSelfTestPasses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("check-review.sh --self-test failed: %v\n%s", err, out)
 	}
+}
+
+// TestASelfApproveDoesNotEraseARefusal is Issue #82. `11605b5` enabled self-review and stated its
+// own invariant — "this widens WHO may certify, never WHAT counts as certified" — and the invariant
+// did not hold: the gate selected exactly ONE verdict block for the head, `| last`, so `refused` was
+// computed from the final comment alone and an earlier `changes-requested` was never read. An author
+// erased an independent refusal by posting a self-approve after it. No code change, no new commit.
+//
+// BOTH CONTROLS ARE DRIVEN, and they are the point. The defect's signature is that the test row is
+// byte-identical in outcome to the no-refusal control, so a probe that cannot tell the two controls
+// apart proves nothing by agreeing with either of them.
+//
+// THE RULE CHOSEN, and why. A refusal is cleared only by a LATER VERDICT FROM THE SAME REVIEWER —
+// the gate keeps each reviewer's most recent verdict for the head and refuses while any of them is
+// `changes-requested`. That makes "a reviewer changed its mind" the only thing that clears a
+// refusal, which is criterion 4, and it means nobody can vote away somebody else's refusal —
+// neither the author (criterion 1) nor a second independent reviewer, which the Issue records as
+// the pre-existing half of the same defect. A push still clears everything, because a verdict is
+// bound to a head sha (criterion 3), so a refused branch is fixed by fixing it and never trapped.
+func TestASelfApproveDoesNotEraseARefusal(t *testing.T) {
+	f := newReviewFixture(t).selfAllowed(t) // the one commit here is `Agent: dev`
+
+	// `dev` built this branch, so a verdict from dev is a SELF-review; `qa` built none of it.
+	selfApprove := posted("dev", "dev", f.head, "approve")
+	qaRefusal := posted("qa", "qa", f.head, "changes-requested")
+
+	cases := []struct {
+		name     string
+		kind     string // CONTROL or TEST
+		comments []string
+		wantRC   int
+		want     string
+		notWant  string
+	}{
+		{
+			// CONTROL. An independent refusal, alone, refuses with its own exit code.
+			name:     "control: an independent refusal alone refuses",
+			kind:     "CONTROL",
+			comments: []string{qaRefusal},
+			wantRC:   2,
+			want:     "requests changes",
+		},
+		{
+			// CONTROL, and CRITERION 2. A self-approve with nothing before it still passes as a
+			// self-review. A fix that refuses everything satisfies criterion 1 and disables the
+			// feature 11605b5 had just enabled.
+			name:     "control: a self-approve alone still passes as SELF-REVIEWED",
+			kind:     "CONTROL",
+			comments: []string{selfApprove},
+			wantRC:   3,
+			want:     "SELF-REVIEWED",
+		},
+		{
+			// THE DEFECT, AND CRITERION 1. Under the shipped gate this row was byte-identical to
+			// the control above: rc=3, "no independent agent has looked" — while an independent
+			// agent had looked and had said no.
+			name:     "an author cannot erase an independent refusal with a self-approve",
+			kind:     "TEST",
+			comments: []string{qaRefusal, selfApprove},
+			wantRC:   2,
+			want:     "requests changes",
+			notWant:  "SELF-REVIEWED",
+		},
+		{
+			// CRITERION 4. A reviewer changing its own mind must remain possible, and it is the
+			// ONLY thing that clears a refusal. `qa` refuses, then `qa` approves.
+			name:     "a reviewer may withdraw its own refusal",
+			kind:     "TEST",
+			comments: []string{qaRefusal, posted("qa", "qa", f.head, "approve")},
+			wantRC:   0,
+			want:     "review ok",
+		},
+		{
+			// CRITERION 4's other half, stated as behaviour rather than left implicit: a SECOND
+			// independent reviewer cannot vote away the first one's refusal either. The Issue
+			// records this as the pre-existing half of the defect and calls it less alarming; it is
+			// the same act, and a human resolving a disagreement can do so by having the refuser
+			// withdraw.
+			name:     "a second independent reviewer cannot vote away the first one's refusal",
+			kind:     "TEST",
+			comments: []string{qaRefusal, posted("product", "product", f.head, "approve")},
+			wantRC:   2,
+			want:     "requests changes",
+		},
+		{
+			// AND THE ORDER MUST NOT MATTER. An approve followed by a refusal already refused under
+			// the old gate — for the wrong reason, because `last` happened to point at the refusal.
+			// It must still refuse now that `last` is not what decides.
+			name:     "a refusal posted after an approve still refuses",
+			kind:     "TEST",
+			comments: []string{posted("qa", "qa", f.head, "approve"), qaRefusal},
+			wantRC:   2,
+			want:     "requests changes",
+		},
+		{
+			// THE REFUSAL MUST BE ATTRIBUTED. "changes were requested" without saying by whom sends
+			// the author looking through every comment on the pull request.
+			name:     "the refusal names who refused",
+			kind:     "TEST",
+			comments: []string{qaRefusal, selfApprove},
+			wantRC:   2,
+			want:     "qa",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rc, out := f.checkOut(t, tc.comments...)
+			if rc != tc.wantRC {
+				t.Errorf("[%s] check-review.sh exited %d, want %d", tc.kind, rc, tc.wantRC)
+			}
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("[%s] the gate said %q, which does not carry %q",
+					tc.kind, strings.TrimSpace(out), tc.want)
+			}
+			if tc.notWant != "" && strings.Contains(out, tc.notWant) {
+				t.Errorf("[%s] the gate said %q, which carries %q — an independent refusal was "+
+					"erased and the result is indistinguishable from there never having been one",
+					tc.kind, strings.TrimSpace(out), tc.notWant)
+			}
+		})
+	}
+
+	// CRITERION 3. A REFUSED BRANCH IS FIXED BY FIXING IT, NEVER TRAPPED. A push makes a new head,
+	// and a verdict is bound to the head it names — so the refusal above does not follow the code
+	// that answered it. Without this, criterion 1's fix makes every refused pull request
+	// permanently unmergeable, which is a worse failure than the one being fixed.
+	t.Run("a refusal does not carry over to a new head", func(t *testing.T) {
+		g := newReviewFixture(t).selfAllowed(t)
+		oldHead := g.head
+
+		run := exec.Command("git", "commit", "-q", "--allow-empty", "-m", "fix(x): answer the review\n\nAgent: dev")
+		run.Dir = g.dir
+		run.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+		if out, err := run.CombinedOutput(); err != nil {
+			t.Fatalf("cannot push a new head onto the fixture: %v\n%s", err, out)
+		}
+		rev := exec.Command("git", "rev-parse", "HEAD")
+		rev.Dir = g.dir
+		newHeadRaw, err := rev.Output()
+		if err != nil {
+			t.Fatalf("cannot read the new head: %v", err)
+		}
+		g.head = strings.TrimSpace(string(newHeadRaw))
+		if g.head == oldHead {
+			t.Fatalf("the fixture did not actually advance: head is still %s", oldHead)
+		}
+
+		// The refusal names the OLD head; the approve names the new one.
+		rc, out := g.checkOut(t,
+			posted("qa", "qa", oldHead, "changes-requested"),
+			posted("qa", "qa", g.head, "approve"),
+		)
+		if rc != 0 {
+			t.Errorf("check-review.sh exited %d, want 0 — a refusal of a PREVIOUS head followed the "+
+				"code that answered it, so a refused branch can never be fixed\n%s", rc, out)
+		}
+	})
 }
