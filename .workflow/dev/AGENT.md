@@ -21,9 +21,13 @@ says what the verdict is.
 
 ## Before you believe a green or a red, check the instrument
 
-**Nine wrong measurements in one session, every one the same shape: the instrument answered a question
-adjacent to the one that mattered.** Not one was a wrong conclusion from good evidence. Each was a
-confident answer to a question nobody asked.
+**Eleven wrong measurements in one session, and the list below is how to count them: sum the instances,
+not the bullets — the first bullet is five.** Each is recorded on the pull request where it happened,
+so the number is re-derivable rather than asserted. It was first written here as "nine", which did not
+match its own list; that is the defect this section exists to prevent, in this section.
+
+**Ten of the eleven were one shape: the instrument answered a question adjacent to the one that
+mattered.** Not a wrong conclusion from good evidence — a confident answer to a question nobody asked.
 
 - A mutation whose pattern **matched nothing** — five times. `perl -0pi -e 's/os.Rename(tmp, path)/…/'`
   against source that reads `os.Rename(tmpName, dest)` edits no bytes and reports a serene `ok`.
@@ -48,6 +52,17 @@ confident answer to a question nobody asked.
 5. **Run a control on every empty result.** A broken query and a genuine absence are identical. Point
    the same query at something you know exists.
 6. **Reset the scratch tree before each run**, and check `git status` is clean first.
+
+**The eleventh was a different species, and the six rules above do not catch it.** Verifying a guard on
+#115, I planted a bypass using the guard's own sentinel names — and the guard matches on exactly those
+name strings. My mutation varied the thing the guard indexes on, so it could only ever exercise the
+half that works. A reviewer renamed the sentinel across the tree, left the guard's map stale the way a
+refactor forgets a guard, and it passed green on the exact violation it exists to catch.
+
+**So: ask what the assertion KEYS ON, and vary that.** A guard that matches a name can only be tested
+by changing the name; one that matches a type, by changing the type. Product's rule on #101 is *"a guard
+is written against the shape of the bug that was just found"* — this is its mirror, **a mutation written
+against the shape of the guard**, and it is the one failure the checklist above cannot see.
 
 **The only detector that has never failed me: a result you cannot reconcile with what the code plainly
 does is a broken measurement, not a finding.** A conflict in a file the branch does not touch. A test
