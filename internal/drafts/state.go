@@ -74,20 +74,42 @@ func (o *Outbox) SetState(id hub.NoteID, st State, detail string) error {
 	if _, serr := os.Stat(dir); serr != nil {
 		return hub.Refusedf(ErrNoSuchDraft, "%q", string(id))
 	}
-	body, err := json.Marshal(stateFile{State: string(st), Detail: detail})
+	body, err := marshalState(st, detail)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, stateFileName), body, 0o600)
+	// REPLACED ATOMICALLY, NOT REWRITTEN IN PLACE. A process killed part-way through an os.WriteFile
+	// leaves a truncated state record, which is the `d026` shape Issue #69 measured: honestly
+	// reported as undetermined, but a state a person lost for no reason.
+	return replaceFileSynced(dir, filepath.Join(dir, stateFileName), body)
+}
+
+// marshalState encodes a state record. One encoder, so the writer that creates a draft and the
+// writer that updates one cannot drift into two formats.
+func marshalState(st State, detail string) ([]byte, error) {
+	return json.Marshal(stateFile{State: string(st), Detail: detail})
 }
 
 // StateOf reports where a draft stands.
 //
-// A draft with no state file is [StateDrafted] — a REAL VALUE, not an absence. Every draft that
-// exists is somewhere, and "written and resting" is where a draft is the moment it is written.
-// A state file that exists and cannot be read is undetermined, and is emphatically not `drafted`:
-// reporting a draft as resting when the record of what happened to it is unreadable is the
-// specific lie this file is built to prevent.
+// # A DRAFT WITH NO STATE FILE IS UNDETERMINED. IT USED TO BE `drafted`, AND THAT WAS ISSUE #69.
+//
+// The reasoning was: every draft that exists is somewhere, and "written and resting" is where a
+// draft is the moment it is written. Sound — and load-bearing on an invariant that was not true.
+// [Outbox.Revise] created the directory first and wrote into it after, so a process killed between
+// the two left a directory with nothing in it, and this function called that healthy and exited 0.
+// A person was told their destroyed draft was resting safely in their outbox.
+//
+// [Outbox.Revise] now makes that shape unrepresentable — a draft is renamed into place whole, state
+// file and all. So the mapping is no longer needed for any draft this build writes, and what is
+// left of it is only the damage: a directory with no state file is now something that went wrong,
+// and the honest answer about it is that this could not be determined. Never `drafted`.
+// TestADraftDirectoryIsNeverVisibleBeforeItsStateFile asserts the invariant directly, because the
+// comment that used to assert it was false and nothing noticed.
+//
+// A state file that exists and cannot be read is undetermined for the same reason: reporting a
+// draft as resting when the record of what happened to it is unreadable is the specific lie this
+// file is built to prevent.
 func (o *Outbox) StateOf(id hub.NoteID) StateReport {
 	dir, err := o.pathFor(id)
 	if err != nil {
@@ -102,7 +124,7 @@ func (o *Outbox) StateOf(id hub.NoteID) StateReport {
 	body, rerr := os.ReadFile(filepath.Join(dir, stateFileName))
 	if rerr != nil {
 		if errors.Is(rerr, os.ErrNotExist) {
-			return StateReport{Known: tri.Yes, Exists: tri.Yes, State: StateDrafted}
+			return StateReport{Known: tri.Undetermined, Exists: tri.Yes, Why: "the draft's state record is missing, which means this draft was left behind by a write that did not finish"}
 		}
 		return StateReport{Known: tri.Undetermined, Exists: tri.Yes, Why: rerr.Error()}
 	}

@@ -316,19 +316,23 @@ func renderAgentResponse(env cli.Env, resp agentapi.Response, asJSON bool) int {
 
 	switch {
 	case resp.Op == agentapi.OpTickets:
-		fmt.Fprintf(env.Stdout, "tickets:     %d\n", len(resp.Tickets))
+		agentCountLine(env.Stdout, "tickets", len(resp.Tickets), resp.Outcome)
 		for _, t := range resp.Tickets {
 			fmt.Fprintf(env.Stdout, "  %s  %s\n", t.ID, t.Title.Render())
 		}
 	case resp.Op == agentapi.OpDrafts || resp.Op == agentapi.OpDraftWrite:
-		fmt.Fprintf(env.Stdout, "drafts:      %d\n", len(resp.Drafts))
+		agentCountLine(env.Stdout, "drafts", len(resp.Drafts), resp.Outcome)
 		for _, d := range resp.Drafts {
 			// STATE ON EVERY LINE (criterion 2). A draft that did not say it was unpublished would
 			// be a draft somebody's summary calls published.
-			fmt.Fprintf(env.Stdout, "  %s  %s  (%d revision(s))\n", d.ID, d.State, d.Revisions)
+			//
+			// THE REVISION COUNT IS RENDERED BY THE VIEW (Issue #101, blocker 2(b)). This line
+			// printed `(%d revision(s))` off a plain int, so a draft with one revision nobody
+			// could read said `(0 revision(s))` — a determined zero, in the surface an AI reads.
+			fmt.Fprintf(env.Stdout, "  %s  %s  (%s)\n", d.ID, d.State, d.RenderRevisions())
 		}
 	case resp.Op == agentapi.OpHub:
-		fmt.Fprintf(env.Stdout, "notes:       %d\n", len(resp.Notes))
+		agentCountLine(env.Stdout, "notes", len(resp.Notes), resp.Outcome)
 		for _, n := range resp.Notes {
 			fmt.Fprintf(env.Stdout, "  %s  %s  [%s]\n", n.ID, n.Title, n.Visibility)
 		}
@@ -362,6 +366,24 @@ func renderAgentResponse(env cli.Env, resp agentapi.Response, asJSON bool) int {
 		fmt.Fprintf(env.Stdout, "live:        %t\n", resp.Grant.Live)
 	}
 	return resp.Outcome.Exit()
+}
+
+// agentCountLine prints `tickets:` / `drafts:` / `notes:`, and it is Issue #101's blocker 2(c).
+//
+// A COUNT IS ONLY PRINTED WHEN THE OUTCOME ESTABLISHED ONE. The three lines printed
+// `len(resp.Tickets|Drafts|Notes)` unconditionally, so a refusal and an undetermined answer both
+// carried `tickets:     0` — the same line that means "3 tickets" on success, said about material
+// nobody read. `--json` already omitted the field and the exit codes were already right; this was
+// the human rendering alone, which is the rendering a person actually reads.
+//
+// The wording is `omw inbox list`'s, taken from [tri] rather than respelled, because five surfaces
+// already answer this correctly and a sixth vocabulary is how two of them drift.
+func agentCountLine(w io.Writer, label string, n int, outcome agentapi.Outcome) {
+	if outcome != agentapi.OutcomeOK {
+		fmt.Fprintf(w, "%-13s%s\n", label+":", tri.Undetermined.String())
+		return
+	}
+	fmt.Fprintf(w, "%-13s%d\n", label+":", n)
 }
 
 // agentSchema prints the agent API's own description of itself. It needs no daemon: it is a

@@ -301,6 +301,33 @@ func answerDrafts(base Response, src Sources) Response {
 	base.Drafts = ds
 	base.setHubContacted(tri.No)
 	base.Message = "every draft here is unpublished; nothing in the outbox has been sent to a hub"
+	return markUndeterminedDrafts(base)
+}
+
+// markUndeterminedDrafts carries a draft nobody could read up to the OUTCOME, which is what the
+// exit code is derived from (Issue #101, blocker 2(a) and (b)).
+//
+// IT IS THE SAME SHAPE answerHub ALREADY USES for a note whose readability could not be worked
+// out: the material that WAS established is still served, and the outcome says the answer as a
+// whole is not established. That is why the draft is still listed below the outcome line — the
+// person is not deprived of what was read — while no script and no agent can take exit 0 from it.
+//
+// It is one function called by both draft paths rather than two branches, because two branches is
+// how `omw agent drafts` and `omw agent draft.write` come to disagree about the same draft.
+func markUndeterminedDrafts(base Response) Response {
+	n := 0
+	for _, d := range base.Drafts {
+		if !d.Determined() {
+			n++
+		}
+	}
+	if n == 0 {
+		return base
+	}
+	base.Outcome = OutcomeUndetermined
+	base.Code = ErrLocalUndetermined.Code
+	base.Message = "some drafts could not be read: where they stand, or how many revisions they have, " +
+		"was not established. This is not an empty outbox and it is not a draft resting in it"
 	return base
 }
 
@@ -419,7 +446,10 @@ func answerDraftWrite(base Response, req Request, src Sources) Response {
 	// the material having been read from the hub. `manual` is the default (§3.3).
 	base.Message = "written to the outbox as an unpublished draft; nothing has been published, and " +
 		"reading hub material does not publish anything"
-	return base
+	// THE WRITE PATH GETS THE SAME TREATMENT. The revision was written — that part is established
+	// and the message says so — but if the view of the draft afterwards could not be read, the
+	// response must not carry a determined state or a determined count for it.
+	return markUndeterminedDrafts(base)
 }
 
 func answerPublish(base Response, req Request, grant hub.Grant, src Sources) Response {

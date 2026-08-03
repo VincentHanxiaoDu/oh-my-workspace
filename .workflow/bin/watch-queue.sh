@@ -41,6 +41,32 @@ esac
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
+# THE REASON A POLL FAILED IS AT THE END OF ITS OUTPUT, NEVER AT THE START (Issue #64).
+#
+# `queue.sh` is captured with `2>&1`, so what comes back is EVERYTHING it printed before it died —
+# headings, work items, then the failure. Keeping the first 200 characters therefore keeps the
+# headings and throws away the only part that says what went wrong. Measured, with a stub that
+# prints a normal queue and then fails the way the real one did:
+#
+#   head   LOOKUP FAILED: FEATURES WHOSE WORK HAS LANDED — UAT on main and CLOSE   #9  feat(notes):
+#          draft notes into the outbox and publish them   #10 feat(publish): three publication modes…
+#   tail   LOOKUP FAILED: …#38 feat(outbox): drafts and modes gh: dial tcp 140.82.116.6:443:
+#          operation timed out
+#
+# Same bytes, same budget. One of them names the outage. The first was read as a misfire and a round
+# of a release day was spent proving the watch had been right all along.
+#
+# A SHORT REASON IS STILL SHOWN WHOLE, byte for byte as before. A fix that always printed a tail
+# would mangle the common case, where the entire output is the reason and there is nothing to trim.
+reason() { # reason <text> <budget>
+  local flat budget=$2
+  flat=$(printf '%s' "$1" | tr '\n' ' ')
+  if [ "${#flat}" -le "$budget" ]; then printf '%s' "$flat"; return 0; fi
+  # The ellipsis is inside the budget, so the line length is unchanged and the reader is told that
+  # something was dropped — an elided reason must not read like a complete one.
+  printf '…%s' "${flat: -$((budget - 1))}"
+}
+
 self_test() {
   local rc=0
   # THE FAILURE PATH MUST EMIT, AND MUST NOT END THE WATCH — driven against a queue that always
@@ -64,6 +90,47 @@ self_test() {
   # TWO of them: one proves it emits, two prove it did not exit after the first.
   [ "$n_fail" -ge 2 ] \
     || { echo "SELF-TEST FAIL: a failing poll emitted once and stopped — a transient outage must wake the role, not end the watch (got $n_fail)" >&2; rc=1; }
+
+  # THE REASON MUST SURVIVE A LONG OUTPUT (Issue #64). The arm above drives a stub whose entire
+  # output is `boom` — under the budget, so it could never observe the truncation, which is exactly
+  # why this shipped and stayed shipped. This one prints a normal-looking queue FIRST and fails
+  # after it, which is what `2>&1` on a real `queue.sh` produces.
+  local ltmp lout
+  ltmp=$(mktemp -d)
+  cat > "$ltmp/queue.sh" <<'STUB'
+#!/usr/bin/env bash
+# A queue that answers at length and then dies, the way the real one did.
+echo "FEATURES WHOSE WORK HAS LANDED — UAT on main and CLOSE"
+for i in $(seq 1 12); do echo "  #$i  feat(notes): draft notes into the outbox and publish them"; done
+echo "gh: dial tcp 140.82.116.6:443: operation timed out" >&2
+exit 1
+STUB
+  chmod +x "$ltmp/queue.sh"
+  cp "${BASH_SOURCE[0]}" "$ltmp/watch-queue.sh"
+  ( bash "$ltmp/watch-queue.sh" dev 1 >"$ltmp/out" 2>&1 & echo $! > "$ltmp/pid" )
+  sleep 3
+  kill "$(cat "$ltmp/pid")" 2>/dev/null || true
+  lout=$(cat "$ltmp/out" 2>/dev/null || echo "")
+  rm -rf "$ltmp"
+  case "$lout" in
+    *"operation timed out"*) : ;;
+    *) echo "SELF-TEST FAIL: a poll that printed a long queue and THEN failed reported the queue and not the failure — the reason is at the end and the head was kept (got: $lout)" >&2; rc=1 ;;
+  esac
+
+  # AND A SHORT REASON IS STILL SHOWN WHOLE. The `boom` arm above already drives this path; here the
+  # rendering is asserted byte for byte, because a fix that always printed a tail would put an
+  # ellipsis on output that was never truncated.
+  local stmp sout
+  stmp=$(mktemp -d)
+  printf '#!/usr/bin/env bash\necho "boom" >&2\nexit 1\n' > "$stmp/queue.sh"; chmod +x "$stmp/queue.sh"
+  cp "${BASH_SOURCE[0]}" "$stmp/watch-queue.sh"
+  ( bash "$stmp/watch-queue.sh" dev 1 >"$stmp/out" 2>&1 & echo $! > "$stmp/pid" )
+  sleep 2
+  kill "$(cat "$stmp/pid")" 2>/dev/null || true
+  sout=$(grep -m1 '^LOOKUP FAILED' "$stmp/out" 2>/dev/null || echo "")
+  rm -rf "$stmp"
+  [ "$sout" = "LOOKUP FAILED: boom" ] \
+    || { echo "SELF-TEST FAIL: a short reason was not shown byte-identically — expected 'LOOKUP FAILED: boom', got '$sout'" >&2; rc=1; }
 
   # An unknown role must refuse rather than watch an empty queue forever.
   ( REPO=x/y bash "${BASH_SOURCE[0]}" not-a-role 1 ) >/dev/null 2>&1 \
@@ -148,14 +215,15 @@ seen=""
 polls=0
 
 here_bin=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-# Sleep until the limit resets, but never less than one interval and never more than ten minutes —
-# an unreadable reset must not park the watch indefinitely.
-HOLD_SLEEP() {
-  local s; s=$("$here_bin/gh-budget.sh" reset-in 2>/dev/null || echo "$interval")
-  [ "$s" -lt "$interval" ] && s=$interval
-  [ "$s" -gt 600 ] && s=600
-  echo "$s"
-}
+# Sleep until the throttle that is actually holding this watch is expected to lift, but never less
+# than one interval and never more than ten minutes — an unreadable reset must not park the watch
+# indefinitely.
+#
+# `hold-for`, NOT `reset-in`: the two causes clear on different clocks. A PRIMARY exhaustion clears
+# when the hourly quota resets. A SECONDARY (burst) limit clears with QUIET and has nothing to do
+# with that reset — waiting on `reset-in` there is waiting on a signal that never described the
+# problem (Issue #81).
+HOLD_SLEEP() { "$here_bin/gh-budget.sh" hold-for "$interval" 2>/dev/null || echo "$interval"; }
 
 while true; do
   # THE WORK COMES BEFORE THE WATCHING. Below the reserve this watch stops polling and waits for the
@@ -167,14 +235,26 @@ while true; do
   # deliberately idle, and when it resumes. Reading the limit is free and does not spend it.
   bmsg=$("$here_bin/gh-budget.sh" check 2>&1) && bok=0 || bok=$?
   if [ "${bok:-0}" -eq 1 ]; then
-    echo "HOLDING — $bmsg. Not polling: the remaining budget is reserved for this role's own work."
+    echo "HOLDING — $bmsg"
     sleep "$(HOLD_SLEEP)"
     continue
   fi
   out=""
   if ! out=$("$here/queue.sh" "$role" 2>&1); then
-    # A poll that could not be answered is an EVENT, not silence.
-    echo "LOOKUP FAILED: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"
+    # A REFUSED CALL IS THE ONLY PLACE A SECONDARY RATE LIMIT IS EVER VISIBLE (Issue #81). The budget
+    # guard above reads `/rate_limit`, which reports the PRIMARY hourly quota and nothing else —
+    # measured at 4896/5000 while every one of these polls was coming back 403. So the 403 is handed
+    # to the guard here, and it becomes the reason the NEXT check holds instead of waving the watch
+    # through. Reporting this as `LOOKUP FAILED` and polling again on the interval is what turned a
+    # throttle into a self-sustaining outage: each retry renews the burst that caused it.
+    if hold=$("$here_bin/gh-budget.sh" note-failure "$out" 2>/dev/null); then
+      echo "HOLDING — GitHub refused this poll with a SECONDARY (burst/concurrency) rate limit, which does NOT appear in the primary quota. Standing down for about ${hold}s; a secondary limit clears with quiet, not on the reset clock, so retrying now extends it."
+      sleep "$(HOLD_SLEEP)"
+      continue
+    fi
+    # A poll that could not be answered is an EVENT, not silence — and it is a DIFFERENT event from
+    # the hold above. A dial timeout is not a throttle and quiet does not fix it.
+    echo "LOOKUP FAILED: $(reason "$out" 200)"
     sleep "$interval"
     continue
   fi

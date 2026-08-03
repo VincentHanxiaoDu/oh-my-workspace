@@ -19,13 +19,29 @@ import (
 // the gate refuse the verdict it has just posted — which is the exact failure the script exists to
 // end, arriving through the script itself.
 //
-// It disagreed. `git show --name-only --format=""` is PORCELAIN — output formatted for people — and
-// git 2.54 on the runner emits a leading blank line where git 2.50.1 on a laptop does not. A blank
-// line does not match `^openspec/`, so the "changed nothing outside openspec/" predicate said this
-// archive commit DID touch something else, and its author became an author. On the runner only:
+// It disagreed. `git show --name-only --format=""` is PORCELAIN — output formatted for people, and
+// not a stable interface. A blank line in that output does not match `^openspec/`, so the "changed
+// nothing outside openspec/" predicate says an archive commit DID touch something else, and its
+// author becomes an author. Driven over a fixture, the pre-fix script answers:
 //
-//	git 2.50.1  ->  dev
-//	git 2.54.0  ->  dev, product
+//	no leading blank line   ->  dev
+//	leading blank line      ->  dev, product
+//
+// THAT BLANK LINE IS NOT GIT 2.54's, AND THIS FILE USED TO SAY IT WAS (Issue #73). The attribution
+// was inferred, never measured — only git 2.50.1 was installed on the machine that did the work, so
+// the blank line above was supplied by a stand-in `git` on PATH. #73 built a real git 2.54.0 from
+// source and asked it, over this same fixture and over the real range that diverged
+// (b699d57c..66ddcbaf, pull request #45). It emits NO blank line — byte-for-byte what 2.50.1 emits —
+// and the pre-fix script answers `dev` under it, not `dev, product`. Real git 2.55.0 likewise. So
+// **no released git is known to emit the shape this test supplies**, and #61's own final root cause
+// says the same thing from the other direction: the gate and the tool were different CODE, and the
+// git version was never load-bearing.
+//
+// THE TEST BELOW IS STILL WORTH ITS KEEP, for the reason it was worth keeping before anyone blamed a
+// version: reading porcelain to decide authorship is fragile whether or not a shipped git exercises
+// the fragility today. It asserts the answer does not move when the porcelain does. It is hardening
+// against a latent defect, NOT a regression test for an observed one — do not read a failure here as
+// "the runner's git changed".
 //
 // THESE TESTS DRIVE THE INSTALLED SCRIPT. They never restate its logic. `.workflow/bin/` is
 // framework-owned and is replaced wholesale by the next `install.sh` run (Issue #58), so an
@@ -37,13 +53,14 @@ import (
 // self-test is built by the same git whose output shape is the variable, so it agrees with itself on
 // every machine — which is precisely why the outage was invisible for as long as it was. The test
 // below puts a stand-in `git` ahead of the real one on PATH, one that perturbs the porcelain command
-// exactly as 2.54 does and leaves the plumbing command untouched, and demands the same answer from
-// both. A script that reads plumbing, or that strips blank lines, passes; the shipped one does both.
+// and leaves the plumbing command untouched, and demands the same answer from both. A script that
+// reads plumbing, or that strips blank lines, passes; the shipped one does both.
 //
 // WHAT THIS ESTABLISHES AND WHAT IT DOES NOT. It establishes that a leading blank line in
-// `git show --name-only` output flips the answer of the pre-fix script and not of this one. It does
-// NOT establish, from this machine, that git 2.54 is what emits that line — only git 2.50.1 is
-// installed here. That attribution comes from the runner's own observation recorded in #61.
+// `git show --name-only` output flips the answer of the pre-fix script and not of this one — that
+// the shipped script is insensitive to the shape of the porcelain. It does NOT establish that any
+// real git emits such a line; measured against git 2.50.1, 2.54.0 and 2.55.0, none does (#73). The
+// perturbation is chosen to be a shape porcelain COULD take, not one anybody has observed.
 
 // gitProbe is what this file could learn about the git it has to work with. THE POINT IS TO NAME
 // WHAT COULD NOT BE ANSWERED rather than to assume a value for it: a test that guesses at its
@@ -125,14 +142,15 @@ func prAuthorsScript(t *testing.T) string {
 	return path
 }
 
-// shimmedPATH writes a stand-in `git` that reproduces the runner's porcelain output shape — a
-// LEADING AND TRAILING BLANK LINE around `git show --name-only` — and delegates everything else,
+// shimmedPATH writes a stand-in `git` that perturbs the porcelain output shape — a LEADING AND
+// TRAILING BLANK LINE around `git show --name-only` — and delegates everything else,
 // including the plumbing `diff-tree`, untouched to the real git. It returns a PATH with the shim
 // first.
 //
 // The blank lines are the whole of the perturbation. Any script that answers differently under this
-// PATH is deriving authorship from output formatted for people, and will disagree with itself
-// across git versions.
+// PATH is deriving authorship from output formatted for people, and is only as stable as that
+// formatting. No released git is known to emit this shape (#73); it is a shape porcelain is free to
+// take, which is the whole reason authorship must not be read from it.
 func shimmedPATH(t *testing.T, realGit string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -263,14 +281,15 @@ func TestAuthorshipIsTheSameAnswerUnderEitherGitOutputShape(t *testing.T) {
 		got  []string
 	}{
 		{"the git on this machine", plain},
-		{"a git whose `show --name-only` output carries blank lines, as the runner's does", shimmed},
+		{"a git whose `show --name-only` output carries blank lines — a shape no released git is known to emit, and which porcelain is nonetheless free to take", shimmed},
 	} {
 		if strings.Join(c.got, ",") != strings.Join(want, ",") {
 			t.Errorf("under %s, pr-authors.sh answered %v, want %v.\n"+
 				"The archive commit changed nothing outside openspec/, so it confers no "+
 				"authorship. If `product` appears here, the derivation is reading git's "+
-				"PORCELAIN output — `git show --name-only --format=\"\"`, whose blank lines move "+
-				"between versions — instead of plumbing, or is not stripping blank lines before "+
+				"PORCELAIN output — `git show --name-only --format=\"\"`, which is formatted for "+
+				"people and guarantees nothing about blank lines — instead of plumbing, or is "+
+				"not stripping blank lines before "+
 				"testing them against ^openspec/. Read from `git diff-tree --no-commit-id "+
 				"--name-only -r`, and drop blank lines. This is Issue #61: the routing cleared a "+
 				"reviewer, the reviewer reviewed, and the gate refused the verdict.",
@@ -330,9 +349,9 @@ func TestSpecOnlyPredicateIsBlankLineProof(t *testing.T) {
 		}
 		if got != c.want {
 			t.Errorf("--is-spec-only on %q exited %d, want %d.\n"+
-				"A BLANK LINE IS NOT A PATH. `git show --name-only` emits one on some git versions "+
-				"and not others; if it is allowed to fail the ^openspec/ test then an archive "+
-				"commit confers authorship on the runner and not on a laptop (Issue #61).\n%s",
+				"A BLANK LINE IS NOT A PATH. `git show --name-only` is porcelain and promises "+
+				"nothing about blank lines; if one is allowed to fail the ^openspec/ test then an "+
+				"archive commit confers authorship wherever that shape appears (Issue #61).\n%s",
 				c.in, got, c.want, out)
 		}
 	}
@@ -401,7 +420,11 @@ func TestArchiveOnlyPullRequestCanBeReviewed(t *testing.T) {
 func (f *authorFixture) checkReview(t *testing.T, reviewer, verdict string) (int, string) {
 	t.Helper()
 	script := filepath.Join(repoRoot(t), ".workflow", "bin", "check-review.sh")
-	body := "Reviewed-by: " + reviewer + "\\nReviewed-sha: " + f.head + "\\nVerdict: " + verdict +
+	// The `[role]` marker is what the gate takes the reviewer's identity FROM since Issue #65 — a
+	// verdict with no poster is refused as unattributable, so a fixture without one would be
+	// testing that refusal rather than whatever this caller is asking about.
+	body := "[" + reviewer + "]" +
+		"\\nReviewed-by: " + reviewer + "\\nReviewed-sha: " + f.head + "\\nVerdict: " + verdict +
 		"\\nScope: the change is what the Issue asked for and no wider."
 	f.write("comments.json", `[{"body":"`+body+`"}]`)
 
