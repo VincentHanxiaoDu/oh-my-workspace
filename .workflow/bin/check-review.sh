@@ -127,8 +127,12 @@ run_gate() {
   # been a refusal, down to publishing "NO INDEPENDENT AGENT HAS LOOKED AT THIS" while one had
   # looked and had said no. `11605b5` enabled self-review claiming it widened WHO may certify and
   # never WHAT counts as certified; that is the claim this restores.
-  local records
-  records=$(jq -r --arg h "$head" '
+
+  # ONE DEFINITION, USED BY BOTH jq PROGRAMS BELOW. They ask different questions of the same
+  # comments and they must agree about what a quotation is: a fence honoured by one and not the
+  # other would make a quoted verdict invisible to the selector and visible to the #84 scan, which
+  # would turn every postmortem that pastes a bad sha into a red pull request.
+  local JQ_STRIP_FENCES='
     def strip_fences:
       split("\n")
       | reduce .[] as $l ({inb:false, out:[]};
@@ -136,6 +140,69 @@ run_gate() {
           elif .inb then .
           else .out += [$l] end)
       | .out | join("\n");
+'
+
+  # ISSUE #84: A VERDICT THE GATE CANNOT PLACE IS REPORTED, NOT DISCARDED IN SILENCE.
+  #
+  # Matching `Reviewed-sha:` against the head EXACTLY is correct and is not touched here — it is
+  # what makes a verdict stale the moment somebody pushes, and loosening it would let a review of
+  # old code certify new code. The defect was the silence on one particular miss.
+  #
+  # TWO WAYS A VERDICT CAN NAME A SHA THAT IS NOT THE HEAD, AND THEY ARE DIFFERENT FACTS:
+  #   1. the sha names a commit this repository KNOWS — an ordinary stale review. A push is
+  #      expected to produce these, they need no announcement, and announcing them would bury the
+  #      one that matters under noise on every branch that was ever pushed to. Unchanged: silent.
+  #   2. the sha names NO OBJECT AT ALL — nothing was ever reviewed there, so this cannot be a
+  #      stale review. Somebody posted a verdict that is not in force and nobody was told.
+  #
+  # Live on #38: a UAT refusal named e7e1368a7fbdd0c6ee7c07eebc0e5b6cf9d0e1b1 while the head was
+  # e7e1368a36734b898b95803e95c23348e3718245 — EIGHT SHARED HEX CHARACTERS, which is not chance and
+  # which everyone who read them side by side read as equal. The gate ran 28 seconds later and
+  # published `success`. A role believed it had blocked that pull request; the board said green.
+  # This is `could not determine` rendered as `nothing to see`, which is the one thing this project
+  # says a check must never do.
+  local unplaceable="" other_shas
+  other_shas=$(jq -r --arg h "$head" "$JQ_STRIP_FENCES"'
+    [ .[]
+      | ((.body // "") | gsub("\r"; "")) as $raw
+      | ($raw | strip_fences | split("\n")) as $lines
+      | select($lines | any(test("^Reviewed-by:")))
+      | select($lines | any(test("^Verdict:")))
+      | $lines[]
+      | select(test("^Reviewed-sha:"))
+      | sub("^Reviewed-sha:[[:space:]]*"; "") | sub("[[:space:]]+$"; "")
+    ] | map(select(. != $h and . != "")) | unique | .[]' "$comments")
+
+  if [ -n "$other_shas" ]; then
+    # PROBE THE CHECKOUT, NEVER ASSUME IT. In a shallow clone an object can be absent because it
+    # was not fetched, not because it does not exist — so "cat-file failed" would not mean
+    # "unplaceable" and accusing on it would be a false alarm of exactly the kind this Issue is
+    # about, pointed the other way. The review job checks out with fetch-depth: 0 today; that is a
+    # property of a framework-owned workflow file and not something this script may take on trust.
+    if [ "$(git rev-parse --is-shallow-repository 2>/dev/null || echo unknown)" != false ]; then
+      echo "::notice::this clone is shallow or its depth could not be read, so whether any verdict names an unknown commit COULD NOT BE DETERMINED. That is not a finding that they are all fine (#84)." >&2
+    else
+      local s
+      while IFS= read -r s; do
+        [ -n "$s" ] || continue
+        git cat-file -e "${s}^{commit}" 2>/dev/null || unplaceable="${unplaceable}${s} "
+      done <<UNPLACEABLE_SCAN
+$other_shas
+UNPLACEABLE_SCAN
+      if [ -n "$unplaceable" ]; then
+        echo "::error::a verdict on this pull request COULD NOT BE PLACED: it names sha(s) that are not the head and not any commit this repository knows — ${unplaceable% }" >&2
+        echo "  The head this gate is checking is $head." >&2
+        echo "  A verdict naming an unknown object is NOT a stale review: nothing was ever reviewed" >&2
+        echo "  at that sha, so whoever posted it has a verdict that is not in force and was never" >&2
+        echo "  told. A stale review — a sha this repository DOES know — is silent and is fine." >&2
+        echo "  Remedy: re-post the verdict with the full 40-character head sha above. Exact-sha" >&2
+        echo "  matching is deliberate and is not what is wrong here." >&2
+      fi
+    fi
+  fi
+
+  local records
+  records=$(jq -r --arg h "$head" "$JQ_STRIP_FENCES"'
     def field($n):
       [ .[] | select(test("^" + $n + ":"))
             | sub("^" + $n + ":[[:space:]]*"; "") | sub("[[:space:]]+$"; "") ] | first // "";
@@ -151,6 +218,10 @@ run_gate() {
     ] | .[] | [.role, .declared, .verdict] | join("\u001f")' "$comments")
 
   [ -n "$records" ] || {
+    # AN UNPLACEABLE VERDICT OUTRANKS "no review found" HERE TOO, and this early return is exactly
+    # where it would have been lost: "no review exists" is true, and it sends the reader hunting
+    # for a comment that is sitting right there naming a sha nobody can find.
+    if [ -n "$unplaceable" ]; then return 4; fi
     echo "::error::no review found for head $head. A push invalidates any earlier review — this head needs its own." >&2
     echo "  A verdict QUOTED inside a code fence or a '>' block is not a verdict and is not counted (#65)." >&2
     return 1
@@ -278,6 +349,23 @@ EOF
   # statement, and the good-approve path (refused=0) would abort the script instead of returning 0.
   if [ "$refused" -eq 1 ]; then rc=2; fi
 
+  # EXIT 4: A VERDICT COULD NOT BE PLACED (#84). A fourth fact needs a fourth code, for the same
+  # reason a refusal needed its own — the publishing step picks its wording from this number, and
+  # two facts sharing a code is how a landed refusal came to be published as an absent review.
+  #
+  # IT MUST NOT PASS, AND THAT IS MORE THAN REPORTING. The Issue's remedy asks for the miss to be
+  # REPORTED; reporting it into the log while still publishing `success` would leave #38 exactly as
+  # it is — green, merge-eligible, with a role believing it had blocked it — and the harm the Issue
+  # names is the merge-eligibility, not the quietness on its own.
+  #
+  # PRECEDENCE, STATED RATHER THAN LEFT TO THE ORDER OF LINES. 4 beats 0 and 1; it LOSES to 2.
+  #   - over 0: this is the whole defect. A pass while somebody's verdict lies unplaced is the thing.
+  #   - over 1: "no review exists" is true but sends the reader hunting for a comment that is in
+  #     fact sitting right there naming a sha nobody can find. The unplaceable one is actionable.
+  #   - under 2: a landed refusal is concrete, already red, and already tells the author what to do.
+  #     The unplaceable notice still prints above it, so nothing is lost by not owning the code.
+  if [ -n "$unplaceable" ] && [ "$rc" -ne 2 ]; then rc=4; fi
+
   [ "$rc" -eq 0 ] && echo "review ok: $head reviewed by '$reviewer', which authored none of its commits"
   [ "$rc" -eq 3 ] && echo "review ok (SELF-REVIEWED): $head certified by '$reviewer', which also built it. NO INDEPENDENT AGENT HAS LOOKED AT THIS."
   return "$rc"
@@ -324,7 +412,10 @@ Agent: dev-a"
   _run >/dev/null 2>&1 && { echo "SELF-TEST FAIL: an author reviewing its own work PASSED" >&2; rc=1; }
 
   # 4. A review of a DIFFERENT sha must not certify this head — a push invalidates a review.
-  _c "Reviewed-by: reviewer-a\\nReviewed-sha: 0000000000000000000000000000000000000000\\nVerdict: approve"
+  #    IT NAMES `$base`, A REAL EARLIER COMMIT, AND NOT AN ALL-ZEROS STRING. That is what a stale
+  #    review actually looks like, and since #84 the two are different facts: a sha this repository
+  #    knows is silently stale, a sha naming no object at all is reported. Arm 5i(e) drives the latter.
+  _c "Reviewed-by: reviewer-a\\nReviewed-sha: $base\\nVerdict: approve"
   _run >/dev/null 2>&1 && { echo "SELF-TEST FAIL: a review of another sha certified this head" >&2; rc=1; }
 
   # 5. changes-requested must FAIL, AND WITH ITS OWN EXIT CODE. Sharing one with "no review at all"
@@ -333,7 +424,7 @@ Agent: dev-a"
   local crc=0; _run >/dev/null 2>&1 || crc=$?
   [ "$crc" -eq 2 ] || { echo "SELF-TEST FAIL: changes-requested exited $crc, not 2 — it shares a code with an absent review" >&2; rc=1; }
   # And an ABSENT review must NOT use that code.
-  _c "Reviewed-by: reviewer-a\\nReviewed-sha: 0000000000000000000000000000000000000000\\nVerdict: approve"
+  _c "Reviewed-by: reviewer-a\\nReviewed-sha: $base\\nVerdict: approve"
   local arc=0; _run >/dev/null 2>&1 || arc=$?
   [ "$arc" -eq 1 ] || { echo "SELF-TEST FAIL: an absent review exited $arc, not 1" >&2; rc=1; }
 
@@ -459,6 +550,70 @@ Agent: product"
 
   rm -rf "$pdir"
 
+  # 5i. ISSUE #84: A VERDICT NAMING A SHA THIS REPOSITORY DOES NOT KNOW IS REPORTED, NOT DISCARDED
+  #     IN SILENCE. On #38 a UAT refusal named a sha sharing EIGHT hex characters with the head and
+  #     naming no object at all; the gate published `success` 28 seconds later. Exact-sha matching
+  #     is correct and untouched — the silence on one particular miss was the defect.
+  #
+  #     The ghost shares the head's first eight characters ON PURPOSE. That collision is what made
+  #     the live case dangerous rather than obvious, and a fixture whose two shas differ at a glance
+  #     would not represent it.
+  local ghost="${head:0:8}$(printf '%s' "${head:8}" | tr '0-9a-f' '5678943210fedcba')"
+  #     CONTROLS FIRST: the head must resolve and the ghost must not, or the arms below prove
+  #     nothing. This is the check the Issue itself ran.
+  ( cd "$tmp" && git cat-file -e "$head^{commit}" ) 2>/dev/null \
+    || { echo "SELF-TEST FAIL: control — the fixture head does not resolve, so the #84 arms determined nothing" >&2; rc=1; }
+  ( cd "$tmp" && git cat-file -e "$ghost^{commit}" ) 2>/dev/null \
+    && { echo "SELF-TEST FAIL: control — the constructed ghost sha resolves, so it is not an unknown object" >&2; rc=1; }
+
+  #     (a) THE #38 SHAPE: an unplaceable refusal alongside a genuine approve. Used to exit 0.
+  printf '[{"body":"[product]\\nReviewed-by: product\\nReviewed-sha: %s\\nVerdict: changes-requested"},{"body":"[reviewer-a]\\nReviewed-by: reviewer-a\\nReviewed-sha: %s\\nVerdict: approve"}]' "$ghost" "$head" > "$tmp/c.json"
+  local urc=0 uout
+  uout=$(_run) || urc=$?
+  [ "$urc" -eq 4 ] || { echo "SELF-TEST FAIL: a verdict naming an unknown sha exited $urc, not 4 — it was discarded in silence and a genuine approve published a pass over it" >&2; rc=1; }
+  case "$uout" in
+    *"$ghost"*) : ;;
+    *) echo "SELF-TEST FAIL: the unplaceable verdict was not reported with the sha it could not place (got: $uout)" >&2; rc=1 ;;
+  esac
+  case "$uout" in
+    *"$head"*) : ;;
+    *) echo "SELF-TEST FAIL: the report did not name the head it expected (got: $uout)" >&2; rc=1 ;;
+  esac
+
+  #     (b) AN ORDINARY STALE REVIEW STAYS SILENT. `$base` is a commit this repository KNOWS and is
+  #         not the head. A push is expected to stale reviews; announcing those would bury (a)
+  #         under noise on every branch that was ever pushed to.
+  printf '[{"body":"[product]\\nReviewed-by: product\\nReviewed-sha: %s\\nVerdict: changes-requested"},{"body":"[reviewer-a]\\nReviewed-by: reviewer-a\\nReviewed-sha: %s\\nVerdict: approve"}]' "$base" "$head" > "$tmp/c.json"
+  urc=0; uout=$(_run) || urc=$?
+  [ "$urc" -eq 0 ] || { echo "SELF-TEST FAIL: an ordinary stale review (a sha this repository knows) exited $urc, not 0" >&2; rc=1; }
+  case "$uout" in
+    *"COULD NOT BE PLACED"*) echo "SELF-TEST FAIL: an ordinary stale review was reported as unplaceable" >&2; rc=1 ;;
+  esac
+
+  #     (c) A QUOTED unplaceable verdict is not a verdict, so it is not an unplaceable one either —
+  #         or every postmortem that pastes a bad sha turns a pull request red.
+  printf '[{"body":"[product]\\nwhat went wrong was:\\n```\\nReviewed-by: product\\nReviewed-sha: %s\\nVerdict: changes-requested\\n```"},{"body":"[reviewer-a]\\nReviewed-by: reviewer-a\\nReviewed-sha: %s\\nVerdict: approve"}]' "$ghost" "$head" > "$tmp/c.json"
+  urc=0; uout=$(_run) || urc=$?
+  [ "$urc" -eq 0 ] || { echo "SELF-TEST FAIL: a QUOTED verdict naming an unknown sha exited $urc, not 0 — a quotation was treated as a verdict" >&2; rc=1; }
+
+  #     (d) A LANDED REFUSAL OUTRANKS IT, and both are said. 2 is the concrete, already-actionable
+  #         fact; the unplaceable notice still prints.
+  printf '[{"body":"[product]\\nReviewed-by: product\\nReviewed-sha: %s\\nVerdict: approve"},{"body":"[reviewer-a]\\nReviewed-by: reviewer-a\\nReviewed-sha: %s\\nVerdict: changes-requested"}]' "$ghost" "$head" > "$tmp/c.json"
+  urc=0; uout=$(_run) || urc=$?
+  [ "$urc" -eq 2 ] || { echo "SELF-TEST FAIL: a landed refusal alongside an unplaceable verdict exited $urc, not 2" >&2; rc=1; }
+  case "$uout" in
+    *"COULD NOT BE PLACED"*) : ;;
+    *) echo "SELF-TEST FAIL: the unplaceable verdict went unmentioned because a refusal outranked it" >&2; rc=1 ;;
+  esac
+
+  #     (e) AN ALL-ZEROS SHA IS UNPLACEABLE, NOT STALE — and this is a BEHAVIOUR CHANGE worth
+  #         pinning rather than discovering. Arms 4 and 5 used to spell "some other head" as forty
+  #         zeros, which named no object and so, since #84, is reported rather than passed over.
+  #         They now name `$base`, a real earlier commit. Nobody reviewed anything at all-zeros.
+  printf '[{"body":"[reviewer-a]\\nReviewed-by: reviewer-a\\nReviewed-sha: 0000000000000000000000000000000000000000\\nVerdict: approve"}]' > "$tmp/c.json"
+  urc=0; _run >/dev/null 2>&1 || urc=$?
+  [ "$urc" -eq 4 ] || { echo "SELF-TEST FAIL: a verdict naming an all-zeros sha exited $urc, not 4 — it names no object, so it is unplaceable and not merely stale" >&2; rc=1; }
+
   # 6. AN ACCURATE SHORT REVIEW MUST PASS. The previous build's character floor rejected a
   #    38-character scope statement and accepted 45 characters of "looks fine to me".
   _c "Reviewed-by: reviewer-a\\nReviewed-sha: $head\\nVerdict: approve\\nScope: one file, as asked."
@@ -511,7 +666,7 @@ Agent: product"
     *) echo "SELF-TEST FAIL: an unattributable verdict was not distinguished from an absent one (got: $qout)" >&2; rc=1 ;;
   esac
 
-  [ "$rc" -eq 0 ] && echo "self-test passed: a missing file refuses, an author cannot certify its own work, a stale sha does not carry over, a short accurate review passes, a QUOTED verdict is not a verdict, a verdict that names somebody other than its poster is refused, and a landed refusal survives every later verdict except its own reviewer's"
+  [ "$rc" -eq 0 ] && echo "self-test passed: a missing file refuses, an author cannot certify its own work, a stale sha does not carry over, a short accurate review passes, a QUOTED verdict is not a verdict, a verdict that names somebody other than its poster is refused, a landed refusal survives every later verdict except its own reviewer's, and a verdict naming a sha this repository does not know is reported rather than dropped"
   return "$rc"
 }
 
