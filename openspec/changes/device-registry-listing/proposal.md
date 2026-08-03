@@ -29,6 +29,13 @@ Two more things hang off the same sentence:
   store. It is the representation, and the representation is where §3.8 is enforced: a check-in is a
   `tri.Value` with an instant beside it, not a `*time.Time` — a nil pointer holds "never" and
   "unknown" in one field, which is exactly the collapse §4.3 forbids.
+- **The value carries what it is; no renderer knows better than it does.** `CheckIn`'s fields are
+  unexported and it is built only by its three constructors, so a check-in whose state is Yes with
+  no instant cannot exist — `CheckedInAt` returns the third answer instead. This closes a defect
+  found in review: the zero instant rendered as "could not be determined" while `State` said Yes, so
+  the control API's field, the exit code and the prose disagreed about one device at one moment. The
+  fix is at the value rather than in each consumer, because the defect was never in any one
+  consumer; it was that the undetermined-ness lived in a rendering.
 - **"Never checked in" is a value written to disk, not an absence inferred from one.** Registering a
   machine records `"state":"never"` there and then, so the never-started box is a fact in the
   inventory from the moment it is registered. A check-in field that is missing, unrecognised or

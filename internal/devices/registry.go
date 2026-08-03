@@ -152,6 +152,10 @@ func decodeCheckIn(c diskCheckIn) CheckIn {
 		if err != nil {
 			return UndeterminedCheckIn(fmt.Sprintf("this device's recorded check-in time %q could not be read", c.At))
 		}
+		// CheckedInAt, NOT a struct literal, and that is load-bearing. A record carrying
+		// "0001-01-01T00:00:00Z" parses without error into the zero instant, and Go's zero time is
+		// a real RFC3339 value a real inventory can hold. CheckedInAt turns that into the third
+		// answer, so the disk cannot inject a "yes" that no consumer can point at a time for.
 		return CheckedInAt(t)
 	case "":
 		return UndeterminedCheckIn("this device's record carries no check-in state at all")
@@ -165,13 +169,13 @@ func decodeCheckIn(c diskCheckIn) CheckIn {
 }
 
 func encodeCheckIn(c CheckIn) diskCheckIn {
-	switch c.State {
+	switch c.State() {
 	case tri.Yes:
-		return diskCheckIn{State: diskCheckedIn, At: c.At.UTC().Format(time.RFC3339)}
+		return diskCheckIn{State: diskCheckedIn, At: c.At().UTC().Format(time.RFC3339)}
 	case tri.No:
 		return diskCheckIn{State: diskNeverStarted}
 	default:
-		return diskCheckIn{State: "undetermined", Why: c.Why}
+		return diskCheckIn{State: "undetermined", Why: c.Why()}
 	}
 }
 

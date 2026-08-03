@@ -256,7 +256,7 @@ func devicesShow(env cli.Env, f devicesFlags) int {
 			fmt.Fprintf(env.Stdout, "registered: yes\n")
 			fmt.Fprintf(env.Stdout, "check-in: %s\n", d.CheckIn.Describe())
 		}
-		if !d.CheckIn.State.Determined() {
+		if !d.CheckIn.Determined() {
 			return cli.ExitUndetermined
 		}
 		return cli.Success
