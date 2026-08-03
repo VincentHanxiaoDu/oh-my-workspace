@@ -1,13 +1,18 @@
 package extension
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/store"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri"
 )
 
 // ---------------------------------------------------------------------------
@@ -721,3 +726,166 @@ func TestTheRefusalsArePairwiseDistinct(t *testing.T) {
 // entryType is Entry's reflect.Type, in one place so the structural tests above cannot drift onto
 // a different type.
 func entryType() reflect.Type { return reflect.TypeOf(Entry{}) }
+
+// ---------------------------------------------------------------------------
+// AN INCOMPLETE READ NEVER PRODUCES A DETERMINED ANSWER
+// ---------------------------------------------------------------------------
+
+// corruptRecord damages one record's stored checksum in place, the way a bad disk or a half-synced
+// file does — the record file is still valid JSON and still parses; its content no longer matches
+// what it says its content is.
+func corruptRecord(t *testing.T, s *store.Store, kind store.Kind, id string) {
+	t.Helper()
+	// THE FILE IS FOUND, NOT SPELLED. The store's record suffix is unexported and this test has no
+	// business knowing it — a hardcoded one silently stops matching the day it changes, and a test
+	// that damages nothing passes.
+	dir := filepath.Join(s.Path(), "records", string(kind))
+	matches, err := filepath.Glob(filepath.Join(dir, id+".*"))
+	if err != nil || len(matches) != 1 {
+		t.Fatalf("expected exactly one record file for %q in %s, found %v (err %v)", id, dir, matches, err)
+	}
+	path := matches[0]
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s to damage it: %v", path, err)
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		t.Fatalf("the record envelope is not JSON, so this test cannot damage it as intended: %v", err)
+	}
+	if _, ok := envelope["sha256"]; !ok {
+		t.Fatalf("the record envelope has no sha256 field (%v); this test is damaging the wrong "+
+			"thing and would prove nothing", keysOf(envelope))
+	}
+	envelope["sha256"] = "0000000000000000000000000000000000000000000000000000000000000000"
+	out, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatalf("re-encoding: %v", err)
+	}
+	if err := os.WriteFile(path, out, 0o600); err != nil {
+		t.Fatalf("writing the damaged record: %v", err)
+	}
+	// THE FIXTURE IS CHECKED. A "damaged" record the store still reads happily would make every
+	// assertion below pass for the wrong reason.
+	if _, err := s.Get(kind, id); err == nil {
+		t.Fatalf("%s still reads cleanly after being damaged; this test is not exercising a "+
+			"damaged record", id)
+	}
+}
+
+func keysOf(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ONE DAMAGED RECORD DOES NOT ERASE THE OTHERS (criteria 11 and 14).
+//
+// # THE DEFECT THIS EXISTS FOR
+//
+// `Registered` was built on `store.List`, which refuses the whole kind when any single record's
+// checksum is bad — correct for its own contract, and fatal here. One damaged record made
+// `Registered` return `nil, err`, EVERY registration vanished from the inventory, and `omw ext list`
+// printed "every registered extension loaded" over an inventory it had just failed to read. Two
+// registered, failed-to-load extensions reported as absent, beneath a footer saying all was well.
+//
+// The per-record `readErr` path below `Registered` was already written and was UNREACHABLE for this
+// case, which is why reading the code did not find it and driving a damaged record did.
+func TestOneDamagedRecordDoesNotEraseTheOtherRegistrations(t *testing.T) {
+	s := newStore(t)
+	r := registryWith(
+		&fake{name: "broken", iface: Channel, err: errors.New("libslack.so is missing")},
+		&fake{name: "fine", iface: Model},
+		&fake{name: "damaged", iface: Channel},
+	)
+	for _, n := range []string{"broken", "fine", "damaged"} {
+		mustRegister(t, s, r, n)
+	}
+	corruptRecord(t, s, RecordKind, "damaged")
+
+	listing := Read(s, r)
+
+	// EVERY registration is still present, including the two that have nothing to do with the
+	// damaged one.
+	for _, name := range []string{"broken", "fine", "damaged"} {
+		found := false
+		for _, e := range listing.Entries {
+			if e.Name == name {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%q vanished from the inventory because a DIFFERENT record was damaged. "+
+				"Criterion 11: one extension failing does not suppress the reporting of the others.", name)
+		}
+	}
+	if got := Find(listing.Entries, "broken").Resolved(); got != FailedToLoad {
+		t.Errorf("the failed-to-load extension is %v, want FailedToLoad — a broken extension "+
+			"reported as absent is this Issue's opening story", got)
+	}
+	if got := Find(listing.Entries, "fine").Resolved(); got != Loaded {
+		t.Errorf("the healthy extension is %v, want Loaded", got)
+	}
+	if got := Find(listing.Entries, "damaged").Resolved(); got != Undetermined {
+		t.Errorf("the damaged record is %v, want Undetermined — we failed to read it, which "+
+			"establishes nothing about the extension", got)
+	}
+
+	// AND THE SUMMARY DOES NOT CLAIM EVERYTHING IS FINE.
+	if listing.Summary().AllLoaded() {
+		t.Errorf("the summary claims every registered extension loaded, over an inventory "+
+			"containing a failure and an unreadable record: %+v", listing.Summary())
+	}
+}
+
+// AN INVENTORY THAT COULD NOT BE ENUMERATED NEVER RENDERS AS A COMPLETE ONE.
+//
+// The residual case after the fix above: the per-record path handles a damaged record, but a
+// registrations directory that cannot be read at all is a failure to enumerate that no per-record
+// degradation can rescue. It must not be reported as "nothing is registered", and nothing computed
+// from it may claim completeness.
+func TestAnInventoryThatCouldNotBeReadNeverClaimsCompleteness(t *testing.T) {
+	s := newStore(t)
+	r := registryWith(&fake{name: "fine", iface: Model})
+	mustRegister(t, s, r, "fine")
+
+	// Make the registrations directory unreadable. This is the enumeration failing, not a record.
+	dir := filepath.Join(s.Path(), "records", string(RecordKind))
+	if err := os.Chmod(dir, 0o000); err != nil {
+		t.Skipf("cannot make the directory unreadable here: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	if _, err := s.IDs(RecordKind); err == nil {
+		t.Skip("the directory is still readable (running as root?), so this test would prove nothing")
+	}
+
+	listing := Read(s, r)
+
+	if listing.Complete() {
+		t.Fatal("the listing reports itself complete after the enumeration failed")
+	}
+	if strings.TrimSpace(listing.Incomplete) == "" {
+		t.Error("it is incomplete and says nothing about why")
+	}
+	if listing.Summary().AllLoaded() {
+		t.Error("the summary claims every registered extension loaded over an inventory it could " +
+			"not read. That is a determined answer from an incomplete read.")
+	}
+	// THE RENDERING CARRIES IT. This is what makes the CLI and the control API unable to disagree:
+	// the warning is inside the value both of them render.
+	out := listing.Render()
+	if !strings.Contains(out, tri.Undetermined.String()) {
+		t.Errorf("the rendered listing does not say the inventory could not be read in full:\n%s", out)
+	}
+	if !strings.Contains(out, "may not be all of them") {
+		t.Errorf("the rendered listing does not warn that entries may be missing:\n%s", out)
+	}
+	// And the built-ins are STILL listed — an unreadable registration list is not a machine with
+	// no channels.
+	if len(listing.Entries) == 0 {
+		t.Error("the listing is empty; a failure to read registrations is not a build that ships nothing")
+	}
+}

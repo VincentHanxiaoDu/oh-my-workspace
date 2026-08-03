@@ -250,28 +250,58 @@ func Get(s *store.Store, name string) (Registration, error) {
 
 // Registered returns every registration, ordered by name.
 //
-// # A DAMAGED RECORD IS RETURNED, NOT SKIPPED AND NOT FATAL (criterion 14)
+// # A DAMAGED RECORD IS RETURNED, NOT SKIPPED AND NOT FATAL (criteria 11 and 14)
 //
 // `channels.List` fails the whole call on a damaged record, which is right there: a channel listing
 // that is quietly one short reads as complete. Here the requirement is stronger and pulls the other
 // way — criterion 11 says one extension failing must not suppress the reporting of the others, and
 // criterion 14 says a registered extension whose state is unknown is present with an undetermined
-// state, not dropped. Failing the call would suppress every other extension because of one bad
-// file. So a record that will not decode comes back as a Registration carrying the read error, and
-// [Inventory] renders it [Undetermined] — present, listed, and honest about what is not known.
+// state, not dropped. So a record that will not decode comes back as a Registration carrying the
+// read error, and [Inventory] renders it [Undetermined] — present, listed, and honest.
+//
+// # IT ENUMERATES NAMES AND READS EACH RECORD ITSELF, AND THAT IS THE WHOLE POINT
+//
+// This was built on `store.List`, and the per-record path below was UNREACHABLE for the case it
+// exists to handle. `store.List` refuses the whole kind when any single record's checksum is bad —
+// correctly, for its own contract — so one damaged record made this return `nil, err`, EVERY
+// registration vanished, and `omw ext list` printed "every registered extension loaded" over an
+// inventory it had just failed to read. Two registered, failed-to-load extensions reported as
+// absent, under a footer saying everything was fine. QA drove it and refused the pull request.
+//
+// That is the Issue's own opening story arriving through the store instead of through the loader,
+// and the shape of the bug is the one this Issue is about: A DETERMINED ANSWER REPORTED FROM AN
+// INCOMPLETE READ. Patching the summary line would have hidden it; the read is what was wrong.
+//
+// So it enumerates ids through `store.IDs`, which decodes nothing and therefore cannot be failed by
+// any record's contents, and then reads each one on its own. One bad record is one bad entry.
+//
+// A non-nil error here means the ENUMERATION failed — the directory could not be read at all — and
+// no per-record degradation can rescue that. Callers must treat it as "I do not know what is
+// registered" and must not report completeness.
 func Registered(s *store.Store) ([]Registration, error) {
 	if s == nil {
 		return nil, ErrNoStore
 	}
-	recs, err := s.List(RecordKind)
+	ids, err := s.IDs(RecordKind)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]Registration, 0, len(recs))
-	for _, rec := range recs {
+	out := make([]Registration, 0, len(ids))
+	for _, id := range ids {
+		rec, gerr := s.Get(RecordKind, id)
+		if gerr != nil {
+			// UNDETERMINED, AND STILL LISTED. A record we could not read has told us nothing about
+			// the extension — not that it is absent, and not that it is broken.
+			out = append(out, Registration{Name: id, readErr: refusal.Refusedf(ErrUnreadableRecord,
+				"extension %q could not be read: %v", id, gerr)})
+			continue
+		}
 		reg, derr := decode(rec.ID, rec.Data)
 		if derr != nil {
 			reg = Registration{Name: rec.ID, readErr: derr}
+		}
+		if reg.Name == "" {
+			reg.Name = id
 		}
 		out = append(out, reg)
 	}

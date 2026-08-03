@@ -2,7 +2,9 @@ package commands
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -697,5 +699,319 @@ func TestTheFailureSummaryNamesNeitherInterface(t *testing.T) {
 				"§2.5: the two interfaces are one mechanism, and this is the one line a script reads.",
 				firstLabel, first, label, s)
 		}
+	}
+}
+
+// xtCorrupt damages one record's checksum in place — a bad disk, a half-synced file. The record is
+// still valid JSON and still parses; its content no longer matches what it says its content is.
+func xtCorrupt(t *testing.T, root string, kind, id string) {
+	t.Helper()
+	dir := filepath.Join(root, "records", kind)
+	matches, err := filepath.Glob(filepath.Join(dir, id+".*"))
+	if err != nil || len(matches) != 1 {
+		t.Fatalf("expected exactly one record file for %q in %s, found %v (err %v)", id, dir, matches, err)
+	}
+	body, err := os.ReadFile(matches[0])
+	if err != nil {
+		t.Fatalf("reading %s: %v", matches[0], err)
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		t.Fatalf("the record envelope is not JSON; this test would damage the wrong thing: %v", err)
+	}
+	if _, ok := envelope["sha256"]; !ok {
+		t.Fatalf("the record envelope has no sha256 field; this test would damage nothing")
+	}
+	envelope["sha256"] = "0000000000000000000000000000000000000000000000000000000000000000"
+	out, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatalf("re-encoding: %v", err)
+	}
+	if err := os.WriteFile(matches[0], out, 0o600); err != nil {
+		t.Fatalf("writing the damaged record: %v", err)
+	}
+}
+
+// QA'S EXACT REPRODUCTION. One damaged record, and the footer must not claim completeness.
+//
+// # WHAT WAS DRIVEN AND REFUSED
+//
+//	omw ext list: which extensions are registered could not be determined: ...
+//	extensions:
+//	  email  registered, and it loaded
+//	  teams  registered, and it loaded
+//	omw ext list: every registered extension loaded.          <-- FALSE
+//	CLI-EXIT=3
+//
+// Two registered, FAILED-TO-LOAD extensions had vanished, and the last line a person reads said
+// everything was fine. The exit code and the header were honest; the prose was not.
+//
+// The header and the footer are both asserted here, because fixing only the footer would leave the
+// entries themselves still missing — and that was the real defect, in `Registered`.
+func TestADamagedRecordNeitherErasesTheInventoryNorLetsTheFooterClaimAllIsWell(t *testing.T) {
+	xtRegistry(t,
+		xtFake{name: "brokeext", iface: extension.Channel, err: errors.New("libslack.so is missing")},
+		xtFake{name: "fineext", iface: extension.Model},
+		xtFake{name: "damagedext", iface: extension.Channel},
+	)
+	env := xtWorld(t)
+	for _, n := range []string{"brokeext", "fineext", "damagedext"} {
+		if got := runExtCmd(t, env, "register", n); !strings.Contains(got.stdout, "registered: "+n) {
+			t.Fatalf("%s was not registered, so this test examines nothing:\n%s", n, got.all())
+		}
+	}
+	xtCorrupt(t, env[store.PathEnv], "extension", "damagedext")
+
+	got := runExtCmd(t, env, "list")
+
+	// THE FAILED-TO-LOAD EXTENSION IS STILL THERE. This is the half that matters most: a broken
+	// extension reported as absent is this Issue's opening story.
+	if !strings.Contains(got.stdout, "brokeext") {
+		t.Errorf("the failed-to-load extension vanished because a DIFFERENT record was damaged:\n%s", got.stdout)
+	}
+	if !strings.Contains(got.stdout, "IT FAILED TO LOAD") {
+		t.Errorf("no extension is reported as failed to load:\n%s", got.stdout)
+	}
+	if !strings.Contains(got.stdout, "fineext") || !strings.Contains(got.stdout, "damagedext") {
+		t.Errorf("an intact or a damaged registration is missing from the listing:\n%s", got.stdout)
+	}
+
+	// THE FOOTER DOES NOT CLAIM COMPLETENESS.
+	if strings.Contains(got.stderr, "every registered extension loaded") {
+		t.Errorf("the footer claims every registered extension loaded, over an inventory holding a "+
+			"failure and a record that would not read:\nstdout:\n%s\nstderr:\n%s", got.stdout, got.stderr)
+	}
+	// There IS a failure present, so the failure summary is the honest one and the exit is 1.
+	if got.code != cli.ExitFailure {
+		t.Errorf("exit %d, want %d — a failed-to-load extension is a determined negative\n%s",
+			got.code, cli.ExitFailure, got.all())
+	}
+}
+
+// The same state with NO failure in it: the footer must still not say all is well, and the exit
+// must be undetermined rather than success.
+//
+// Driven separately because the case above has a real failure in it, and a build that only ever
+// reported failures would pass it while still claiming completeness on a machine whose sole problem
+// is a record it cannot read.
+func TestADamagedRecordAloneIsUndeterminedAndNotSuccess(t *testing.T) {
+	xtRegistry(t,
+		xtFake{name: "fineext", iface: extension.Model},
+		xtFake{name: "damagedext", iface: extension.Channel},
+	)
+	env := xtWorld(t)
+	for _, n := range []string{"fineext", "damagedext"} {
+		mustExt(t, env, "register", n)
+	}
+	xtCorrupt(t, env[store.PathEnv], "extension", "damagedext")
+
+	got := runExtCmd(t, env, "list")
+	if strings.Contains(got.stderr, "every registered extension loaded") {
+		t.Errorf("the footer claims completeness over a record it could not read:\n%s", got.stderr)
+	}
+	if got.code != cli.ExitUndetermined {
+		t.Errorf("exit %d, want %d — 'I could not read part of the inventory' is not success\n%s",
+			got.code, cli.ExitUndetermined, got.all())
+	}
+	if !strings.Contains(got.stdout+got.stderr, "could not be determined") {
+		t.Errorf("nothing in the output says anything was undetermined:\n%s", got.all())
+	}
+}
+
+// `omw ext show` must not answer "not registered" from an inventory it could not ENUMERATE.
+//
+// `Find` answers not-registered for a name it did not see. Over a complete inventory that is a
+// determined fact and stays one — including when some individual RECORD was damaged, because the
+// enumeration still told us which names exist. It is a lie only when the enumeration itself failed,
+// since the record naming this extension may be one we never saw.
+//
+// I had this wrong first: the test drove a damaged record and expected `show` to go undetermined,
+// which would have been the product hedging on a question it can actually answer. Per-record
+// degradation is exactly what makes the damaged-record case determinate. The residual is here.
+func TestShowDoesNotClaimNotRegisteredWhenTheInventoryCouldNotBeEnumerated(t *testing.T) {
+	xtRegistry(t, xtFake{name: "someext", iface: extension.Channel})
+	env := xtWorld(t)
+	mustExt(t, env, "register", "someext")
+
+	dir := filepath.Join(env[store.PathEnv], "records", "extension")
+	if err := os.Chmod(dir, 0o000); err != nil {
+		t.Skipf("cannot make the directory unreadable here: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	// The fixture is checked: if the directory is still readable, everything below passes for the
+	// wrong reason.
+	if probe := runExtCmd(t, env, "list"); !strings.Contains(probe.all(), "may not be all of them") {
+		t.Skipf("the registrations directory is still readable (running as root?), so this test "+
+			"would prove nothing:\n%s", probe.all())
+	}
+
+	got := runExtCmd(t, env, "show", "somethingelse")
+	if got.code == cli.Success {
+		t.Errorf("exit 0 for a name looked up in an inventory that could not be enumerated:\n%s", got.all())
+	}
+	if !strings.Contains(got.all(), "could not be determined") {
+		t.Errorf("it answered 'not registered' without saying the inventory was unreadable:\n%s", got.all())
+	}
+}
+
+// A damaged RECORD leaves `show` determinate about a different name — the control for the test
+// above, so that the hedge it requires cannot spread to questions the product can answer.
+func TestShowStaysDeterminateWhenOnlyOneRecordIsDamaged(t *testing.T) {
+	xtRegistry(t, xtFake{name: "damagedext", iface: extension.Channel})
+	env := xtWorld(t)
+	mustExt(t, env, "register", "damagedext")
+	xtCorrupt(t, env[store.PathEnv], "extension", "damagedext")
+
+	got := runExtCmd(t, env, "show", "somethingelse")
+	if got.code != cli.Success {
+		t.Errorf("exit %d — the enumeration succeeded, so whether %q is registered IS determined; "+
+			"hedging here would make the product vague about a question it can answer\n%s",
+			got.code, "somethingelse", got.all())
+	}
+	if !strings.Contains(got.stdout, "not registered") {
+		t.Errorf("it did not answer:\n%s", got.stdout)
+	}
+}
+
+// CRITERION 20 IN THE STATE THAT BROKE IT (B2).
+//
+// `extensionsFor` discarded `extension.Inventory`'s error twice — `entries, _ :=` — so the CLI
+// printed "which extensions are registered could not be determined" and the control API said
+// nothing at all. Same machine, two surfaces, two different reports. PRD §4.3: "the control API and
+// the CLI report the same state."
+//
+// The repair is structural rather than a third careful format string: both surfaces render an
+// `extension.Listing`, which carries the incompleteness inside the value, so there is no separate
+// return value for either of them to drop.
+func TestTheCLIAndTheControlAPIAgreeWhenTheInventoryCannotBeRead(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds the binary")
+	}
+	bin := xtBuild(t)
+	root := filepath.Join(t.TempDir(), "store")
+	sandbox := t.TempDir()
+
+	run := func(args ...string) (int, string) {
+		cmd := exec.Command(bin, args...)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Env = append(os.Environ(),
+			store.PathEnv+"="+root, "OMW_HUB=",
+			model.EnvProvider+"=", model.EnvCredential+"=", model.EnvCredentialFile+"=",
+			"XDG_DATA_HOME="+sandbox, "HOME="+sandbox,
+		)
+		out, _ := cmd.CombinedOutput()
+		return cmd.ProcessState.ExitCode(), string(out)
+	}
+	if code, out := run("store", "create"); code != 0 {
+		t.Fatalf("store create exited %d: %s", code, out)
+	}
+	if code, out := run("ext", "register", "email"); code != 0 {
+		t.Fatalf("registering email exited %d: %s", code, out)
+	}
+
+	dir := filepath.Join(root, "records", "extension")
+	if err := os.Chmod(dir, 0o000); err != nil {
+		t.Skipf("cannot make the directory unreadable here: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	_, cliOut := run("ext", "list")
+	if !strings.Contains(cliOut, "may not be all of them") {
+		t.Skipf("the registrations directory is still readable (running as root?), so this test "+
+			"would prove nothing:\n%s", cliOut)
+	}
+	_, apiOut := run("daemon", "status")
+
+	// The warning the CLI prints must appear in the control API's report too.
+	for _, want := range []string{"may not be all of them", "NOT a report that none is registered"} {
+		if !strings.Contains(apiOut, want) {
+			t.Errorf("the control API does not carry %q, which the CLI printed. Same machine, two "+
+				"surfaces, two different reports (criterion 20, §4.3).\n\nCLI:\n%s\ncontrol API:\n%s",
+				want, cliOut, apiOut)
+		}
+	}
+}
+
+// CRITERION 22'S THIRD PLACE, NOW THAT IT EXISTS: a generated diagnostics bundle.
+//
+// "A model provider's credentials never appear in the extension listing, in failure reasons, or in
+// a diagnostics bundle (§3.9 withholds identifying data by default). A test that configures a
+// provider with a recognisable secret and then greps every extension-related output AND A GENERATED
+// BUNDLE finds no occurrence of it."
+//
+// When this branch opened, §3.9's bundle was Issue #20's and was not in the tree, so the property
+// was asserted structurally — the credential is refused at the point of RECORD, so nothing exists
+// for a bundle to collect. `omw diagnostics` has since landed on main. The structural argument still
+// holds and is still the reason this passes, but an argument is not a measurement: this generates a
+// real bundle with a real key in the environment and greps every byte of it, including
+// `--include-bodies`, which is the affirmative act that widens what is collected.
+func TestNoGeneratedDiagnosticsBundleContainsAnExtensionCredential(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds the binary")
+	}
+	bin := xtBuild(t)
+	root := filepath.Join(t.TempDir(), "store")
+	sandbox := t.TempDir()
+	bundleDir := t.TempDir()
+
+	run := func(args ...string) (int, string) {
+		cmd := exec.Command(bin, args...)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Env = append(os.Environ(),
+			store.PathEnv+"="+root, "OMW_HUB=",
+			// THE PERSON'S KEY, WHERE §3.13 SAYS IT LIVES: their own environment.
+			model.EnvProvider+"=acme", model.EnvCredential+"="+xtSecret, model.EnvCredentialFile+"=",
+			"XDG_DATA_HOME="+sandbox, "HOME="+sandbox,
+		)
+		out, _ := cmd.CombinedOutput()
+		return cmd.ProcessState.ExitCode(), string(out)
+	}
+	if code, out := run("store", "create"); code != 0 {
+		t.Fatalf("store create exited %d: %s", code, out)
+	}
+	// A registered extension with settings, so the bundle has extension material to collect if it
+	// collects any.
+	run("ext", "register", "email")
+	run("ext", "configure", "email", "endpoint=https://inside.example.invalid", "key_file="+filepath.Join(sandbox, "k"))
+	run("model", "use", "acme")
+
+	dest := filepath.Join(bundleDir, "b")
+	if code, out := run("diagnostics", dest, "--include-bodies"); code != 0 && code != 3 {
+		t.Fatalf("omw diagnostics exited %d: %s", code, out)
+	}
+
+	// EVERY BYTE OF THE BUNDLE. Walked rather than sampled: a grep of the manifest alone would miss
+	// a credential in a collected file, which is where one would actually end up.
+	files := 0
+	err := filepath.WalkDir(dest, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		files++
+		body, rerr := os.ReadFile(p)
+		if rerr != nil {
+			t.Errorf("reading %s from the bundle: %v", p, rerr)
+			return nil
+		}
+		if bytes.Contains(body, []byte(xtSecret)) {
+			t.Errorf("the credential appears in the bundle at %s", p)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking the bundle: %v", err)
+	}
+	// THE CONTROL. A walk that found nothing would pass loudest of all.
+	if files == 0 {
+		t.Fatalf("the bundle at %s contains no files, so this grep examined nothing", dest)
+	}
+	t.Logf("grepped %d file(s) in the bundle", files)
+
+	// And the control on the sentinel itself: it really is in the environment these runs saw, so a
+	// clean grep is a finding rather than an artefact of the key never being present.
+	if _, out := run("model", "show"); strings.Contains(out, xtSecret) {
+		t.Fatalf("`omw model show` printed the credential, which means the sentinel is live but the "+
+			"product leaks it elsewhere:\n%s", out)
 	}
 }

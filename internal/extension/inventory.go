@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/store"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri"
 )
 
 // Inventory is THE listing — one listing, both interfaces, built-ins included (criteria 2, 6, 14).
@@ -32,6 +33,84 @@ import (
 // offered entries are produced anyway, and the caller is told separately that there is no store.
 // Returning an empty list would report a person with no store as a person with no channels.
 func Inventory(s *store.Store, r *Registry) ([]Entry, error) {
+	l := Read(s, r)
+	return l.Entries, l.readErr
+}
+
+// Read is [Inventory] as a [Listing] — the entries AND whether they are all of them.
+//
+// # PREFER THIS. Inventory's SIGNATURE IS THE DEFECT THAT GOT THIS BRANCH REFUSED
+//
+// `Inventory` returns `([]Entry, error)`, and a caller may write `entries, _ :=` — which is exactly
+// what the control API did, and what `omw ext show` did. The error is the sentence "these may not
+// be all of them", and dropping it turns an incomplete read into a confident listing. A `Listing`
+// carries the incompleteness INSIDE the value that gets rendered and summarised, so there is no
+// separate thing to drop.
+func Read(s *store.Store, r *Registry) Listing {
+	entries, err := inventory(s, r)
+	l := Listing{Entries: entries, readErr: err}
+	if err != nil {
+		l.Incomplete = detailOf(err)
+	}
+	return l
+}
+
+// Listing is a whole inventory together with whether it is a WHOLE inventory.
+//
+// # WHY THE TWO ARE ONE VALUE
+//
+// Every surface that reports extensions must answer two questions, and the second is easy to lose:
+// what is registered, and did we manage to read all of it. This branch lost it twice — the control
+// API wrote `entries, _ :=` and dropped the warning the CLI printed, and the CLI's own summary line
+// went on saying "every registered extension loaded" over an inventory it had failed to read.
+//
+// Both are the same defect: A DETERMINED ANSWER REPORTED FROM AN INCOMPLETE READ. The repair is not
+// to remember harder in two places. It is for the incompleteness to travel inside the thing being
+// rendered, so a surface cannot render the entries without it.
+type Listing struct {
+	// Entries is every extension, in listing order.
+	Entries []Entry `json:"entries"`
+	// Incomplete is why this listing may not be all of them, and is EMPTY WHEN IT IS COMPLETE.
+	// A non-empty Incomplete does not mean the entries are wrong; it means there may be more.
+	Incomplete string `json:"incomplete,omitempty"`
+
+	// readErr is the error behind Incomplete, for a caller that wants the code. Unexported so it
+	// cannot be serialised and cannot disagree with Incomplete.
+	readErr error
+}
+
+// Complete reports whether the whole inventory was read.
+func (l Listing) Complete() bool { return l.Incomplete == "" }
+
+// Err is why the inventory could not be read in full, or nil.
+func (l Listing) Err() error { return l.readErr }
+
+// Summary counts the states, and CARRIES THE INCOMPLETENESS FORWARD so that nothing computed from
+// it can claim completeness.
+func (l Listing) Summary() Summary {
+	sum := Summarise(l.Entries)
+	sum.Incomplete = l.Incomplete
+	return sum
+}
+
+// Render is the ONE rendering of a whole listing, and it is what the CLI and the control API both
+// print (criterion 20).
+//
+// THE INCOMPLETENESS IS PART OF IT, above the entries, so a surface that prints this cannot print
+// the entries without it.
+func (l Listing) Render() string {
+	var b strings.Builder
+	if !l.Complete() {
+		b.WriteString("extensions: WHICH EXTENSIONS ARE REGISTERED " +
+			tri.Undetermined.String() + " — what follows may not be all of them.\n")
+		b.WriteString("  " + l.Incomplete + "\n")
+		b.WriteString("  This is NOT a report that none is registered.\n")
+	}
+	b.WriteString(Render(l.Entries))
+	return b.String()
+}
+
+func inventory(s *store.Store, r *Registry) ([]Entry, error) {
 	if r == nil {
 		r = Default
 	}
@@ -96,6 +175,13 @@ func entryFor(r *Registry, reg Registration) Entry {
 // Summary is what a whole inventory amounts to, and it is what criterion 12's exit code is computed
 // from.
 type Summary struct {
+	// Incomplete is why the inventory this counts may not be all of it, empty when it is complete.
+	//
+	// IT IS HERE SO THAT [Summary.AllLoaded] CANNOT SAY YES OVER A PARTIAL READ. A count taken from
+	// an inventory that failed to read is a count of what happened to be readable, and a summary
+	// built from it that claims "every registered extension loaded" is asserting something about
+	// records it never saw.
+	Incomplete string
 	// Total is how many entries there are.
 	Total int
 	// Loaded, Failed, NotRegistered and Undetermined count the four states.
@@ -128,7 +214,11 @@ func Summarise(entries []Entry) Summary {
 // registered has not failed at anything. Counting it as a failure would make `omw ext list` exit
 // non-zero on a machine that merely has an extension lying around unregistered, which criterion 17
 // says is a normal state and not a fault.
-func (s Summary) AllLoaded() bool { return s.Failed == 0 && s.Undetermined == 0 }
+func (s Summary) AllLoaded() bool {
+	// AN INCOMPLETE READ CAN NEVER ANSWER YES. Whether every registered extension loaded is a claim
+	// about every registered extension, and we do not know what they all are.
+	return s.Incomplete == "" && s.Failed == 0 && s.Undetermined == 0
+}
 
 // Render is the one rendering of a whole inventory.
 //

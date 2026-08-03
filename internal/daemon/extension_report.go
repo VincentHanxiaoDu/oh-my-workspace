@@ -42,16 +42,27 @@ import (
 // as a person with no channels would be a failure to read rendered as a determined nothing, which
 // is the collapse §4.3 forbids.
 //
+// # IT RETURNS A Listing AND NOT A []Entry, AND THAT IS THE FIX FOR A REAL DEFECT
+//
+// It was `entries, _ := extension.Inventory(...)`, twice. The discarded error is the sentence "these
+// may not be all of them", which the CLI printed and the control API did not — so in exactly the
+// state a damaged registration record creates, the two surfaces reported different things. That is
+// criterion 20 and PRD §4.3 broken by a dropped second return value.
+//
+// A [extension.Listing] carries the incompleteness inside the value that gets rendered, so there is
+// no separate thing to drop and no discipline for a future editor to keep.
+//
 // It is a var so a test can drive the Report's extension rendering without arranging a store on
 // disk. The agreement test between the CLI and the control API deliberately does NOT stub it: a
 // stub proves two renderers agree about a value, and only the real resolution proves they agree
 // about the person's machine.
-var extensionsFor = func(storeRoot string) []extension.Entry {
+var extensionsFor = func(storeRoot string) extension.Listing {
 	s, err := store.Open(storeRoot)
 	if err != nil {
-		entries, _ := extension.Inventory(nil, extension.Default)
-		return entries
+		// A store that will not open is not an inventory that is fine. `extension.Read` with no
+		// store answers with what this build SHIPS, and the store's own unreadability is the
+		// subject of the rest of the Report.
+		return extension.Read(nil, extension.Default)
 	}
-	entries, _ := extension.Inventory(s, extension.Default)
-	return entries
+	return extension.Read(s, extension.Default)
 }

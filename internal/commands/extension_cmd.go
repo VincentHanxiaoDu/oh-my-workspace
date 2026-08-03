@@ -248,21 +248,14 @@ func extensionList(env cli.Env, args []string) int {
 	if !ok {
 		return code
 	}
-	entries, err := extension.Inventory(s, extensionRegistry)
-	if err != nil {
-		// The registration list could not be read. NOT "nothing is registered": the built-ins below
-		// are still real, and this is said above them rather than instead of them.
-		fmt.Fprintf(env.Stderr, "omw ext list: which extensions are registered %s: %v\n", tri.Undetermined, err)
-		fmt.Fprintf(env.Stderr, "  This is NOT a report that none is registered. What follows is what this build ships.\n")
-	}
-	fmt.Fprint(env.Stdout, extension.Render(entries))
-	sum := extension.Summarise(entries)
-	code = extensionExitFor(sum)
+	// READ, NOT Inventory. A `Listing` carries whether it is a WHOLE listing, so the incompleteness
+	// travels inside the value that gets rendered and summarised and cannot be dropped on the way.
+	// `entries, _ := extension.Inventory(...)` is what got this branch refused, twice, in two files.
+	listing := extension.Read(s, extensionRegistry)
+	fmt.Fprint(env.Stdout, listing.Render())
+	sum := listing.Summary()
 	extensionSaySummary(env, sum)
-	if err != nil && code == cli.Success {
-		return cli.ExitUndetermined
-	}
-	return code
+	return extensionExitFor(sum)
 }
 
 // extensionExitFor is CRITERION 12, and it is the whole of it.
@@ -287,6 +280,7 @@ func extensionExitFor(sum extension.Summary) int {
 	switch {
 	case sum.Failed > 0:
 		return cli.ExitFailure
+
 	case sum.Undetermined > 0:
 		return cli.ExitUndetermined
 	default:
@@ -313,6 +307,17 @@ func extensionExitFor(sum extension.Summary) int {
 // argues it. A summary over several is [extension.ErrFailedToLoad] and
 // [extension.ErrLoadUndetermined], both neutral, one for each of the two non-success answers.
 func extensionSaySummary(env cli.Env, sum extension.Summary) {
+	// THE FOOTER MAY NOT CLAIM COMPLETENESS OVER AN INCOMPLETE READ, and this branch is first for
+	// that reason. It printed "every registered extension loaded" under a listing whose
+	// registrations had all failed to read — two registered, FAILED-TO-LOAD extensions reported as
+	// absent, beneath a sentence saying everything was fine. `Summary.AllLoaded` cannot answer yes
+	// here either; both are the same rule.
+	if sum.Incomplete != "" && sum.Failed == 0 {
+		fmt.Fprintf(env.Stderr, "omw ext list: whether every registered extension loaded %s (code: %s).\n",
+			tri.Undetermined, extension.ErrLoadUndetermined.Code)
+		fmt.Fprintf(env.Stderr, "  Part of the inventory could not be read, so this is NOT a report that all is well.\n")
+		return
+	}
 	switch {
 	case sum.Failed > 0:
 		fmt.Fprintf(env.Stderr, "omw ext list: %d extension(s) FAILED TO LOAD (code: %s).\n",
@@ -366,9 +371,12 @@ func extensionRegister(env cli.Env, args []string) int {
 		return cli.ExitUndetermined
 	}
 	fmt.Fprintf(env.Stdout, "registered: %s (%s)\n", reg.Name, reg.Interface)
-	entries, _ := extension.Inventory(s, extensionRegistry)
-	fmt.Fprint(env.Stdout, extension.Find(entries, name).Render())
-	return extensionExitFor(extension.Summarise([]extension.Entry{extension.Find(entries, name)}))
+	listing := extension.Read(s, extensionRegistry)
+	entry := extension.Find(listing.Entries, name)
+	fmt.Fprint(env.Stdout, entry.Render())
+	sum := extension.Summarise([]extension.Entry{entry})
+	sum.Incomplete = listing.Incomplete
+	return extensionExitFor(sum)
 }
 
 func extensionDeregister(env cli.Env, args []string) int {
@@ -444,10 +452,21 @@ func extensionShow(env cli.Env, args []string) int {
 	if !ok {
 		return code
 	}
-	entries, _ := extension.Inventory(s, extensionRegistry)
-	e := extension.Find(entries, args[0])
+	listing := extension.Read(s, extensionRegistry)
+	e := extension.Find(listing.Entries, args[0])
 	fmt.Fprint(env.Stdout, e.Render())
-	return extensionExitFor(extension.Summarise([]extension.Entry{e}))
+	// AN INCOMPLETE READ CANNOT SAY "NOT REGISTERED". `Find` answers not-registered for a name it
+	// did not see, which is right over a complete inventory and a lie over a partial one: the
+	// record naming this extension may be one of the ones that would not read.
+	if !listing.Complete() && e.Resolved() == extension.NotRegistered {
+		fmt.Fprintf(env.Stderr, "omw ext show: %q was not found, AND part of the inventory could not be read, so whether it is registered %s (code: %s).\n",
+			args[0], tri.Undetermined, extension.ErrUnreadableRecord.Code)
+		fmt.Fprintf(env.Stderr, "  %s\n", listing.Incomplete)
+		return cli.ExitUndetermined
+	}
+	sum := extension.Summarise([]extension.Entry{e})
+	sum.Incomplete = listing.Incomplete
+	return extensionExitFor(sum)
 }
 
 // extensionParseSettings reads `key=value` arguments, in the one shape both interfaces use.
