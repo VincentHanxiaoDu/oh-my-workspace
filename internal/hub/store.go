@@ -1,7 +1,6 @@
 package hub
 
 import (
-	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -69,7 +68,6 @@ type Store struct {
 	members *Record
 	notes   map[NoteID]*Note
 	order   []NoteID
-	nextID  int
 	now     func() time.Time
 }
 
@@ -133,8 +131,15 @@ func (s *Store) Publish(p Publication) (*Note, error) {
 		return nil, err
 	}
 
-	s.nextID++
-	id := NoteID(fmt.Sprintf("note-%d", s.nextID))
+	// UNGUESSABLE, NOT SEQUENTIAL — Issue #15's ruling, binding #10, #12, #14 and #15. The old
+	// `note-%d` counter combined with criterion 12's required "refused" vs "no such note"
+	// distinction into an enumeration oracle, and it also let a reader locate a note hidden from
+	// them by counting from one they hold. See noteid.go for the ruling and the two decisions it
+	// left open. Minted BEFORE anything is stored, so a mint that fails publishes nothing.
+	id, err := s.mintUnusedNoteIDLocked()
+	if err != nil {
+		return nil, err
+	}
 	n := &Note{
 		ID:         id,
 		Author:     p.Author,
