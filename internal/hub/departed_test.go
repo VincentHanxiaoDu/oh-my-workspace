@@ -16,25 +16,37 @@ import (
 // deactivation" are two observations of the same corpus rather than two corpora that happen to
 // resemble each other.
 type company struct {
-	store *Store
-	arch  *Archive
+	store  *Store
+	roster *Roster
 	// priya's notes, by the visibility they carry.
 	wide, grouped, named, self NoteID
-	// a note by somebody who does not leave, which references priya's company-wide note.
+	// a note by somebody who does not leave, whose BODY references priya's company-wide note in
+	// Issue #14's reference syntax — so criterion 3 is driven against #14's real parser and its
+	// real gate, not against an index this Issue invented.
 	byRavi NoteID
-	refs   *RefIndex
 }
 
 func newCompany(t *testing.T) *company {
+	t.Helper()
+	return newCompanyKnowing(t, "priya", "sam", "ravi")
+}
+
+// newCompanyKnowing builds the same corpus with a roster that has heard of only the named people.
+//
+// A person the roster has never heard of is [tri.Undetermined] — an ordinary state of a hub whose
+// people record is incomplete, and the state criterion 18's tests drive through. It is reached by
+// NOT registering somebody, which is a real sequence of events rather than a mock.
+func newCompanyKnowing(t *testing.T, known ...PersonID) *company {
 	t.Helper()
 	rec := NewRecord()
 	rec.DefineGroup("billing", "priya", "sam")
 	rec.AddPerson("ravi") // not in billing
 	s := NewStore(rec)
-	arch := NewArchive()
-	s.SetPeopleStatus(arch)
-
-	c := &company{store: s, arch: arch, refs: NewRefIndex()}
+	roster := NewRoster()
+	for _, p := range known {
+		roster.Register(p)
+	}
+	c := &company{store: s, roster: roster}
 	pub := func(title string, v Visibility) NoteID {
 		t.Helper()
 		n, err := s.Publish(Publication{Author: "priya", Title: title, Body: "billing reconciliation runs twice because " + title, Visibility: v})
@@ -56,12 +68,19 @@ func newCompany(t *testing.T) *company {
 	c.named = pub("named", p)
 	c.self = pub("self", SelfOnly())
 
-	n, err := s.Publish(Publication{Author: "ravi", Title: "ravi's note", Body: "see priya's writeup", Visibility: CompanyWide()})
+	n, err := s.Publish(Publication{Author: "ravi", Title: "ravi's note",
+		Body: "see priya's writeup: [[note:" + string(c.wide) + "]]", Visibility: CompanyWide()})
 	if err != nil {
 		t.Fatal(err)
 	}
 	c.byRavi = n.ID
-	c.refs.Link(c.byRavi, c.wide)
+
+	// THE ROSTER IS ATTACHED LAST, and that is not a trick to get around the write gate — it is the
+	// order the events happen in. Everything above was published while its author was employed; the
+	// roster governs what happens NEXT. Attaching it first would mean the fixture could not express
+	// a note by somebody the roster has never heard of, which is exactly the state criterion 18 is
+	// about.
+	s.SetRoster(roster)
 	return c
 }
 
@@ -87,7 +106,7 @@ func TestADirectReferenceResolvesToTheSameNoteAfterTheAuthorLeaves(t *testing.T)
 	}
 	beforeBody := before.Latest().Body
 
-	c.arch.Deactivate("priya")
+	c.roster.Deactivate("priya")
 
 	after, err := c.store.Read(c.wide, "ravi")
 	if err != nil {
@@ -117,17 +136,17 @@ func TestEveryVersionIsStillAddressableAfterTheAuthorLeaves(t *testing.T) {
 	}
 	before := map[int]snap{}
 	for i := 1; i <= 3; i++ {
-		v, _, err := AttributedVersion(c.store, c.arch, VersionRef{Note: c.wide, Number: i}, "ravi")
+		v, _, err := AttributedVersion(c.store, c.roster, VersionRef{Note: c.wide, Number: i}, "ravi")
 		if err != nil {
 			t.Fatalf("reading version %d before the departure: %v", i, err)
 		}
 		before[i] = snap{v.Body, v.At}
 	}
 
-	c.arch.Deactivate("priya")
+	c.roster.Deactivate("priya")
 
 	for i := 1; i <= 3; i++ {
-		v, by, err := AttributedVersion(c.store, c.arch, VersionRef{Note: c.wide, Number: i}, "ravi")
+		v, by, err := AttributedVersion(c.store, c.roster, VersionRef{Note: c.wide, Number: i}, "ravi")
 		if err != nil {
 			t.Fatalf("criterion 2: version %d was addressable before the deactivation and answered "+
 				"%v (code %s) after it. a claim a colleague acted on last month must still be readable.",
@@ -154,11 +173,11 @@ func TestAttributionIsIdenticalOnEveryVersionOfADepartedColleaguesNote(t *testin
 	c := newCompany(t)
 	c.amend(t, c.wide, "v2")
 	c.amend(t, c.wide, "v3")
-	c.arch.Deactivate("priya")
+	c.roster.Deactivate("priya")
 
 	var lines []string
 	for i := 1; i <= 3; i++ {
-		_, by, err := AttributedVersion(c.store, c.arch, VersionRef{Note: c.wide, Number: i}, "ravi")
+		_, by, err := AttributedVersion(c.store, c.roster, VersionRef{Note: c.wide, Number: i}, "ravi")
 		if err != nil {
 			t.Fatalf("version %d: %v", i, err)
 		}
@@ -175,32 +194,97 @@ func TestAttributionIsIdenticalOnEveryVersionOfADepartedColleaguesNote(t *testin
 	}
 }
 
-// TestReferencesSurviveADepartureInBothDirections is criterion 3.
-func TestReferencesSurviveADepartureInBothDirections(t *testing.T) {
+// TestReferencesSurviveADepartureThroughIssue14sGatedSurface is criterion 3, driven against Issue
+// #14's [OutboundReferences] and [ReferencesTo] rather than against an index this Issue invented.
+//
+// AN EARLIER REVISION OF THIS BRANCH SHIPPED ITS OWN RefIndex, and it was ungated: it resolved a
+// note's outbound edges without first asking whether the reader may read the note the edges belong
+// to, so a reader refused a note was served its reference graph. #14 had landed with that gate by
+// then. The type is gone; what this Issue owes criterion 3 is this test.
+func TestReferencesSurviveADepartureThroughIssue14sGatedSurface(t *testing.T) {
 	c := newCompany(t)
 
-	fwdBefore := c.refs.Resolve(c.store, c.arch, c.byRavi, "sam")
-	backBefore := c.refs.Backlinks(c.store, c.arch, c.wide, "sam")
-	if len(fwdBefore.Resolved) != 1 || len(backBefore.Resolved) != 1 {
+	fwdBefore, err := OutboundReferences(c.store, c.byRavi, 0, "sam")
+	if err != nil {
+		t.Fatalf("fixture: reading ravi's references before the departure: %v", err)
+	}
+	backBefore, err := ReferencesTo(c.store, Reference{Kind: RefNote, Target: string(c.wide)}, "sam")
+	if err != nil {
+		t.Fatalf("fixture: reading backlinks before the departure: %v", err)
+	}
+	if fwdBefore.Count() != 1 || backBefore.Count() != 1 {
 		t.Fatalf("fixture: expected one reference each way before the departure, got %d forward and %d back",
-			len(fwdBefore.Resolved), len(backBefore.Resolved))
+			fwdBefore.Count(), backBefore.Count())
+	}
+	if fwdBefore.Refs[0].State != StateResolved {
+		t.Fatalf("fixture: the reference should resolve before the departure, it is %v", fwdBefore.Refs[0].State)
 	}
 
-	c.arch.Deactivate("priya")
+	c.roster.Deactivate("priya")
 
-	fwd := c.refs.Resolve(c.store, c.arch, c.byRavi, "sam")
-	if len(fwd.Resolved) != 1 || fwd.Resolved[0].Note != c.wide {
-		t.Errorf("criterion 3: a note by a still-active person referenced an archived note and the "+
-			"reference no longer resolves: resolved=%v refused=%v undetermined=%v",
-			fwd.Resolved, fwd.Refused, fwd.Undetermined)
+	fwd, err := OutboundReferences(c.store, c.byRavi, 0, "sam")
+	if err != nil {
+		t.Fatalf("criterion 3: a note by a still-active person referencing an archived note answered %v", err)
 	}
-	back := c.refs.Backlinks(c.store, c.arch, c.wide, "sam")
-	if len(back.Resolved) != 1 || back.Resolved[0].Note != c.byRavi {
-		t.Errorf("criterion 3: the archived note no longer lists what referenced it: %v", back.Resolved)
+	if fwd.Count() != 1 || fwd.Refs[0].State != StateResolved {
+		t.Errorf("criterion 3: the reference to the archived note no longer resolves: count=%d refs=%v",
+			fwd.Count(), fwd.Refs)
 	}
-	// And the resolved target is still attributed to the person who left.
-	if got := fwd.Resolved[0].By; got.Author != "priya" || got.Active != tri.No {
-		t.Errorf("criterion 3/9: the resolved archived note is attributed %q/%v", got.Author, got.Active)
+	back, err := ReferencesTo(c.store, Reference{Kind: RefNote, Target: string(c.wide)}, "sam")
+	if err != nil {
+		t.Fatalf("criterion 3: backlinks to the archived note answered %v", err)
+	}
+	if back.Count() != 1 || back.Notes[0].ID != c.byRavi {
+		t.Errorf("criterion 3: the archived note no longer lists what referenced it: %v", back.Notes)
+	}
+	// And what the reference points at is still attributed to the person who left.
+	if got := AttributionFor(noteFor(t, c.store, c.wide), c.roster); got.Author != "priya" || got.Active != tri.No {
+		t.Errorf("criterion 3/9: the referenced archived note is attributed %q/%v", got.Author, got.Active)
+	}
+}
+
+// TestAReferenceSurfaceNeverServesTheEdgesOfANoteTheReaderMayNotRead is the defect that refused the
+// first revision of this branch, kept as a standing test.
+//
+// The scenario is the one that defeats "they would have to guess the id": bob reads a note
+// LEGITIMATELY and learns its id, the author then narrows it away from him, and bob still holds the
+// id. A reference surface that does not gate the source note serves him its edges forever.
+func TestAReferenceSurfaceNeverServesTheEdgesOfANoteTheReaderMayNotRead(t *testing.T) {
+	c := newCompany(t)
+
+	// sam may read the group note today, and it references priya's company-wide note.
+	if _, err := c.store.Amend(c.grouped, "see also [[note:"+string(c.wide)+"]]"); err != nil {
+		t.Fatal(err)
+	}
+	before, err := OutboundReferences(c.store, c.grouped, 0, "sam")
+	if err != nil {
+		t.Fatalf("fixture: sam should be able to read the group note: %v", err)
+	}
+	if before.Count() != 1 {
+		t.Fatalf("fixture: expected one reference, got %d", before.Count())
+	}
+
+	// priya narrows it to herself. sam keeps the id.
+	if _, err := c.store.SetVisibility(c.grouped, "priya", SelfOnly()); err != nil {
+		t.Fatal(err)
+	}
+	if _, rerr := c.store.Read(c.grouped, "sam"); Code(rerr) != ErrRefused.Code {
+		t.Fatalf("fixture: sam should now be refused the note itself, got %v", rerr)
+	}
+
+	// THE ASSERTION: the edges go with the note.
+	after, err := OutboundReferences(c.store, c.grouped, 0, "sam")
+	if err == nil {
+		t.Errorf("a reader refused a note was served its outbound references anyway: %d edge(s), body %q. "+
+			"A former reader keeps the id; the reference graph must not keep answering to it.",
+			after.Count(), after.Body)
+	} else if Code(err) != ErrRefused.Code {
+		t.Errorf("the refusal should be the note's own refusal (%q); got %q", ErrRefused.Code, Code(err))
+	}
+	// The deactivation of the author changes none of this, in either direction.
+	c.roster.Deactivate("priya")
+	if _, err := OutboundReferences(c.store, c.grouped, 0, "sam"); Code(err) != ErrRefused.Code {
+		t.Errorf("archival changed a reference refusal into %q", Code(err))
 	}
 }
 
@@ -226,7 +310,7 @@ func TestTheSameSearchByTheSameSearcherReturnsTheSameNotesAfterTheAuthorLeaves(t
 		beforeUndet[r] = len(undet)
 	}
 
-	c.arch.Deactivate("priya")
+	c.roster.Deactivate("priya")
 
 	for _, r := range readers {
 		hits, undet := SearchLatest(c.store, r, term)
@@ -268,7 +352,7 @@ func TestArchivalNeverWidensANarrowedNote(t *testing.T) {
 		}
 	}
 
-	c.arch.Deactivate("priya")
+	c.roster.Deactivate("priya")
 
 	for _, tc := range []struct {
 		name string
@@ -298,7 +382,7 @@ func TestArchivalNeverWidensANarrowedNote(t *testing.T) {
 // before/after comparison so that a failure names the right defect.
 func TestArchivalNeverNarrowsACompanyWideNote(t *testing.T) {
 	c := newCompany(t)
-	c.arch.Deactivate("priya")
+	c.roster.Deactivate("priya")
 	for _, r := range []PersonID{"ravi", "sam"} {
 		if _, err := c.store.Read(c.wide, r); err != nil {
 			t.Errorf("criterion 6: a company-wide note by a deactivated person must still be "+
@@ -312,19 +396,21 @@ func TestArchivalNeverNarrowsACompanyWideNote(t *testing.T) {
 func TestUnreadableArchivedNotesDoNotChangeASearchersResultCount(t *testing.T) {
 	// Corpus A: only the company-wide note and ravi's.
 	a := NewStore(NewRecord())
-	archA := NewArchive()
-	a.SetPeopleStatus(archA)
+	rosterA := NewRoster()
+	rosterA.Register("priya")
+	rosterA.Register("ravi")
+	a.SetRoster(rosterA)
 	publishAs(t, a, "priya", "wide", CompanyWide())
 	publishAs(t, a, "ravi", "ravi", CompanyWide())
-	archA.Deactivate("priya")
+	rosterA.Deactivate("priya")
 
 	// Corpus B: the same, plus three archived notes ravi may not read.
 	b := newCompany(t)
-	b.arch.Deactivate("priya")
+	b.roster.Deactivate("priya")
 
 	hitsA, undetA := SearchLatest(a, "ravi", "wide")
-	sumA := Summarise(a, archA, "ravi")
-	sumB := Summarise(b.store, b.arch, "ravi")
+	sumA := Summarise(a, rosterA, "ravi")
+	sumB := Summarise(b.store, b.roster, "ravi")
 
 	if len(undetA) != 0 {
 		t.Fatalf("fixture: corpus A should have no undetermined notes for ravi, got %v", undetA)
@@ -346,9 +432,9 @@ func TestUnreadableArchivedNotesDoNotChangeASearchersResultCount(t *testing.T) {
 // on the statistics and then searches must not find the corpus smaller than promised.
 func TestCorpusStatisticsCountExactlyWhatASearchWillFind(t *testing.T) {
 	c := newCompany(t)
-	c.arch.Deactivate("priya")
+	c.roster.Deactivate("priya")
 	for _, r := range []PersonID{"priya", "sam", "ravi"} {
-		sum := Summarise(c.store, c.arch, r)
+		sum := Summarise(c.store, c.roster, r)
 		readable, _ := c.store.ListReadable(r)
 		if sum.Notes != len(readable) {
 			t.Errorf("criterion 8: the statistics promise %q %d notes and the corpus holds %d for them",
@@ -374,7 +460,7 @@ func TestCorpusStatisticsCountExactlyWhatASearchWillFind(t *testing.T) {
 		}
 	}
 	// The negative half: an archived note ravi may not read is not counted for him.
-	if got := Summarise(c.store, c.arch, "ravi").Archived; got != 1 {
+	if got := Summarise(c.store, c.roster, "ravi").Archived; got != 1 {
 		t.Errorf("criterion 8: ravi may read one of priya's four notes; the statistics count %d archived", got)
 	}
 }
@@ -386,12 +472,12 @@ func TestCorpusStatisticsCountExactlyWhatASearchWillFind(t *testing.T) {
 // TestAnArchivedNoteRendersItsAuthorAndItIsTheSameAuthorAsBefore is criteria 9 and 10.
 func TestAnArchivedNoteRendersItsAuthorAndItIsTheSameAuthorAsBefore(t *testing.T) {
 	c := newCompany(t)
-	_, byBefore, err := AttributedRead(c.store, c.arch, c.wide, "ravi")
+	_, byBefore, err := AttributedRead(c.store, c.roster, c.wide, "ravi")
 	if err != nil {
 		t.Fatal(err)
 	}
-	c.arch.Deactivate("priya")
-	_, byAfter, err := AttributedRead(c.store, c.arch, c.wide, "ravi")
+	c.roster.Deactivate("priya")
+	_, byAfter, err := AttributedRead(c.store, c.roster, c.wide, "ravi")
 	if err != nil {
 		t.Fatalf("criterion 11: an archived note must not answer an error; got %v", err)
 	}
@@ -422,26 +508,26 @@ func TestAnArchivedNoteRendersItsAuthorAndItIsTheSameAuthorAsBefore(t *testing.T
 func TestAnArchivedNoteIsNeverReportedAsMissing(t *testing.T) {
 	c := newCompany(t)
 	c.amend(t, c.wide, "amended before she left")
-	c.arch.Deactivate("priya")
+	c.roster.Deactivate("priya")
 
-	if n, _, err := AttributedRead(c.store, c.arch, c.wide, "ravi"); err != nil || n.Latest().Body == "" {
+	if n, _, err := AttributedRead(c.store, c.roster, c.wide, "ravi"); err != nil || n.Latest().Body == "" {
 		t.Errorf("criterion 11: by reference — err=%v body=%q", err, bodyOf(n))
 	}
-	if v, _, err := AttributedVersion(c.store, c.arch, VersionRef{Note: c.wide, Number: 1}, "ravi"); err != nil || v.Body == "" {
+	if v, _, err := AttributedVersion(c.store, c.roster, VersionRef{Note: c.wide, Number: 1}, "ravi"); err != nil || v.Body == "" {
 		t.Errorf("criterion 11: by version — err=%v body=%q", err, v.Body)
 	}
 	hits, _ := SearchLatest(c.store, "ravi", "amended")
 	if len(hits) != 1 {
 		t.Fatalf("criterion 11: via a search result — the archived note did not appear (%d hits)", len(hits))
 	}
-	v, _, err := AttributedVersion(c.store, c.arch, hits[0].Ref, "ravi")
+	v, _, err := AttributedVersion(c.store, c.roster, hits[0].Ref, "ravi")
 	if err != nil || v.Body == "" {
 		t.Errorf("criterion 11: following a search result — err=%v body=%q", err, v.Body)
 	}
 
 	// AND THE TWO FACTS STAY DIFFERENT FACTS. A note refused for visibility and a note whose author
 	// is deactivated are reported differently.
-	_, _, rerr := AttributedRead(c.store, c.arch, c.self, "ravi")
+	_, _, rerr := AttributedRead(c.store, c.roster, c.self, "ravi")
 	if Code(rerr) != ErrRefused.Code {
 		t.Errorf("criterion 11: a refusal for visibility must still report as %q; got %q",
 			ErrRefused.Code, Code(rerr))
@@ -483,10 +569,10 @@ func TestTheThreeAuthorStatesRenderPairwiseDistinctly(t *testing.T) {
 // TestAnUndeterminableAuthorStateIsNoneOfTheOtherThree is criterion 18, driven through the real
 // lookup path rather than a hand-built struct: the hub's record of the person is made unreadable.
 func TestAnUndeterminableAuthorStateIsNoneOfTheOtherThree(t *testing.T) {
-	c := newCompany(t)
-	c.arch.MarkUnreadable("priya")
+	// A roster that has never heard of priya: her state is undetermined through the real path.
+	c := newCompanyKnowing(t, "sam", "ravi")
 
-	n, by, err := AttributedRead(c.store, c.arch, c.wide, "ravi")
+	n, by, err := AttributedRead(c.store, c.roster, c.wide, "ravi")
 	if err != nil {
 		t.Fatalf("criterion 18: the note must still be readable while its author's state is unknown; got %v", err)
 	}
@@ -516,10 +602,11 @@ func TestAnUndeterminableAuthorStateIsNoneOfTheOtherThree(t *testing.T) {
 // TestAnUndeterminedAuthorStateDoesNotChangeWhoCanRead is the other half of criterion 18: the third
 // value is not a quiet refusal either.
 func TestAnUndeterminedAuthorStateDoesNotChangeWhoCanRead(t *testing.T) {
-	c := newCompany(t)
-	before, _ := c.store.ListReadable("ravi")
-	c.arch.MarkUnreadable("priya")
-	after, _ := c.store.ListReadable("ravi")
+	known := newCompanyKnowing(t, "priya", "sam", "ravi")
+	before, _ := known.store.ListReadable("ravi")
+	// The same corpus, with a roster that never heard of its author.
+	unknown := newCompanyKnowing(t, "sam", "ravi")
+	after, _ := unknown.store.ListReadable("ravi")
 	if len(before) != len(after) {
 		t.Errorf("an unreadable people record changed what ravi may read: %d -> %d. author state is "+
 			"not an input to CanRead.", len(before), len(after))
@@ -535,28 +622,28 @@ func TestDeactivationRefusesEveryTokenForEveryScope(t *testing.T) {
 	c := newCompany(t)
 	l := NewLedger()
 	held := Vocabulary()
-	g, err := l.RequestLive(c.arch, Holder{Person: "priya", Scopes: held}, held)
+	g, err := l.RequestLive(c.roster, Holder{Person: "priya", Scopes: held}, held)
 	if err != nil {
 		t.Fatalf("issuing a grant to an active person: %v", err)
 	}
 	// It works before.
-	if _, err := ReadThroughLive(c.store, c.arch, g, c.self); err != nil {
+	if _, err := ReadThroughLive(c.store, c.roster, g, c.self); err != nil {
 		t.Fatalf("fixture: priya should be able to read her own note through her own grant: %v", err)
 	}
 
-	c.arch.Deactivate("priya")
+	c.roster.Deactivate("priya")
 
 	// "not read my own notes":
-	if _, err := ReadThroughLive(c.store, c.arch, g, c.self); Code(err) != ErrPersonDeactivated.Code {
+	if _, err := ReadThroughLive(c.store, c.roster, g, c.self); Code(err) != ErrPersonDeactivated.Code {
 		t.Errorf("criterion 14: a read of her OWN note through her own token answered %v (code %q); "+
 			"after deactivation no token issued to that person is accepted, for any scope",
 			err, Code(err))
 	}
 	// "not publish as me":
-	if _, err := PublishThroughLive(c.store, c.arch, g, Publication{Author: "priya", Title: "new", Body: "b"}); Code(err) != ErrPersonDeactivated.Code {
+	if _, err := PublishThroughLive(c.store, c.roster, g, Publication{Author: "priya", Title: "new", Body: "b"}); Code(err) != ErrPersonDeactivated.Code {
 		t.Errorf("criterion 14: publishing through her token answered code %q", Code(err))
 	}
-	if _, err := SetVisibilityThroughLive(c.store, c.arch, g, c.wide, SelfOnly()); Code(err) != ErrPersonDeactivated.Code {
+	if _, err := SetVisibilityThroughLive(c.store, c.roster, g, c.wide, SelfOnly()); Code(err) != ErrPersonDeactivated.Code {
 		t.Errorf("criterion 14: changing a note's visibility through her token answered code %q", Code(err))
 	}
 	// The scope on the grant is not what decided it — a grant carrying only `read` is refused the
@@ -565,7 +652,7 @@ func TestDeactivationRefusesEveryTokenForEveryScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ReadThroughLive(c.store, c.arch, readOnly, c.wide); Code(err) != ErrPersonDeactivated.Code {
+	if _, err := ReadThroughLive(c.store, c.roster, readOnly, c.wide); Code(err) != ErrPersonDeactivated.Code {
 		t.Errorf("criterion 14: a read-only token answered code %q", Code(err))
 	}
 }
@@ -575,17 +662,17 @@ func TestDeactivationRefusesEveryTokenForEveryScope(t *testing.T) {
 func TestTokenRefusedAndNoteStillFindableInASingleRun(t *testing.T) {
 	c := newCompany(t)
 	l := NewLedger()
-	g, err := l.RequestLive(c.arch, Holder{Person: "priya", Scopes: Vocabulary()}, []Scope{ScopeRead})
+	g, err := l.RequestLive(c.roster, Holder{Person: "priya", Scopes: Vocabulary()}, []Scope{ScopeRead})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	c.arch.Deactivate("priya")
+	c.roster.Deactivate("priya")
 
-	if _, err := ReadThroughLive(c.store, c.arch, g, c.wide); Code(err) != ErrPersonDeactivated.Code {
+	if _, err := ReadThroughLive(c.store, c.roster, g, c.wide); Code(err) != ErrPersonDeactivated.Code {
 		t.Errorf("criterion 15, first half: the token was not refused (code %q)", Code(err))
 	}
-	n, by, rerr := AttributedRead(c.store, c.arch, c.wide, "ravi")
+	n, by, rerr := AttributedRead(c.store, c.roster, c.wide, "ravi")
 	if rerr != nil {
 		t.Errorf("criterion 15, second half: the note is no longer findable (%v). ending sessions is "+
 			"not deleting notes, and neither half may be implemented by doing the other.", rerr)
@@ -604,10 +691,10 @@ func TestTokenRefusedAndNoteStillFindableInASingleRun(t *testing.T) {
 func TestNoNewAuthorityIsCreatedForADeactivatedPerson(t *testing.T) {
 	c := newCompany(t)
 	l := NewLedger()
-	c.arch.Deactivate("priya")
+	c.roster.Deactivate("priya")
 
 	before := len(l.Grants("priya"))
-	if _, err := l.RequestLive(c.arch, Holder{Person: "priya", Scopes: Vocabulary()}, []Scope{ScopeRead}); Code(err) != ErrPersonDeactivated.Code {
+	if _, err := l.RequestLive(c.roster, Holder{Person: "priya", Scopes: Vocabulary()}, []Scope{ScopeRead}); Code(err) != ErrPersonDeactivated.Code {
 		t.Errorf("criterion 16: a grant request for a departed person answered code %q", Code(err))
 	}
 	if after := len(l.Grants("priya")); after != before {
@@ -642,47 +729,42 @@ func TestNoNewAuthorityIsCreatedForADeactivatedPerson(t *testing.T) {
 	}
 }
 
-// TestOnlyTheHubDeactivatesAPerson is criterion 17, asserted structurally: the package offers
-// exactly one way to deactivate somebody, and it takes no event, channel or directory record.
+// TestOnlyTheHubDeactivatesAPerson is criterion 17, asserted structurally: the one act takes a
+// PersonID and nothing else, and nothing that merely READS the roster can write to it.
 func TestOnlyTheHubDeactivatesAPerson(t *testing.T) {
-	// The one act. It takes a PersonID and nothing else — no timestamp from elsewhere, no source,
-	// no signal object that some client-side path could construct.
 	c := newCompany(t)
-	if c.arch.IsDeactivated("priya") {
+	if c.roster.Active("priya") != tri.Yes {
 		t.Fatal("fixture: nobody has left yet")
 	}
-	c.arch.Deactivate("priya")
-	if !c.arch.IsDeactivated("priya") {
+	c.roster.Deactivate("priya")
+	if c.roster.Active("priya") != tri.No {
 		t.Fatal("Deactivate did not take effect")
 	}
-	// PeopleStatus — the interface every OTHER path in the product consults — is read-only. A
-	// surface, a channel ingester or a directory syncer holding one cannot deactivate anybody
-	// through it. That is what makes "no client-side event deactivates a person on its own" a
-	// property of the shape rather than of everybody's restraint: the only writer is whoever holds
-	// the concrete *Archive, which is the hub.
-	iface := reflect.TypeOf((*PeopleStatus)(nil)).Elem()
-	if iface.NumMethod() != 1 || iface.Method(0).Name != "HasLeft" {
-		var names []string
-		for i := 0; i < iface.NumMethod(); i++ {
-			names = append(names, iface.Method(i).Name)
-		}
-		t.Errorf("criterion 17: PeopleStatus has methods %v. It must expose exactly one, read-only "+
-			"question. A write method here is a way for something other than the hub to deactivate "+
-			"a person.", names)
-	}
 
-	// And the one act takes a PersonID AND NOTHING ELSE — no event, no signal object, no directory
-	// record a mirror could hand it. Criterion 17 is that deactivation is performed against the
-	// hub; a Deactivate that accepted a payload is where a channel signal would arrive.
-	act, ok := reflect.TypeOf(c.arch).MethodByName("Deactivate")
+	// THE ONE ACT TAKES A PersonID AND NOTHING ELSE — no event, no signal object, no directory
+	// record a mirror could hand it. A Deactivate that accepted a payload is exactly where a
+	// channel signal or a company-directory row would arrive, and §5.3 rules that nothing is
+	// mirrored in the first slice.
+	act, ok := reflect.TypeOf(c.roster).MethodByName("Deactivate")
 	if !ok {
-		t.Fatal("Archive has no Deactivate")
+		t.Fatal("Roster has no Deactivate")
 	}
-	// Method value on a *Archive: receiver plus arguments.
 	if act.Type.NumIn() != 2 || act.Type.In(1) != reflect.TypeOf(PersonID("")) {
-		t.Errorf("criterion 17: Archive.Deactivate has signature %v; it must take a PersonID and "+
+		t.Errorf("criterion 17: Roster.Deactivate has signature %v; it must take a PersonID and "+
 			"nothing else, so there is nowhere for a directory record or a client-side event to be "+
 			"passed in", act.Type)
+	}
+
+	// AND THE STORE — which every surface in this Issue holds — OFFERS NO WAY TO DEACTIVATE
+	// ANYBODY. A surface can attach a roster and read one; deactivating is the hub's own act
+	// against its own record. Anything that grew a Store.Deactivate would make a departure a side
+	// effect of whatever else that surface was doing.
+	st := reflect.TypeOf(c.store)
+	for i := 0; i < st.NumMethod(); i++ {
+		if name := st.Method(i).Name; strings.Contains(name, "Deactivate") {
+			t.Errorf("criterion 17: Store has a %q method. Deactivation is an act performed against "+
+				"the hub's roster, not something reachable from every surface that holds a store.", name)
+		}
 	}
 }
 
@@ -697,7 +779,7 @@ func TestNothingExpiresLongAfterTheDeparture(t *testing.T) {
 	now := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
 	c.store.SetClock(func() time.Time { return now })
 	c.amend(t, c.wide, "as it stood in March")
-	c.arch.Deactivate("priya")
+	c.roster.Deactivate("priya")
 
 	for _, after := range []time.Duration{
 		30 * 24 * time.Hour,        // a month
@@ -707,7 +789,7 @@ func TestNothingExpiresLongAfterTheDeparture(t *testing.T) {
 	} {
 		now = now.Add(after)
 		c.store.SetClock(func() time.Time { return now })
-		n, by, err := AttributedRead(c.store, c.arch, c.wide, "ravi")
+		n, by, err := AttributedRead(c.store, c.roster, c.wide, "ravi")
 		if err != nil {
 			t.Fatalf("§5.4: %v after the departure the note answered %v (code %s). nothing expires.",
 				after, err, Code(err))
@@ -716,7 +798,7 @@ func TestNothingExpiresLongAfterTheDeparture(t *testing.T) {
 			t.Errorf("§5.4: %v after the departure the note has %d versions, not 2", after, len(n.Versions))
 		}
 		for i := 1; i <= 2; i++ {
-			if _, _, verr := AttributedVersion(c.store, c.arch, VersionRef{Note: c.wide, Number: i}, "ravi"); verr != nil {
+			if _, _, verr := AttributedVersion(c.store, c.roster, VersionRef{Note: c.wide, Number: i}, "ravi"); verr != nil {
 				t.Errorf("§5.4: %v after the departure version %d answered %v", after, i, verr)
 			}
 		}
@@ -773,7 +855,8 @@ func TestDeactivationAddsNoScope(t *testing.T) {
 // TestDeactivationIsNotAnInputToCanRead is the hard constraint of this Issue expressed directly:
 // CanRead's answer for every note and every reader is identical before and after a departure.
 func TestDeactivationIsNotAnInputToCanRead(t *testing.T) {
-	c := newCompany(t)
+	// sam is deliberately not registered, so all three standings are exercised below.
+	c := newCompanyKnowing(t, "priya", "ravi")
 	readers := []PersonID{"priya", "sam", "ravi", "nobody", ""}
 	ids := c.store.IDs()
 	before := map[string]tri.Value{}
@@ -786,9 +869,9 @@ func TestDeactivationIsNotAnInputToCanRead(t *testing.T) {
 			before[string(id)+"/"+string(r)] = CanReadNote(n, r, c.store.Members())
 		}
 	}
-	c.arch.Deactivate("priya")
-	c.arch.Deactivate("ravi")
-	c.arch.MarkUnreadable("sam")
+	c.roster.Deactivate("priya")
+	c.roster.Deactivate("ravi")
+	// and sam's state stays undetermined — this roster never heard of him.
 	for _, id := range ids {
 		n := noteFor(t, c.store, id)
 		for _, r := range readers {
@@ -852,4 +935,111 @@ func noteFor(t *testing.T, s *Store, id NoteID) *Note {
 	}
 	t.Fatalf("no reader in the fixture can reach note %q", id)
 	return nil
+}
+
+// TestEveryWritePathIsGatedOnTheAuthorsStanding is criterion 16 given more than one test, which is
+// what qa asked for: the previous single test meant a removed gate produced exactly one failure.
+//
+// It enumerates every entry point that can add to the hub and asserts each refuses, for BOTH
+// non-active standings, with the right code — and that each refusal stored nothing.
+func TestEveryWritePathIsGatedOnTheAuthorsStanding(t *testing.T) {
+	for _, standing := range []struct {
+		name string
+		// setUp puts priya into the standing under test and returns the code to expect.
+		setUp func(c *company) string
+	}{
+		{"departed", func(c *company) string {
+			c.roster.Deactivate("priya")
+			return ErrPersonDeactivated.Code
+		}},
+		{"state undetermined", func(c *company) string {
+			// A roster that knows ravi but never heard of priya. Nothing was established about
+			// her, so nothing is done as her — and ravi, who it has heard of, is unaffected.
+			r := NewRoster()
+			r.Register("ravi")
+			c.store.SetRoster(r)
+			return ErrPersonStateUndetermined.Code
+		}},
+	} {
+		t.Run(standing.name, func(t *testing.T) {
+			c := newCompany(t)
+			want := standing.setUp(c)
+			l := NewLedger()
+			g, err := l.Request(Holder{Person: "priya", Scopes: Vocabulary()}, Vocabulary())
+			if err != nil {
+				t.Fatal(err)
+			}
+			roster := c.store.RosterOf()
+
+			notesBefore := c.store.Count()
+			n := noteFor(t, c.store, c.wide)
+			versionsBefore := len(n.Versions)
+			visBefore := n.Visibility
+
+			for _, path := range []struct {
+				name string
+				do   func() error
+			}{
+				{"Store.Publish", func() error {
+					_, e := c.store.Publish(Publication{Author: "priya", Title: "new", Body: "b"})
+					return e
+				}},
+				{"Store.Amend", func() error {
+					_, e := c.store.Amend(c.wide, "a new version")
+					return e
+				}},
+				{"PublishThroughLive", func() error {
+					_, e := PublishThroughLive(c.store, roster, g, Publication{Author: "priya", Title: "new", Body: "b"})
+					return e
+				}},
+				{"SetVisibilityThroughLive", func() error {
+					_, e := SetVisibilityThroughLive(c.store, roster, g, c.wide, SelfOnly())
+					return e
+				}},
+				{"Ledger.RequestLive", func() error {
+					_, e := l.RequestLive(roster, Holder{Person: "priya", Scopes: Vocabulary()}, []Scope{ScopeRead})
+					return e
+				}},
+				{"EvaluateGrantRequestLive", func() error {
+					_, e := EvaluateGrantRequestLive(roster, Holder{Person: "priya", Scopes: Vocabulary()}, []Scope{ScopeRead})
+					return e
+				}},
+				{"AcceptGrant", func() error { return AcceptGrant(roster, g) }},
+			} {
+				if got := Code(path.do()); got != want {
+					t.Errorf("criterion 16: %s answered code %q, want %q. Every path that creates new "+
+						"authority for a person is gated on their standing, and the two non-active "+
+						"standings do not share a code.", path.name, got, want)
+				}
+			}
+
+			// NOTHING WAS WRITTEN BY ANY OF THEM.
+			if c.store.Count() != notesBefore {
+				t.Errorf("criterion 16: a refused write stored a note (%d -> %d)", notesBefore, c.store.Count())
+			}
+			after := noteFor(t, c.store, c.wide)
+			if len(after.Versions) != versionsBefore {
+				t.Errorf("criterion 16: a refused amendment added a version (%d -> %d)", versionsBefore, len(after.Versions))
+			}
+			if !after.Visibility.Equal(visBefore) {
+				t.Errorf("criterion 16: a refused visibility change went through: %s -> %s",
+					visBefore.Token(), after.Visibility.Token())
+			}
+			// AND AN ACTIVE COLLEAGUE IS UNTOUCHED — the gate is about the person, not about writing.
+			if _, err := c.store.Publish(Publication{Author: "ravi", Title: "still here", Body: "b"}); err != nil {
+				t.Errorf("criterion 16: the gate refused an active colleague too: %v", err)
+			}
+		})
+	}
+}
+
+// TestTheWriteGateIsInertWithNoRoster is the control for the test above: without it, a gate that
+// refused everybody would pass every assertion there and break every other test for the wrong
+// reason.
+func TestTheWriteGateIsInertWithNoRoster(t *testing.T) {
+	s := NewStore(NewRecord())
+	if _, err := s.Publish(Publication{Author: "priya", Title: "t", Body: "b"}); err != nil {
+		t.Errorf("a store with no roster attached refused a publication: %v. No roster means nobody "+
+			"has told this hub about any departure, not that everybody has left.", err)
+	}
 }

@@ -2,14 +2,11 @@
 
 ## Three answers about a person, not two
 
-- [x] Add `hub.PeopleStatus`, one read-only question (`HasLeft`) about one person, narrow enough
-      that no directory client could hide behind it and no consumer could deactivate through it
-- [x] Implement it on `*hub.Archive`, keeping Issue #11's `IsDeactivated` and `Deactivated()`
-      untouched so its criterion 7 tests keep passing unchanged
-- [x] Add `Archive.MarkUnreadable` and an `unreadable` set alongside `deactivated`, so "could not
-      be determined" is a real state reachable through the production lookup path
-- [x] Add `hub.AuthorActive`, the one conversion to `tri.Value`, with nil-`PeopleStatus` and an
-      unnamed person both answering Undetermined rather than active
+- [x] Adopt Issue #15's `hub.Roster` as the record of who is still here, and add no second one
+- [x] Delete this change's own `PeopleStatus` interface and its methods on Issue #11's `Archive`,
+      leaving `Archive` exactly as #11 wrote it
+- [x] Reach the third value through a roster that has never heard of somebody, which is a real
+      state of an incomplete people record rather than a test double
 
 ## Attribution that is never blank and never authorless
 
@@ -34,13 +31,14 @@
       second, never the other way round
 - [x] Add `hub.CorpusSummary` / `hub.Summarise`, counting archived and author-undetermined notes as
       SUBSETS of what the reader may read
-- [x] Add `hub.RefIndex` with `Link`, `Resolve` and `Backlinks`, resolving through `Store.Read` and
-      branching on no person's standing
-- [x] Report a reference the reader may not follow as refused, not as absent
+- [x] Delete `hub.RefIndex` and `hub.Resolution`, and delete the `omw departed refs` subcommand:
+      Issue #14 has landed with a correctly-gated reference surface, and two is the hazard
+- [x] Report the undetermined count as an `int` rather than a list of note ids, in both
+      `AuthoredListing` and `CorpusSummary`
 
 ## Sessions ended, publications untouched
 
-- [x] Add `hub.CheckActive`, the one gate for acts that create new authority, with three outcomes
+- [x] Add `hub.CheckActive` over the roster, the one gate for acts that create new authority, with three outcomes
       and two distinct error codes
 - [x] Add `hub.AcceptGrant`, checking the holder BEFORE the scope, so "for any scope" is a property
       of the shape
@@ -48,23 +46,26 @@
       `EvaluateGrantRequestLive` and `Ledger.RequestLive`
 - [x] Gate `Store.Publish` and `Store.Amend` on the author's standing, in the store rather than in
       a wrapper, and before the id counter is touched so a refusal stores nothing
-- [x] Add `Store.SetPeopleStatus` / `Store.PeopleStatusOf` so the record the write gate enforces is
-      the record the attribution is read from
+- [x] Add `Store.SetRoster` / `Store.RosterOf` so the record the write gate enforces is the record
+      the attribution is read from
 
 ## The command
 
 - [x] Add `internal/commands/departed_cmd.go` — a NEW file, touching no existing command file
 - [x] `omw departed notes --by <person> [--as <reader>]`, stating the person's standing even when
       they have no notes
-- [x] `omw departed show`, `versions`, `refs`, `corpus`
+- [x] `omw departed show`, `versions`, `corpus`
+- [x] Require an identity — `--as`, else `OMW_IDENTITY` — and refuse with `hub.ErrNotSignedIn`
+      BEFORE the store is touched, in wording that shares nothing with the no-hub, unreachable or
+      genuine-zero answers
 - [x] Order the preconditions: no hub configured (determined, `ExitFailure`, reaches for nothing),
       then daemon liveness through Issue #41's one definition, then unreachable hub
       (`ExitUndetermined`)
 - [x] Call `daemonLiveness` and `reportDaemonNotLive`; write no probe and name no control socket
 - [x] Give the no-hub answer wording that shares nothing with a genuine zero, and give the genuine
       zero wording that says the hub was asked
-- [x] Return `Store.ListReadable`'s undetermined ids to the person rather than dropping them, and
-      exit `ExitUndetermined` when there are any
+- [x] Report `Store.ListReadable`'s undetermined notes as a COUNT — never as ids, for any reader —
+      and exit `ExitUndetermined` when there are any
 
 ## Driving it
 
@@ -72,7 +73,11 @@
       corpus rather than two corpora that resemble each other
 - [x] Criterion 1: fetch a note before and after the deactivation, compare id, body and author
 - [x] Criterion 2: snapshot every version's body and timestamp before, compare after
-- [x] Criterion 3: resolve a reference and its backlink before and after
+- [x] Criterion 3: resolve a reference and its backlink before and after, through Issue #14's
+      `OutboundReferences` and `ReferencesTo`
+- [x] Add the standing test that a reference surface never serves the edges of a note the reader may
+      not read, driven through the former-reader case: read a note legitimately, keep its id, have
+      it narrowed away, and assert the edges go with it
 - [x] Criteria 4 and 6: run the identical query as the identical searcher, for four readers across
       company-wide, group, named-people and self scopes, and compare the result sets
 - [x] Criterion 5: assert three narrowings stay refused, at the store AND in search results
@@ -92,8 +97,11 @@
 - [x] Criterion 19: compare the daemon-running and daemon-not-running outputs to each other
 - [x] Criterion 20: replace the hub source with one that fails the test if it is called, and assert
       no subcommand reaches it with no hub configured
-- [x] Criterion 21: assert no-hub, unreachable and success are three exit codes and three outputs,
-      and that a genuine zero is none of them
+- [x] Criterion 21: assert no-hub, unreachable, success and not-signed-in are four distinct
+      outputs, and that a genuine zero is none of them
+- [x] Assert an unidentified request discloses ZERO note ids on either stream, for three
+      invocations, with a signed-in reader as the control — and assert that reader is not shown the
+      id of the note they may not read either
 - [x] §5.4: advance the clock a month, a year, seven years and a hundred years past the departure
       and assert every version is still there and still attributed
 - [x] Assert `CanRead`'s answer is identical for every note and every reader before and after two
@@ -103,10 +111,16 @@
 
 ## Breaking the tests on purpose
 
+Every mutation was verified present in the file, and the baseline was re-run and confirmed GREEN
+after each revert — a harness that dies mid-run leaves a mutant behind and makes every later result
+worthless, which happened once here and invalidated a first pass.
+
 - [x] Mutate an archived note out of search — RED, naming criteria 4, 6, 7 and 8
 - [x] Mutate an archived note's author to empty — RED, naming criteria 3, 9, 10 and 13
 - [x] Mutate deactivation to widen a narrowed note — RED, naming criteria 4, 5, 6 and 8
-- [x] Mutate a reference to an archived note into an undetermined one — RED, naming criterion 3
+- [x] Reinstate the leak — `--as` optional and ids printed — RED, naming the disclosed ids
+- [x] Reinstate id-printing for an IDENTIFIED reader — RED on the count-not-ids test alone
+- [x] Remove Issue #14's source-note gate — RED on the former-reader test and on #14's own test
 - [x] Mutate `AcceptGrant` to accept everything — RED, naming criteria 14 and 15
 - [x] Mutate the undetermined author state into a departure — RED, naming criteria 12 and 18
 - [x] Mutate the store's publish gate into a dropped error — RED, naming criterion 16

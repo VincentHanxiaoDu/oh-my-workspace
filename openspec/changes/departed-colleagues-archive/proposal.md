@@ -35,14 +35,12 @@ determined is not a departure, and it is not a colleague at their desk.**
 
 ## What Changes
 
-- **`hub.PeopleStatus`** — one narrow, read-only question about one person (`HasLeft`), and
-  `*hub.Archive` implements it. Read-only is the point: criterion 17 says deactivation is an act
-  performed against the hub, never a side effect, and an interface with no writer gives a
-  client-side signal nowhere to arrive.
-- **`hub.AuthorActive`** — the one conversion to a `tri.Value`. Yes for still-here, No for
-  departed, Undetermined for a record that could not be read, a person nobody named, or no record
-  at all. `Archive.MarkUnreadable` makes the third value a real, drivable state rather than only a
-  test double.
+- **`hub.Roster` is adopted, not duplicated.** Issue #15's roster is already three-valued, its nil
+  and unknown-person cases already answer Undetermined, and search already consults it. An earlier
+  revision of this change defined its own `PeopleStatus` interface over Issue #11's `Archive`; that
+  was a second record of the same fact and it is gone. Nothing here wraps, converts or caches it.
+  The third value is reached by a roster that has never heard of somebody — an ordinary state of an
+  incomplete people record, not a test double.
 - **`hub.Attribution`** — author plus standing, with **four** renderings compared pairwise: active,
   departed, undetermined, and a loud "NOT RECORDED" for a note that reached a surface with no
   author. The author is carried as itself and never folded into the state, because folding is how a
@@ -51,13 +49,42 @@ determined is not a departure, and it is not a colleague at their desk.**
   one function that stores a note rather than in a wrapper a caller must remember.
   `AcceptGrant` / `ReadThroughLive` / `PublishThroughLive` / `SetVisibilityThroughLive` /
   `EvaluateGrantRequestLive` / `Ledger.RequestLive` end sessions without touching a note.
-- **`hub.NotesBy`, `hub.Summarise`, `hub.RefIndex`** — findability, corpus statistics and
-  references across a departure. All three filter with `Store.ListReadable` / `Store.Read`, which
-  call `CanRead`. None of them branches on a person's standing when deciding what comes back.
-- **`omw departed`** — `notes`, `show`, `versions`, `refs`, `corpus`. No hub configured is said
-  precisely and reaches for nothing; the daemon is said, never started; an unreachable hub is
-  undetermined. Three different exit codes for three different answers, and a genuine zero shares
-  no wording with any of them.
+- **`hub.NotesBy`, `hub.Summarise`** — findability and corpus statistics across a departure. Both
+  filter with `Store.ListReadable`, which calls `CanRead`. Neither branches on a person's standing
+  when deciding what comes back. **References are Issue #14's** — see below.
+- **`omw departed`** — `notes`, `show`, `versions`, `corpus`. An identity is required before the
+  store is touched; no hub configured is said precisely and reaches for nothing; the daemon is
+  said, never started; an unreachable hub is undetermined. Four answers, and a genuine zero shares
+  wording with none of them.
+
+## Two defects this change was refused for, and what they had in common
+
+Both were **an undetermined readability being rendered as an answer rather than withheld as a
+non-answer**, and both are worth stating because neither was a careless omission.
+
+**The enumeration oracle was reopened.** `--as` was optional. An empty reader makes `CanRead`
+answer `Undetermined` for every note — correctly, since "you did not say who you are" is not a
+determined refusal — so `Store.ListReadable` returned every id in the hub in its undetermined slice
+and the command printed them one per line. `omw departed notes --by anybody`, with no identity and
+not even a real person named, dumped the whole id space including notes narrowed to one person.
+`internal/hub/noteid.go` made ids unguessable *specifically so* that "refused" and "no such note"
+could stay distinguishable without the space being walkable; this handed the space over directly.
+
+The repair is not to render the undetermined answer more carefully. **`Undetermined` for an
+unidentified reader is a different fact from `Undetermined` for a reader whose group membership
+could not be resolved.** The second is an answer about notes; the first is an answer about the
+request, and a request that never said who is asking is refused at the argument with
+`hub.ErrNotSignedIn` — the position `omw search` already takes. Two consequences, and the second
+matters as much as the first: no identity means no store access, and **even with an identity the
+undetermined count is reported without its ids**, because a reader who may not see a note may not
+see its id either.
+
+**A second, ungated reference surface.** This change shipped a `RefIndex` of its own, written while
+Issue #14 had not landed. #14 has since landed and its `OutboundReferences` reads the referencing
+note through `Store.Read` *first*, so a reader refused a note learns nothing about its edges. The
+`RefIndex` did not: a former reader who legitimately learned a note's id, and was then narrowed
+away from it, kept its reference graph forever. The type and the `omw departed refs` subcommand are
+gone, and criterion 3 is now driven against #14's functions.
 
 ## What deliberately does NOT change
 
@@ -75,9 +102,10 @@ determined is not a departure, and it is not a colleague at their desk.**
 - **Undetermined refuses writes but never refuses reads.** For a READ, an unestablished author state
   changes nothing at all. For a WRITE, proceeding is how a departed person's script keeps publishing
   through a flaky people record. This is the one asymmetry, and it is deliberate.
-- **`RefIndex` is a placeholder for Issue #14.** #14 owns references and has not landed. What must
-  survive its replacement is the property — archival does not break a reference in either direction
-  — not this type.
-- **`CorpusSummary` is a placeholder for Issue #13** on the same terms.
-- **`hub.Store` still mints sequential note ids (`note-N`).** Unguessable ids are Issue #15's, and
-  nothing added here depends on ids being dense or sequential.
+- **`CorpusSummary` is a placeholder for Issue #13**, which has not landed. What must survive its
+  replacement is the property — archived notes are counted for exactly the people who may read them
+  — not this type. Its `Undetermined` is an `int` and not a list of ids, the same shape
+  `hub.Backlinks.Undetermined` takes, for the same reason.
+- **Note ids are unguessable and nothing here depends on them being dense or sequential.** An
+  earlier revision of this document said the store still minted `note-N`; that was stale, and the
+  same staleness is what produced the reference defect above.

@@ -33,7 +33,6 @@ package hub
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri"
@@ -67,95 +66,24 @@ var (
 // Issue #11's versionErrors are left alone; the test reads all three lists.
 var departedErrors = []*Error{ErrPersonDeactivated, ErrPersonStateUndetermined}
 
-// PeopleStatus answers one question about one person: have they left?
+// WHOSE RECORD OF WHO HAS LEFT: [Roster], AND THERE IS NOT A SECOND ONE.
 //
-// It is deliberately as narrow as [Membership], and for the same §5.3 reason — the hub owns its
-// record of people, and there is no place here for a company directory to plug itself in. Criterion
-// 17 is that deactivation is an act performed against the hub and never a side effect of some
-// client-side event or channel signal; an interface that answers synchronously, about one person,
-// with no context and no network shape, gives such a signal nowhere to arrive.
+// An earlier revision of this file defined its own `PeopleStatus` interface with a (bool, error)
+// method and taught Issue #11's [Archive] to answer it. That was wrong in the way this codebase is
+// most often wrong: [Roster] already landed with Issue #15, it is already three-valued, its nil and
+// its unknown-person cases already answer Undetermined, and search already consults it. A second
+// record that agreed today is exactly the hazard [CanRead]'s package comment is about, one type
+// over. Adopted as it stands; nothing here wraps it, converts it, or caches it.
 //
-// The (bool, error) pair is the third value's entry point. An error is NOT a false: a record that
-// could not be read is [tri.Undetermined], converted by [tri.FromError] in [AuthorActive], which is
-// the only sanctioned conversion in this project.
-type PeopleStatus interface {
-	// HasLeft reports whether the person has left. The error means the answer could not be worked
-	// out; it never means "no".
-	//
-	// It is NOT called Deactivated, because [Archive] already has a Deactivated() that lists
-	// everyone who has gone. Two methods one letter apart on the same type is how a caller reaches
-	// for the wrong one and gets a plausible answer.
-	HasLeft(p PersonID) (bool, error)
-}
-
-// HasLeft makes [Archive] a [PeopleStatus].
-//
-// A real archive can always answer, so the error is always nil — the pair exists for the interface,
-// and for sources that cannot always answer (see [Archive.MarkUnreadable] and, later, a persistent
-// hub whose people record is behind a store that can fail).
-func (a *Archive) HasLeft(p PersonID) (bool, error) {
-	if a == nil {
-		// A nil archive reports nobody as deactivated, matching [Archive.IsDeactivated]. It is a
-		// hub that knows of no departures, which is a determined answer about the record it has.
-		return false, nil
-	}
-	a.mu.RLock()
-	unreadable := a.unreadable[p]
-	dead := a.deactivated[p]
-	a.mu.RUnlock()
-	if unreadable {
-		return false, Refusedf(ErrPersonStateUndetermined, "the hub's record of %q could not be read", string(p))
-	}
-	return dead, nil
-}
-
-// MarkUnreadable records that the hub's record of this person cannot be read.
-//
-// THIS IS NOT A THIRD KIND OF DEPARTURE. It is the state criterion 18 is about: the lookup failed,
-// so nothing was established. It exists as a real, settable state rather than only as a test double
-// because criterion 18 must be driven through the same code path a production failure would take —
-// a rendering proven only against a hand-built struct is a rendering proven against nothing.
-func (a *Archive) MarkUnreadable(p PersonID) {
-	if a == nil {
-		return
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.unreadable == nil {
-		a.unreadable = map[PersonID]bool{}
-	}
-	a.unreadable[p] = true
-}
-
-// AuthorActive is the three-valued answer about a person, and the ONE place the conversion happens.
+// [Roster.Active] is the three-valued answer, and this Issue adds no conversion of its own:
 //
 //	tri.Yes           still with the company
 //	tri.No            deactivated — they have left, and their notes are archived
-//	tri.Undetermined  it could not be worked out: no people record was supplied, the record could
-//	                  not be read, or nobody said who the person is
+//	tri.Undetermined  no roster, or a person this roster has never heard of: nothing was established
 //
-// A nil PeopleStatus is UNDETERMINED, not active. This is the asymmetry that matters and it is the
-// opposite of [Archive]'s nil behaviour on purpose: a nil archive is a hub that knows of no
-// departures, whereas a nil PeopleStatus is no hub record at all in the caller's hand. Answering
-// "active" for the second would render every author of every note as present at their desk on a
-// client that never asked anybody.
-func AuthorActive(ps PeopleStatus, p PersonID) tri.Value {
-	if ps == nil {
-		return tri.Undetermined
-	}
-	if strings.TrimSpace(string(p)) == "" {
-		// We were not told who. That is not a departure and it is not a person at their desk.
-		return tri.Undetermined
-	}
-	gone, err := ps.HasLeft(p)
-	if err != nil {
-		return tri.Undetermined
-	}
-	if gone {
-		return tri.No
-	}
-	return tri.Yes
-}
+// The third value is REACHABLE THROUGH THE REAL PATH, which is what criterion 18 needs. A roster
+// that has never heard of a note's author is an ordinary state of a hub whose people record is
+// incomplete, not a test double, and it is the state the undetermined tests drive through.
 
 // Attribution is who wrote a note and what is known about whether they are still here.
 //
@@ -175,11 +103,11 @@ type Attribution struct {
 }
 
 // AttributionFor reads a note's attribution. It never invents an author and never drops one.
-func AttributionFor(n *Note, ps PeopleStatus) Attribution {
+func AttributionFor(n *Note, roster *Roster) Attribution {
 	if n == nil {
 		return Attribution{}
 	}
-	return Attribution{Author: n.Author, Active: AuthorActive(ps, n.Author)}
+	return Attribution{Author: n.Author, Active: roster.Active(n.Author)}
 }
 
 // The four attribution renderings. They are compared PAIRWISE by test — not each against a literal,
@@ -274,8 +202,8 @@ const RetentionLine = "retention: nothing expires — this note and every versio
 // file: for READS, an undetermined author state changes nothing at all (an archived note is read the
 // same way whatever is known about its author), whereas for WRITES, proceeding on an unestablished
 // person is how a departed person's script keeps publishing through a flaky people record.
-func CheckActive(ps PeopleStatus, p PersonID) error {
-	switch AuthorActive(ps, p) {
+func CheckActive(roster *Roster, p PersonID) error {
+	switch roster.Active(p) {
 	case tri.Yes:
 		return nil
 	case tri.No:
@@ -285,7 +213,7 @@ func CheckActive(ps PeopleStatus, p PersonID) error {
 	}
 }
 
-// SetPeopleStatus attaches the hub's record of who has left to the store, so that the WRITE paths
+// SetRoster attaches the hub's record of who is still here to the store, so that the WRITE paths
 // refuse a deactivated author.
 //
 // WHY ON THE STORE AND NOT IN A WRAPPER. Criterion 16 says "nothing can publish a new note as that
@@ -294,33 +222,33 @@ func CheckActive(ps PeopleStatus, p PersonID) error {
 // function that stores a note is the one function that checks, and a caller reaching [Store.Publish]
 // directly gets the same refusal.
 //
-// The default is nil, which means no people record is attached and every author is treated as
+// The default is nil, which means no roster is attached and every author is treated as
 // active — the state every existing test runs in, and the honest reading of a store nobody has told
 // about any departures.
-func (s *Store) SetPeopleStatus(ps PeopleStatus) {
+func (s *Store) SetRoster(roster *Roster) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.people = ps
+	s.roster = roster
 }
 
 // checkAuthorWritableLocked is the write gate. It is a no-op when no people record is attached.
 func (s *Store) checkAuthorWritableLocked(p PersonID) error {
-	if s.people == nil {
+	if s.roster == nil {
 		return nil
 	}
-	return CheckActive(s.people, p)
+	return CheckActive(s.roster, p)
 }
 
 // peopleStatusLocked returns the attached record, or nil.
-func (s *Store) peopleStatusLocked() PeopleStatus { return s.people }
+func (s *Store) rosterLocked() *Roster { return s.roster }
 
-// PeopleStatusOf returns the store's attached people record, which surfaces pass to
+// RosterOf returns the store's attached roster, which surfaces pass to
 // [AttributionFor] so that the attribution a reader sees comes from the same record the write gate
 // enforces. Two records is how a note gets refused as departed and rendered as active.
-func (s *Store) PeopleStatusOf() PeopleStatus {
+func (s *Store) RosterOf() *Roster {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.peopleStatusLocked()
+	return s.rosterLocked()
 }
 
 // --- Sessions: ended, without anything being removed --------------------------------------------
@@ -331,23 +259,23 @@ func (s *Store) PeopleStatusOf() PeopleStatus {
 // It is checked before the scope is, so that a departed person holding a read grant is told they
 // have left rather than that their scope is wrong. The set of scopes on the grant is not consulted
 // at all, which is what makes "for any scope" a property of the shape.
-func AcceptGrant(ps PeopleStatus, g Grant) error { return CheckActive(ps, g.Holder) }
+func AcceptGrant(roster *Roster, g Grant) error { return CheckActive(roster, g.Holder) }
 
 // ReadThroughLive is [ReadThrough] with the holder's standing checked first.
 //
 // CRITERION 15 IS THE PAIR OF THIS AND [Store.Read]: the same deactivation that makes this refuse
 // leaves the note readable to everybody else, because this checks the HOLDER and [CanRead] checks the
 // AUDIENCE, and neither has been taught about the other.
-func ReadThroughLive(s *Store, ps PeopleStatus, g Grant, id NoteID) (*Note, error) {
-	if err := AcceptGrant(ps, g); err != nil {
+func ReadThroughLive(s *Store, roster *Roster, g Grant, id NoteID) (*Note, error) {
+	if err := AcceptGrant(roster, g); err != nil {
 		return nil, err
 	}
 	return ReadThrough(s, g, id)
 }
 
 // PublishThroughLive is [PublishThrough] with the holder's standing checked first (criterion 16).
-func PublishThroughLive(s *Store, ps PeopleStatus, g Grant, p Publication) (*Note, error) {
-	if err := AcceptGrant(ps, g); err != nil {
+func PublishThroughLive(s *Store, roster *Roster, g Grant, p Publication) (*Note, error) {
+	if err := AcceptGrant(roster, g); err != nil {
 		return nil, err
 	}
 	return PublishThrough(s, g, p)
@@ -359,8 +287,8 @@ func PublishThroughLive(s *Store, ps PeopleStatus, g Grant, p Publication) (*Not
 // cannot do it — and, importantly, neither can anybody else on their behalf: [Store.SetVisibility]
 // already refuses a non-author. The combination is criterion 5 from the other side: nobody widens or
 // narrows a departed colleague's note after they have gone.
-func SetVisibilityThroughLive(s *Store, ps PeopleStatus, g Grant, id NoteID, v Visibility) (*Note, error) {
-	if err := AcceptGrant(ps, g); err != nil {
+func SetVisibilityThroughLive(s *Store, roster *Roster, g Grant, id NoteID, v Visibility) (*Note, error) {
+	if err := AcceptGrant(roster, g); err != nil {
 		return nil, err
 	}
 	return SetVisibilityThrough(s, g, id, v)
@@ -372,16 +300,16 @@ func SetVisibilityThroughLive(s *Store, ps PeopleStatus, g Grant, id NoteID, v V
 // narrowed at the edge (§4.5)". So the standing check precedes the scope evaluation and precedes any
 // issuance, and [Ledger.RequestLive] records nothing on refusal — the ledger of grants attributable
 // to the person is unchanged.
-func EvaluateGrantRequestLive(ps PeopleStatus, h Holder, requested []Scope) ([]Scope, error) {
-	if err := CheckActive(ps, h.Person); err != nil {
+func EvaluateGrantRequestLive(roster *Roster, h Holder, requested []Scope) ([]Scope, error) {
+	if err := CheckActive(roster, h.Person); err != nil {
 		return nil, err
 	}
 	return EvaluateGrantRequest(h, requested)
 }
 
 // RequestLive is [Ledger.Request] for a person who may have left. It issues nothing on refusal.
-func (l *Ledger) RequestLive(ps PeopleStatus, h Holder, requested []Scope) (Grant, error) {
-	if err := CheckActive(ps, h.Person); err != nil {
+func (l *Ledger) RequestLive(roster *Roster, h Holder, requested []Scope) (Grant, error) {
+	if err := CheckActive(roster, h.Person); err != nil {
 		return Grant{}, err
 	}
 	return l.Request(h, requested)
@@ -431,10 +359,16 @@ type AuthoredListing struct {
 	AuthorState tri.Value
 	// Notes is what the reader may read, in publication order.
 	Notes []AuthoredView
-	// Undetermined names the notes whose readability could not be worked out. RETURNED, NOT
-	// DROPPED, for the reason [Store.ListReadable] gives: a reader told "no notes" when the truth
-	// is "I could not check three of them" has been handed a determined negative nobody determined.
-	Undetermined []NoteID
+	// Undetermined is HOW MANY notes could not be examined because whether this reader may read
+	// them could not be worked out.
+	//
+	// IT IS A COUNT, AND IT IS A COUNT ON PURPOSE — the same shape [Backlinks.Undetermined] takes,
+	// for the same reason. Reporting it as nothing would turn "could not determine" into
+	// "determined to be nothing". Reporting it as a LIST OF IDS would be worse: [noteid] made ids
+	// unguessable precisely so that the id space cannot be walked, and handing a caller the ids of
+	// notes they have not been shown hands them the space directly. So the count is said and the
+	// ids are not, and a caller that prints the listing must print this too.
+	Undetermined int
 }
 
 // NotesBy lists the notes a person published that the reader may read.
@@ -447,27 +381,27 @@ type AuthoredListing struct {
 // Deactivation is not consulted when deciding what comes back. A departed person's notes are in this
 // listing on exactly the same terms as a present person's; that is criteria 4 and 6, and it is true
 // because there is no branch here that could make it false.
-func NotesBy(s *Store, ps PeopleStatus, author, reader PersonID) AuthoredListing {
-	out := AuthoredListing{Author: author, AuthorState: AuthorActive(ps, author)}
+func NotesBy(s *Store, roster *Roster, author, reader PersonID) AuthoredListing {
+	out := AuthoredListing{Author: author, AuthorState: roster.Active(author)}
 	readable, undetermined := s.ListReadable(reader)
-	out.Undetermined = undetermined
+	out.Undetermined = len(undetermined)
 	for _, n := range readable {
 		if n.Author != author {
 			continue
 		}
-		out.Notes = append(out.Notes, viewOf(n, ps))
+		out.Notes = append(out.Notes, viewOf(n, roster))
 	}
 	return out
 }
 
 // viewOf builds an [AuthoredView] from a note. One place, so that a listing and a single read
 // cannot disagree about how a note is described.
-func viewOf(n *Note, ps PeopleStatus) AuthoredView {
+func viewOf(n *Note, roster *Roster) AuthoredView {
 	latest := n.Latest()
 	return AuthoredView{
 		Note:     n.ID,
 		Title:    n.Title,
-		By:       AttributionFor(n, ps),
+		By:       AttributionFor(n, roster),
 		Current:  VersionRef{Note: n.ID, Number: latest.Number},
 		Versions: len(n.Versions),
 	}
@@ -480,12 +414,12 @@ func viewOf(n *Note, ps PeopleStatus) AuthoredView {
 // that is for the archived path to BE the ordinary path. A refusal for visibility and a note whose
 // author is deactivated therefore come back as what they are: the first an error with
 // ErrRefused's code, the second a note.
-func AttributedRead(s *Store, ps PeopleStatus, id NoteID, reader PersonID) (*Note, Attribution, error) {
+func AttributedRead(s *Store, roster *Roster, id NoteID, reader PersonID) (*Note, Attribution, error) {
 	n, err := s.Read(id, reader)
 	if err != nil {
 		return nil, Attribution{}, err
 	}
-	return n, AttributionFor(n, ps), nil
+	return n, AttributionFor(n, roster), nil
 }
 
 // AttributedVersion reads one point on the timeline with the note's attribution.
@@ -495,16 +429,16 @@ func AttributedRead(s *Store, ps PeopleStatus, id NoteID, reader PersonID) (*Not
 // The wrong shape — an author stamped onto each version at write time — is how the latest version
 // says "deactivated" and the older ones say something else, and it is the same shape that would have
 // put a visibility on a version.
-func AttributedVersion(s *Store, ps PeopleStatus, ref VersionRef, reader PersonID) (Version, Attribution, error) {
+func AttributedVersion(s *Store, roster *Roster, ref VersionRef, reader PersonID) (Version, Attribution, error) {
 	n, err := s.Read(ref.Note, reader)
 	if err != nil {
 		return Version{}, Attribution{}, err
 	}
 	v, verr := n.Version(ref.Number)
 	if verr != nil {
-		return Version{}, AttributionFor(n, ps), verr
+		return Version{}, AttributionFor(n, roster), verr
 	}
-	return v, AttributionFor(n, ps), nil
+	return v, AttributionFor(n, roster), nil
 }
 
 // CorpusSummary is what the hub tells an agent about the corpus it may ground itself on (§3.5:
@@ -526,19 +460,19 @@ type CorpusSummary struct {
 	AuthorsUndetermined int
 	// Versions is how many versions across those notes. It only ever grows (§5.4).
 	Versions int
-	// Undetermined names the notes whose readability could not be worked out — not counted in
-	// Notes, and not silently dropped either.
-	Undetermined []NoteID
+	// Undetermined is how many notes could not be examined — not counted in Notes, not silently
+	// dropped, and not enumerated. See [AuthoredListing.Undetermined].
+	Undetermined int
 }
 
 // Summarise counts the corpus as this reader may see it.
-func Summarise(s *Store, ps PeopleStatus, reader PersonID) CorpusSummary {
+func Summarise(s *Store, roster *Roster, reader PersonID) CorpusSummary {
 	readable, undetermined := s.ListReadable(reader)
-	out := CorpusSummary{Undetermined: undetermined}
+	out := CorpusSummary{Undetermined: len(undetermined)}
 	for _, n := range readable {
 		out.Notes++
 		out.Versions += len(n.Versions)
-		switch AuthorActive(ps, n.Author) {
+		switch roster.Active(n.Author) {
 		case tri.No:
 			out.Archived++
 		case tri.Undetermined:
@@ -557,107 +491,6 @@ func (c CorpusSummary) Render() string {
 	fmt.Fprintf(&b, "  of those, written by someone who has left: %d\n", c.Archived)
 	fmt.Fprintf(&b, "  of those, author state could not be determined: %d\n", c.AuthorsUndetermined)
 	fmt.Fprintf(&b, "versions across them: %d\n", c.Versions)
-	fmt.Fprintf(&b, "notes whose readability could not be determined: %d\n", len(c.Undetermined))
+	fmt.Fprintf(&b, "notes whose readability could not be determined: %d\n", c.Undetermined)
 	return b.String()
-}
-
-// --- References across a departure --------------------------------------------------------------
-
-// RefIndex records that one note refers to another (PRD §3.4), in both directions.
-//
-// CRITERION 3 IS WHY IT IS HERE AND WHY IT IS SO SMALL. "Archival must not silently break existing
-// references": a note by a still-active person that referenced an archived note must still resolve
-// it, and the archived note must still list what referenced it. The way that breaks is not by
-// anybody deleting an edge — it is by the resolver treating an archived target as absent. So this
-// index does not know what an archive is, and resolution goes through [Store.Read], which asks
-// [CanRead] and nothing else.
-//
-// Issue #14 owns references properly and will replace this with whatever it needs. What must survive
-// that replacement is the property, not the type.
-type RefIndex struct {
-	out map[NoteID][]NoteID
-	in  map[NoteID][]NoteID
-}
-
-// NewRefIndex returns an empty index.
-func NewRefIndex() *RefIndex {
-	return &RefIndex{out: map[NoteID][]NoteID{}, in: map[NoteID][]NoteID{}}
-}
-
-// Link records that from refers to to. Recording it twice records it once.
-func (x *RefIndex) Link(from, to NoteID) {
-	if x == nil || from == "" || to == "" || from == to {
-		return
-	}
-	if !contains(x.out[from], to) {
-		x.out[from] = append(x.out[from], to)
-	}
-	if !contains(x.in[to], from) {
-		x.in[to] = append(x.in[to], from)
-	}
-}
-
-func contains(ids []NoteID, want NoteID) bool {
-	for _, id := range ids {
-		if id == want {
-			return true
-		}
-	}
-	return false
-}
-
-// Resolution is what a reference resolved to, three-valued at the edges.
-type Resolution struct {
-	// Resolved are the referenced notes the reader may read.
-	Resolved []AuthoredView
-	// Refused are the referenced notes that exist and the reader may not read. They are NAMED as
-	// refused rather than dropped, because "this note refers to something you cannot see" is a
-	// different fact from "this note refers to nothing", and only one of them is true.
-	Refused []NoteID
-	// Undetermined are the referenced notes whose readability could not be worked out.
-	Undetermined []NoteID
-}
-
-// Resolve answers "what does this note refer to", as this reader.
-//
-// An archived target resolves exactly as a live one does. There is no branch on the target's
-// author's state, which is criterion 3 expressed as an absence of code.
-func (x *RefIndex) Resolve(s *Store, ps PeopleStatus, from NoteID, reader PersonID) Resolution {
-	if x == nil {
-		return Resolution{}
-	}
-	return x.walk(s, ps, x.out[from], reader)
-}
-
-// Backlinks answers "what else was written about this", as this reader (§3.4). An archived note
-// still lists what referenced it.
-func (x *RefIndex) Backlinks(s *Store, ps PeopleStatus, to NoteID, reader PersonID) Resolution {
-	if x == nil {
-		return Resolution{}
-	}
-	return x.walk(s, ps, x.in[to], reader)
-}
-
-func (x *RefIndex) walk(s *Store, ps PeopleStatus, ids []NoteID, reader PersonID) Resolution {
-	var out Resolution
-	sorted := make([]NoteID, len(ids))
-	copy(sorted, ids)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
-	for _, id := range sorted {
-		n, err := s.Read(id, reader)
-		switch {
-		case err == nil:
-			out.Resolved = append(out.Resolved, viewOf(n, ps))
-		case Code(err) == ErrRefused.Code:
-			out.Refused = append(out.Refused, id)
-		case Code(err) == ErrNoSuchNote.Code:
-			// A reference to a note the hub does not have. Not a departure, and not silence: it is
-			// reported as undetermined rather than swallowed, because a dangling edge is something
-			// the reader should be told about and nothing here established what happened to it.
-			out.Undetermined = append(out.Undetermined, id)
-		default:
-			out.Undetermined = append(out.Undetermined, id)
-		}
-	}
-	return out
 }

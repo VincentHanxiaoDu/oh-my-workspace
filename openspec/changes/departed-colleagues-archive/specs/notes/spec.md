@@ -145,6 +145,23 @@ distinguishably from success, from a configured-but-unreachable hub, and from a 
 - **THEN** the answer is undetermined, exits with the undetermined code, and differs in wording and
   exit code from the no-hub answer and from success
 
+#### Scenario: Nobody says who is asking
+- **WHEN** an archived-note subcommand runs with no reader named and no signed-in identity
+- **THEN** it is refused before the store is consulted, discloses no note identifier on any stream,
+  and says that who may read an archived note depends on who is asking
+
+#### Scenario: A reader's answer is partial
+- **WHEN** some notes could not be evaluated for readability and the answer shown is therefore
+  incomplete
+- **THEN** how many could not be evaluated is stated, and their identifiers are not, because a note
+  a reader has not been shown is a note whose identifier is not theirs either
+
+#### Scenario: A reference surface is asked about a note the reader may not read
+- **WHEN** a reader who may not read a note asks what it references, including a reader who read it
+  legitimately before it was narrowed away from them
+- **THEN** they receive the note'''s own refusal and learn nothing about its edges, whether or not
+  the note'''s author has been deactivated
+
 #### Scenario: The hub answers and holds nothing
 - **WHEN** the hub is asked for a person's notes and holds none the reader may read
 - **THEN** the answer says the hub was asked and holds none, succeeds, and shares neither its

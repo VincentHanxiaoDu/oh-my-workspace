@@ -40,21 +40,31 @@ func init() {
 // called, and the test replaces it with one that fails the test if it is — a live assertion that the
 // no-hub path reaches for nothing, which an import ban cannot make and a socket count would only
 // make for the transports somebody thought of.
+// departedEnvIdentity names who is asking. Its own constant, not shared with another command file,
+// which is this package's convention.
+//
+// SIGN-IN IS ISSUE #19'S AND IT HAS LANDED; token material is not wired to this build's (absent)
+// transport, so the identity comes from the environment exactly as `omw search` takes it. What
+// matters for this Issue is the DISTINCTION, not where the name comes from: no identity is NOT
+// SIGNED IN, and it is neither an empty result nor a reader who may see nothing.
+const departedEnvIdentity = "OMW_IDENTITY"
+
 var departedSource = func(env cli.Env) (*hub.Store, error) {
 	return nil, hub.ErrHubUnreachable
 }
 
-// departedPeople is the hub's record of who has left, alongside the store.
+// departedRoster is Issue #15's record of who is still with the company, alongside the store.
 //
 // It is a separate variable from [departedSource] only because this build has no transport to carry
 // either; when one exists both come from the same connection. What must not happen is two records —
-// the attribution a reader sees comes from the store's own [hub.Store.PeopleStatusOf] whenever the
-// store has one, and this is only the fallback for a store that does not.
-var departedPeople = func(env cli.Env, s *hub.Store) hub.PeopleStatus {
+// the attribution a reader sees comes from the store's own [hub.Store.RosterOf], which is the same
+// roster the write gate enforces. A nil roster answers Undetermined for everybody, which is the
+// honest state of a client that has not been told who has left, and never "everyone is still here".
+var departedRoster = func(env cli.Env, s *hub.Store) *hub.Roster {
 	if s == nil {
 		return nil
 	}
-	return s.PeopleStatusOf()
+	return s.RosterOf()
 }
 
 func runDeparted(env cli.Env) int {
@@ -69,8 +79,6 @@ func runDeparted(env cli.Env) int {
 		return departedShow(env, env.Args[1:])
 	case "versions":
 		return departedVersions(env, env.Args[1:])
-	case "refs":
-		return departedRefs(env, env.Args[1:])
 	case "corpus":
 		return departedCorpus(env, env.Args[1:])
 	case "-h", "--help", "help":
@@ -91,7 +99,6 @@ usage: omw departed <subcommand>
   notes --by <person> [--as <reader>]   what they published that you can read
   show <note> [--as <reader>]           one note, with who wrote it and whether they are still here
   versions <note> [--as <reader>]       the note's whole timeline, attributed the same way throughout
-  refs <note> [--as <reader>]           what it refers to, and what refers to it
   corpus [--as <reader>]                how much you can read, and how much of it is archived
 
 A deactivated person's notes are archived, not deleted. They stay findable by exactly the
@@ -130,8 +137,9 @@ func parseDepartedArgs(env cli.Env, what string, args []string) (departedArgs, i
 	return out, cli.Success, true
 }
 
-// reach is the precondition every hub-dependent subcommand runs, IN THIS ORDER, and it is written
-// once so that five subcommands cannot answer the same question five ways.
+// departedReach is the precondition every hub-dependent subcommand runs, IN THIS ORDER, and it is
+// written once so that four subcommands cannot answer the same question four ways. It is the order
+// `omw search` uses, for the same reasons.
 //
 //  1. NO HUB CONFIGURED is a determined fact about this machine (criterion 21). It is said
 //     precisely — that archived-note lookup is a hub capability and there is no hub — it exits
@@ -139,11 +147,39 @@ func parseDepartedArgs(env cli.Env, what string, args []string) (departedArgs, i
 //     it reaches for NOTHING (criterion 20): departedSource is not called on this path at all.
 //  2. THE DAEMON IS NOT STARTED (criterion 19). Liveness has one definition in this package and
 //     three answers; a daemon that could not be checked is not reported as a stopped one.
-//  3. AN UNREACHABLE HUB IS UNDETERMINED (§4.3), and exits ExitUndetermined — distinguishable from
-//     both of the above and from a genuine zero-results answer.
+//  3. THERE IS SOMEBODY ASKING. See below — this is the check whose absence was the branch's worst
+//     defect, and it comes before the store is touched.
+//  4. AN UNREACHABLE HUB IS UNDETERMINED (§4.3), and exits ExitUndetermined — distinguishable from
+//     all of the above and from a genuine zero-results answer.
 //
-// It returns (store, people, exitCode, ok). When ok is false the caller returns exitCode untouched.
-func reach(env cli.Env, what string) (*hub.Store, hub.PeopleStatus, int, bool) {
+// # WHY AN UNIDENTIFIED READER IS REFUSED AND NOT ANSWERED
+//
+// This is the defect that refused the first revision of this branch, and it is worth stating in
+// full because the mistake was a RULE APPLIED WITHOUT ASKING WHAT ITS THIRD VALUE MEANT HERE.
+//
+// [CanRead] answers Undetermined for an empty reader — correctly: "you did not say who you are" is
+// not a determined refusal, and #12's comment says so. [Store.ListReadable] therefore put EVERY
+// note in the hub into its undetermined return, and this command printed those ids one per line.
+// The result was that `omw departed notes --by anybody`, with no identity and not even a real
+// person named, dumped every note id in the hub — including notes narrowed to one person — at exit
+// 3. `internal/hub/noteid.go` made ids unguessable precisely so the id space could not be walked;
+// this handed the whole space over without anybody having to walk it.
+//
+// The repair is not to render the undetermined answer more carefully. It is that Undetermined for
+// an UNIDENTIFIED reader is a different fact from Undetermined for a reader whose group membership
+// could not be resolved, and only the second is an answer about notes. The first is an answer about
+// the REQUEST, and a request that never said who is asking is refused at the argument — the same
+// position `omw search` takes with [hub.ErrNotSignedIn], and the same code.
+//
+// Two things follow, and the second matters as much as the first:
+//
+//   - No identity, no store access. The refusal happens before departedSource is called.
+//   - Even WITH an identity, [reportUndetermined] reports a COUNT and never an id. A reader who
+//     may not see a note may not see its id either; that is the same rule, and stopping only the
+//     unidentified case would have left the door open to any signed-in colleague.
+//
+// It returns (store, roster, reader, exitCode, ok). When ok is false the caller returns exitCode.
+func departedReach(env cli.Env, what string, as hub.PersonID) (*hub.Store, *hub.Roster, hub.PersonID, int, bool) {
 	if strings.TrimSpace(env.Getenv(envHub)) == "" {
 		fmt.Fprintf(env.Stderr, "%s: %v (code: %s)\n", what, hub.ErrNoHubConfigured, hub.ErrNoHubConfigured.Code)
 		// PRECISE ABOUT WHAT IS MISSING, and it claims nothing about how many notes exist. A
@@ -152,11 +188,30 @@ func reach(env cli.Env, what string) (*hub.Store, hub.PeopleStatus, int, bool) {
 		fmt.Fprintf(env.Stderr, "  looking up an archived note is a hub capability: the notes and the record of who has left both live on the hub, and there is no hub configured to ask.\n")
 		fmt.Fprintf(env.Stderr, "  this is not a report that there are no such notes. nothing has been established, and nothing was looked at.\n")
 		fmt.Fprintf(env.Stderr, "  set %s and ask again.\n", envHub)
-		return nil, nil, cli.ExitFailure, false
+		return nil, nil, "", cli.ExitFailure, false
 	}
 	if live, why := daemonLiveness(env); live != tri.Yes {
-		return nil, nil, reportDaemonNotLive(env, what, live, why), false
+		return nil, nil, "", reportDaemonNotLive(env, what, live, why), false
 	}
+
+	// WHO IS ASKING, SETTLED BEFORE THE STORE IS TOUCHED. `--as` names the reader; with none, the
+	// signed-in identity is the reader. With neither there is nobody asking, and that is refused.
+	reader := as
+	if reader == "" {
+		reader = hub.PersonID(strings.TrimSpace(env.Getenv(departedEnvIdentity)))
+	}
+	if reader == "" {
+		fmt.Fprintf(env.Stderr, "%s: %v (code: %s)\n", what, hub.ErrNotSignedIn, hub.ErrNotSignedIn.Code)
+		// IT SHARES NO WORDING WITH THE OTHER ANSWERS, and it claims nothing about any note. An
+		// unidentified request was not evaluated against anything, so nothing about the corpus —
+		// not its size, not its ids, not whether the person asked about wrote anything — has been
+		// established or disclosed.
+		fmt.Fprintf(env.Stderr, "  who may read an archived note depends on who is asking, and nobody said who is asking.\n")
+		fmt.Fprintf(env.Stderr, "  this is not a report that there are no such notes, and it is not a reader who may see nothing.\n")
+		fmt.Fprintf(env.Stderr, "  name a reader with --as, or set %s.\n", departedEnvIdentity)
+		return nil, nil, "", cli.ExitFailure, false
+	}
+
 	s, err := departedSource(env)
 	if err != nil || s == nil {
 		if err == nil {
@@ -165,9 +220,9 @@ func reach(env cli.Env, what string) (*hub.Store, hub.PeopleStatus, int, bool) {
 		fmt.Fprintf(env.Stdout, "%s\n", hub.UndeterminedDescription)
 		fmt.Fprintf(env.Stderr, "%s: %v (code: %s)\n", what, err, hub.Code(err))
 		fmt.Fprintf(env.Stderr, "  a hub is configured and it did not answer. this is not a report that there are no such notes.\n")
-		return nil, nil, cli.ExitUndetermined, false
+		return nil, nil, "", cli.ExitUndetermined, false
 	}
-	return s, departedPeople(env, s), cli.Success, true
+	return s, departedRoster(env, s), reader, cli.Success, true
 }
 
 // departedNotes is criteria 4, 6, 9 and 21: what a person published that this reader may read.
@@ -184,12 +239,12 @@ func departedNotes(env cli.Env, args []string) int {
 		fmt.Fprintf(env.Stderr, "%s: name whose notes with --by.\n", what)
 		return cli.ExitUsage
 	}
-	s, ps, code, ok := reach(env, what)
+	s, roster, reader, code, ok := departedReach(env, what, a.as)
 	if !ok {
 		return code
 	}
 
-	l := hub.NotesBy(s, ps, a.by, a.as)
+	l := hub.NotesBy(s, roster, a.by, reader)
 	// THE PERSON'S OWN STATE IS STATED FIRST, AND IT IS STATED EVEN WHEN THEY HAVE NO NOTES. A
 	// listing of zero notes by an active person and a listing of zero notes by a departed one are
 	// different answers, and neither is the no-hub answer above.
@@ -215,16 +270,19 @@ func departedNotes(env cli.Env, args []string) int {
 // RETURNED, NOT DROPPED, AND NOT COUNTED IN THE ANSWER. A reader told "3 notes" when the truth is
 // "3 notes and two I could not check" has been handed a complete-looking answer that is not one, and
 // the exit code is the part a script reads.
-func reportUndetermined(env cli.Env, what string, ids []hub.NoteID) int {
-	if len(ids) == 0 {
+func reportUndetermined(env cli.Env, what string, n int) int {
+	if n == 0 {
 		return cli.Success
 	}
+	// A COUNT, NEVER THE IDS. The ids of notes this reader has not been shown are not this reader's
+	// to have: `internal/hub/noteid.go` made the id space unenumerable so that "refused" and "no
+	// such note" could stay distinguishable without the space being walkable, and printing the ids
+	// hands over what the walk was for. The count is what the person needs — that their answer is
+	// partial — and it discloses nothing about which notes are missing from it.
 	fmt.Fprintf(env.Stderr, "%s: whether you may read %d further note(s) %s (code: %s)\n",
-		what, len(ids), tri.Undetermined, hub.ErrUndetermined.Code)
-	for _, id := range ids {
-		fmt.Fprintf(env.Stderr, "  %s\n", string(id))
-	}
+		what, n, tri.Undetermined, hub.ErrUndetermined.Code)
 	fmt.Fprintf(env.Stderr, "  they are not included above and they are not a determined absence.\n")
+	fmt.Fprintf(env.Stderr, "  they are not named: a note you have not been shown is a note whose id is not yours either.\n")
 	return cli.ExitUndetermined
 }
 
@@ -239,12 +297,12 @@ func departedShow(env cli.Env, args []string) int {
 		fmt.Fprintf(env.Stderr, "%s: name a note.\n", what)
 		return cli.ExitUsage
 	}
-	s, ps, code, ok := reach(env, what)
+	s, roster, reader, code, ok := departedReach(env, what, a.as)
 	if !ok {
 		return code
 	}
 
-	n, by, err := hub.AttributedRead(s, ps, hub.NoteID(a.subject), a.as)
+	n, by, err := hub.AttributedRead(s, roster, hub.NoteID(a.subject), reader)
 	if err != nil {
 		return reportNoteError(env, what, err)
 	}
@@ -296,12 +354,12 @@ func departedVersions(env cli.Env, args []string) int {
 		fmt.Fprintf(env.Stderr, "%s: name a note.\n", what)
 		return cli.ExitUsage
 	}
-	s, ps, code, ok := reach(env, what)
+	s, roster, reader, code, ok := departedReach(env, what, a.as)
 	if !ok {
 		return code
 	}
 
-	n, by, err := hub.AttributedRead(s, ps, hub.NoteID(a.subject), a.as)
+	n, by, err := hub.AttributedRead(s, roster, hub.NoteID(a.subject), reader)
 	if err != nil {
 		return reportNoteError(env, what, err)
 	}
@@ -309,7 +367,7 @@ func departedVersions(env cli.Env, args []string) int {
 	fmt.Fprintf(env.Stdout, "versions: %d\n", len(n.Versions))
 	for _, v := range n.Versions {
 		ref := hub.VersionRef{Note: n.ID, Number: v.Number}
-		_, vby, verr := hub.AttributedVersion(s, ps, ref, a.as)
+		_, vby, verr := hub.AttributedVersion(s, roster, ref, reader)
 		if verr != nil {
 			return reportNoteError(env, what, verr)
 		}
@@ -326,56 +384,20 @@ func departedVersions(env cli.Env, args []string) int {
 	return cli.Success
 }
 
-// departedRefsIndex is the reference index this build reads. Issue #14 owns references; until it
-// lands there is nowhere for a real one to come from, so the default is empty and a test supplies
-// one. An empty index yields an empty answer that SAYS it is empty, never silence.
-var departedRefsIndex = func(env cli.Env, s *hub.Store) *hub.RefIndex { return hub.NewRefIndex() }
-
-// departedRefs is criterion 3: references survive a departure in both directions.
-func departedRefs(env cli.Env, args []string) int {
-	const what = "omw departed refs"
-	a, code, ok := parseDepartedArgs(env, what, args)
-	if !ok {
-		return code
-	}
-	if a.subject == "" {
-		fmt.Fprintf(env.Stderr, "%s: name a note.\n", what)
-		return cli.ExitUsage
-	}
-	s, ps, code, ok := reach(env, what)
-	if !ok {
-		return code
-	}
-	x := departedRefsIndex(env, s)
-	id := hub.NoteID(a.subject)
-
-	out := x.Resolve(s, ps, id, a.as)
-	back := x.Backlinks(s, ps, id, a.as)
-	fmt.Fprintf(env.Stdout, "note: %s\n", string(id))
-	renderResolution(env, "refers to", out)
-	renderResolution(env, "referred to by", back)
-	if len(out.Undetermined)+len(back.Undetermined) > 0 {
-		fmt.Fprintf(env.Stderr, "%s: %d reference(s) %s (code: %s)\n", what,
-			len(out.Undetermined)+len(back.Undetermined), tri.Undetermined, hub.ErrUndetermined.Code)
-		return cli.ExitUndetermined
-	}
-	return cli.Success
-}
-
-func renderResolution(env cli.Env, heading string, r hub.Resolution) {
-	fmt.Fprintf(env.Stdout, "%s: %d\n", heading, len(r.Resolved))
-	for _, v := range r.Resolved {
-		fmt.Fprintf(env.Stdout, "  %s  %s\n", string(v.Note), v.By.Line())
-	}
-	// A reference the reader may not follow is NAMED as refused, not dropped. "This refers to
-	// something you cannot see" and "this refers to nothing" are different facts.
-	if len(r.Refused) > 0 {
-		fmt.Fprintf(env.Stdout, "  %d further reference(s) are not visible to you\n", len(r.Refused))
-	}
-	if len(r.Undetermined) > 0 {
-		fmt.Fprintf(env.Stdout, "  %d reference(s) could not be determined\n", len(r.Undetermined))
-	}
-}
+// WHERE `omw departed refs` WENT, AND WHY IT IS NOT COMING BACK.
+//
+// An earlier revision of this branch shipped a `refs` subcommand over a RefIndex of its own,
+// written while Issue #14 had not landed. #14 has since landed (`internal/hub/references_read.go`),
+// and its [hub.OutboundReferences] reads the referencing note through [hub.Store.Read] FIRST — so a
+// reader who may not see a note learns nothing about its edges. The RefIndex here did not, and a
+// reader refused a note was served its outbound reference graph, with titles and attributions, and
+// a zero exit.
+//
+// The defect is worth naming precisely because the fix is not "add the missing check". Two
+// reference surfaces is the hazard; one of them being correct today does not make the pair safe.
+// So the surface is gone, the type is gone, and `omw references of` / `omw references to` are the
+// answer. What this Issue owes criterion 3 is a TEST that references survive a departure, driven
+// against #14's functions — see TestReferencesSurviveADepartureThroughIssue14sGatedSurface.
 
 // departedCorpus is criterion 8: statistics an agent may ground itself on.
 func departedCorpus(env cli.Env, args []string) int {
@@ -384,11 +406,11 @@ func departedCorpus(env cli.Env, args []string) int {
 	if !ok {
 		return code
 	}
-	s, ps, code, ok := reach(env, what)
+	s, roster, reader, code, ok := departedReach(env, what, a.as)
 	if !ok {
 		return code
 	}
-	c := hub.Summarise(s, ps, a.as)
+	c := hub.Summarise(s, roster, reader)
 	fmt.Fprint(env.Stdout, c.Render())
 	return reportUndetermined(env, what, c.Undetermined)
 }

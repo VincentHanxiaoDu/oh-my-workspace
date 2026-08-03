@@ -69,11 +69,12 @@ type Store struct {
 	notes   map[NoteID]*Note
 	order   []NoteID
 	now     func() time.Time
-	// people is the hub's record of who has left, attached by [Store.SetPeopleStatus] (Issue #22).
-	// It gates the WRITE paths only — publishing and amending as somebody who has left — and is
-	// never consulted when deciding who may READ a note. Nil means no record is attached and every
-	// author is treated as active, which is the state of a hub nobody has told about a departure.
-	people PeopleStatus
+	// roster is Issue #15's record of who is still with the company, attached by [Store.SetRoster]
+	// (Issue #22). It gates the WRITE paths only — publishing and amending as somebody who has
+	// left — and is NEVER consulted when deciding who may READ a note. Nil means no roster is
+	// attached and every author is treated as active, which is the state of a hub nobody has told
+	// about a departure.
+	roster *Roster
 }
 
 // NewStore returns a store over the given membership record. A nil record means the hub knows no
