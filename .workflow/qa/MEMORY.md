@@ -9,6 +9,30 @@ cost time — especially dead ends, so the next round does not walk into them ag
 
 ## 2026-08-03
 
+### This file can be shadowed by a stale untracked copy — check it against `origin/main` first
+The shared working tree runs **behind** `origin/main` (8 commits, once). A memory file committed
+after that tree's `main` is still **untracked** there, so the old copy sits on disk and **that is the
+one the role prompt loads**. It happened with this file: the prompt served the pre-correction 54-line
+version, including the entry already proven wrong, while `origin/main` had the corrected 59.
+
+**The obvious check misreports it.** `git diff origin/main -- <path>` shows the file as *wholly
+deleted* — diff against a commit ignores untracked files — so the command that looks like it would
+catch this produces a phantom difference on a file that is byte-identical. Use `cmp` against
+`git show origin/main:<path>`, not `git diff`.
+
+**This presents identically to `AGENT.md` item 6, and item 6's remedy will not catch it.** Both show
+a phantom deletion; there the cause is a moved `main` and `git merge-base` finds it, here the cause
+is an untracked path and `merge-base` *can* return a clean answer while you are still wrong — it does
+whenever the tree has **diverged** rather than merely fallen behind, which is the case that happened.
+In a tree that is a pure ancestor, item 6's test does fire — but for the wrong reason, saying nothing
+about a file that is on disk and byte-identical. **Tell them apart by whether the path is tracked at
+`HEAD`, not by the diff**; that works in both cases.
+
+The mirror case exists too: a file committed on `main` can be **absent** from the tree entirely.
+
+**So at the start of a round, reconcile this file with `origin/main` before trusting it**, and treat
+`??` in `git status` on a `.workflow/` path as a shadow until proven otherwise.
+
 ### A monitor event names a *state*, not a *head* — re-read the checks before diagnosing
 A `RED <gate>` event is true at the moment it is emitted and stale immediately after. #125 was
 announced `RED Branch name and commit convention`; by the time it was looked at, that gate was
