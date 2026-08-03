@@ -41,6 +41,32 @@ esac
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
+# THE REASON A POLL FAILED IS AT THE END OF ITS OUTPUT, NEVER AT THE START (Issue #64).
+#
+# `queue.sh` is captured with `2>&1`, so what comes back is EVERYTHING it printed before it died —
+# headings, work items, then the failure. Keeping the first 200 characters therefore keeps the
+# headings and throws away the only part that says what went wrong. Measured, with a stub that
+# prints a normal queue and then fails the way the real one did:
+#
+#   head   LOOKUP FAILED: FEATURES WHOSE WORK HAS LANDED — UAT on main and CLOSE   #9  feat(notes):
+#          draft notes into the outbox and publish them   #10 feat(publish): three publication modes…
+#   tail   LOOKUP FAILED: …#38 feat(outbox): drafts and modes gh: dial tcp 140.82.116.6:443:
+#          operation timed out
+#
+# Same bytes, same budget. One of them names the outage. The first was read as a misfire and a round
+# of a release day was spent proving the watch had been right all along.
+#
+# A SHORT REASON IS STILL SHOWN WHOLE, byte for byte as before. A fix that always printed a tail
+# would mangle the common case, where the entire output is the reason and there is nothing to trim.
+reason() { # reason <text> <budget>
+  local flat budget=$2
+  flat=$(printf '%s' "$1" | tr '\n' ' ')
+  if [ "${#flat}" -le "$budget" ]; then printf '%s' "$flat"; return 0; fi
+  # The ellipsis is inside the budget, so the line length is unchanged and the reader is told that
+  # something was dropped — an elided reason must not read like a complete one.
+  printf '…%s' "${flat: -$((budget - 1))}"
+}
+
 self_test() {
   local rc=0
   # THE FAILURE PATH MUST EMIT, AND MUST NOT END THE WATCH — driven against a queue that always
@@ -64,6 +90,47 @@ self_test() {
   # TWO of them: one proves it emits, two prove it did not exit after the first.
   [ "$n_fail" -ge 2 ] \
     || { echo "SELF-TEST FAIL: a failing poll emitted once and stopped — a transient outage must wake the role, not end the watch (got $n_fail)" >&2; rc=1; }
+
+  # THE REASON MUST SURVIVE A LONG OUTPUT (Issue #64). The arm above drives a stub whose entire
+  # output is `boom` — under the budget, so it could never observe the truncation, which is exactly
+  # why this shipped and stayed shipped. This one prints a normal-looking queue FIRST and fails
+  # after it, which is what `2>&1` on a real `queue.sh` produces.
+  local ltmp lout
+  ltmp=$(mktemp -d)
+  cat > "$ltmp/queue.sh" <<'STUB'
+#!/usr/bin/env bash
+# A queue that answers at length and then dies, the way the real one did.
+echo "FEATURES WHOSE WORK HAS LANDED — UAT on main and CLOSE"
+for i in $(seq 1 12); do echo "  #$i  feat(notes): draft notes into the outbox and publish them"; done
+echo "gh: dial tcp 140.82.116.6:443: operation timed out" >&2
+exit 1
+STUB
+  chmod +x "$ltmp/queue.sh"
+  cp "${BASH_SOURCE[0]}" "$ltmp/watch-queue.sh"
+  ( bash "$ltmp/watch-queue.sh" dev 1 >"$ltmp/out" 2>&1 & echo $! > "$ltmp/pid" )
+  sleep 3
+  kill "$(cat "$ltmp/pid")" 2>/dev/null || true
+  lout=$(cat "$ltmp/out" 2>/dev/null || echo "")
+  rm -rf "$ltmp"
+  case "$lout" in
+    *"operation timed out"*) : ;;
+    *) echo "SELF-TEST FAIL: a poll that printed a long queue and THEN failed reported the queue and not the failure — the reason is at the end and the head was kept (got: $lout)" >&2; rc=1 ;;
+  esac
+
+  # AND A SHORT REASON IS STILL SHOWN WHOLE. The `boom` arm above already drives this path; here the
+  # rendering is asserted byte for byte, because a fix that always printed a tail would put an
+  # ellipsis on output that was never truncated.
+  local stmp sout
+  stmp=$(mktemp -d)
+  printf '#!/usr/bin/env bash\necho "boom" >&2\nexit 1\n' > "$stmp/queue.sh"; chmod +x "$stmp/queue.sh"
+  cp "${BASH_SOURCE[0]}" "$stmp/watch-queue.sh"
+  ( bash "$stmp/watch-queue.sh" dev 1 >"$stmp/out" 2>&1 & echo $! > "$stmp/pid" )
+  sleep 2
+  kill "$(cat "$stmp/pid")" 2>/dev/null || true
+  sout=$(grep -m1 '^LOOKUP FAILED' "$stmp/out" 2>/dev/null || echo "")
+  rm -rf "$stmp"
+  [ "$sout" = "LOOKUP FAILED: boom" ] \
+    || { echo "SELF-TEST FAIL: a short reason was not shown byte-identically — expected 'LOOKUP FAILED: boom', got '$sout'" >&2; rc=1; }
 
   # An unknown role must refuse rather than watch an empty queue forever.
   ( REPO=x/y bash "${BASH_SOURCE[0]}" not-a-role 1 ) >/dev/null 2>&1 \
@@ -187,7 +254,7 @@ while true; do
     fi
     # A poll that could not be answered is an EVENT, not silence — and it is a DIFFERENT event from
     # the hold above. A dial timeout is not a throttle and quiet does not fix it.
-    echo "LOOKUP FAILED: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"
+    echo "LOOKUP FAILED: $(reason "$out" 200)"
     sleep "$interval"
     continue
   fi

@@ -272,10 +272,17 @@ func TestARetryAfterIsObeyed(t *testing.T) {
 	}
 }
 
-// runWatchBriefly starts a copy of an installed watch against stub dependencies, lets it complete a
-// poll or two, and returns everything it printed. The watch never exits on its own; that is what it
-// is for.
-func runWatchBriefly(t *testing.T, dir, script string, args ...string) string {
+// runWatchUntil starts a copy of an installed watch against stub dependencies, waits until it has
+// printed what the caller is waiting for, and returns everything it printed. The watch never exits
+// on its own; that is what it is for.
+//
+// WAITING ON THE CONDITION, NOT ON A CLOCK. The first version gave every watch a fixed few seconds
+// and asserted whatever had arrived. It passed alone and failed inside the full suite, where the
+// machine is loaded and a poll takes longer — **a test that reports "the watch emitted nothing"
+// when the truth is "it had not got there yet"**, which is the same conflation of `could not
+// determine` with `determined to be nothing` that this package exists to police. The deadline is
+// now long and is only reached when the condition genuinely never happens.
+func runWatchUntil(t *testing.T, dir, script string, done func(string) bool, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("bash", append([]string{filepath.Join(dir, script)}, args...)...)
 	cmd.Env = append(os.Environ(),
@@ -301,19 +308,40 @@ func runWatchBriefly(t *testing.T, dir, script string, args ...string) string {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("cannot start %s: %v", script, err)
 	}
-	done := make(chan struct{})
-	go func() { _ = cmd.Wait(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(8 * time.Second):
-		_ = cmd.Process.Kill()
-		<-done
+	exited := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(exited) }()
+
+	read := func() string {
+		raw, err := os.ReadFile(logPath)
+		if err != nil {
+			return ""
+		}
+		return string(raw)
 	}
-	raw, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("cannot read the watch log: %v", err)
+	deadline := time.After(60 * time.Second)
+	tick := time.NewTicker(200 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-exited:
+			return read()
+		case <-deadline:
+			_ = cmd.Process.Kill()
+			<-exited
+			return read()
+		case <-tick.C:
+			if out := read(); done != nil && done(out) {
+				_ = cmd.Process.Kill()
+				<-exited
+				return out
+			}
+		}
 	}
-	return string(raw)
+}
+
+// atLeast reports whether marker has appeared n times — the shape every caller here waits on.
+func atLeast(marker string, n int) func(string) bool {
+	return func(out string) bool { return strings.Count(out, marker) >= n }
 }
 
 // watchFixture assembles a directory holding the INSTALLED watch, the INSTALLED guard and their
@@ -353,7 +381,7 @@ func watchFixture(t *testing.T, watch string, queueOutput string, queueExit int)
 func TestTheWatchHoldsOnASecondaryRateLimit(t *testing.T) {
 	watchScript(t, "watch-queue.sh")
 	dir := watchFixture(t, "watch-queue.sh", secondaryRefusal, 1)
-	out := runWatchBriefly(t, dir, "watch-queue.sh", "dev", "1")
+	out := runWatchUntil(t, dir, "watch-queue.sh", atLeast("HOLDING", 2), "dev", "1")
 	if !strings.Contains(out, "HOLDING") {
 		t.Errorf("a poll refused by a secondary rate limit did not put the watch into HOLDING. This "+
 			"is the state that never fired when it was most needed, because the guard was watching a "+
@@ -385,7 +413,7 @@ func TestTheWatchHoldsOnASecondaryRateLimit(t *testing.T) {
 func TestTheWatchStillReportsANonThrottleOutageAsLookupFailed(t *testing.T) {
 	watchScript(t, "watch-queue.sh")
 	dir := watchFixture(t, "watch-queue.sh", networkOutage, 1)
-	out := runWatchBriefly(t, dir, "watch-queue.sh", "dev", "1")
+	out := runWatchUntil(t, dir, "watch-queue.sh", atLeast("LOOKUP FAILED", 2), "dev", "1")
 	if !strings.Contains(out, "LOOKUP FAILED") {
 		t.Errorf("a dial timeout did not emit LOOKUP FAILED — an outage that emits nothing is "+
 			"indistinguishable from an empty queue, which is the whole reason this watch exists\n%s",
