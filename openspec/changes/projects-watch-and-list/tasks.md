@@ -30,6 +30,11 @@
       outside a repository
 - [x] Report an unreadable subdirectory, continue the walk, and keep the result distinguishable from
       a complete scan
+- [x] Apply that same rule on the GIT path: capture `git ls-files` stderr and treat any output as
+      evidence the read was not clean, because git warns about an unreadable directory and still
+      exits 0 — a zero exit is evidence of no fatal error, not of a complete read
+- [x] Count an unrecognised warning too, so a future git wording or an unanticipated locale cannot
+      silently become a complete scan
 - [x] Keep an unreadable ROOT distinct from an unreadable subdirectory — the first is criterion 10's
       undetermined marking, the second is criterion 21's partial read
 
@@ -66,6 +71,8 @@
       observation cannot be what caused the state to advance
 - [x] Drive criterion 4 END TO END against a real daemon started by the real binary: change a file,
       run nothing, and require the polled record to advance
+- [x] Drive criterion 21 on the git path with a real permission bit, pinning BOTH arms on one
+      repository — readable, then chmod 000, then restored — so the marking tracks the world
 - [x] Drive criterion 5 by stopping the poller, changing a file, waiting past the interval and
       comparing every file in the store byte for byte
 - [x] Compare the missing, unreadable, empty and real-count renderings PAIRWISE inside one listing

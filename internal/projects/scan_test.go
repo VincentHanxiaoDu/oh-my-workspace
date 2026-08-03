@@ -365,3 +365,119 @@ func TestAPathThatIsNotADirectoryIsNotAPresentProject(t *testing.T) {
 		t.Error("a regular file scanned as a present project directory")
 	}
 }
+
+// CRITERION 21 ON THE COMMON PATH: a partially-read project inside a GIT REPOSITORY must not render
+// as a complete scan.
+//
+// THIS IS THE PATH MOST WATCHED DIRECTORIES TAKE — a person's watched directory is usually a repo —
+// and it was the broken one. `git ls-files` warns on stderr about a directory it cannot open and
+// STILL EXITS 0; the scan used cmd.Output(), which discards stderr, so a zero exit was taken as
+// evidence of a complete read when it was only evidence of no fatal error.
+//
+// BOTH ARMS ARE PINNED, on one repository, with nothing changed between them but the permission
+// bit. Asserting only the failure leaves "renders partially-read" satisfiable by a build that says
+// so about everything; asserting only the success is what shipped.
+func TestInsideAGitRepositoryAPartialReadIsNotACompleteScan(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed here; the git-backed path cannot be driven")
+	}
+	if !unreadableDirsWork(t) {
+		t.Skip("this environment reads a 0000 directory anyway")
+	}
+	root := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + root, "LC_ALL=C",
+			"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null"}
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("init", "-q")
+	mkfile(t, filepath.Join(root, "top.txt"), "x")
+	locked := filepath.Join(root, "locked")
+	mkfile(t, filepath.Join(locked, "hidden.txt"), "x")
+
+	// --- ARM ONE: readable. The scan is complete and says so.
+	clean := projects.Scan(root, projects.DefaultDepth)
+	if clean.IgnoreSource != "git" {
+		t.Fatalf("IgnoreSource=%q; this test is not exercising the git path at all", clean.IgnoreSource)
+	}
+	if clean.PartiallyRead() {
+		t.Fatalf("a fully readable repository reports unreadable paths %v", clean.UnreadablePaths)
+	}
+	if clean.Readable != tri.Yes {
+		t.Fatalf("a fully readable repository has Readable=%s", clean.Readable)
+	}
+
+	// --- ARM TWO: the same repository, one permission bit changed.
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(locked, 0o755) })
+
+	partial := projects.Scan(root, projects.DefaultDepth)
+	if partial.IgnoreSource != "git" {
+		t.Fatalf("IgnoreSource=%q after the chmod; the scan fell back to the hand-written walk, "+
+			"so this no longer drives the git path the defect was on", partial.IgnoreSource)
+	}
+	if !partial.PartiallyRead() {
+		t.Fatalf("git warned that it could not read part of the tree and the scan reported a "+
+			"COMPLETE read: %+v\n"+
+			"  `git ls-files` exits 0 while warning on stderr. A zero exit is evidence of no fatal "+
+			"error, not of a complete read.", partial)
+	}
+	if partial.Readable == tri.Yes {
+		t.Errorf("a partially-read repository claims Readable=yes")
+	}
+	// It NAMES the path, so a person can go and look.
+	named := strings.Join(partial.UnreadablePaths, " ")
+	if !strings.Contains(named, "locked") {
+		t.Errorf("the unreadable directory is not named in %v", partial.UnreadablePaths)
+	}
+	// Criterion 21: the rest of the walk still counted.
+	if partial.Files == 0 {
+		t.Errorf("the readable remainder was lost: Files=0, want at least top.txt")
+	}
+	// And emptiness is NOT determined from a partial read.
+	if partial.Empty().Determined() {
+		t.Errorf("a partially-read repository determined its emptiness (%s)", partial.Empty())
+	}
+
+	// --- THE TWO ARMS DIFFER IN THE RENDERING, compared to each other rather than to literals.
+	if projects.DescribeState(partial) == projects.DescribeState(clean) {
+		t.Errorf("a partially-read repository and a completely-read one render identically: %q",
+			projects.DescribeState(clean))
+	}
+
+	// --- AND BACK: restoring the bit restores the complete rendering, so the marking tracks the
+	// world rather than latching once it has been set.
+	if err := os.Chmod(locked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if again := projects.Scan(root, projects.DefaultDepth); again.PartiallyRead() {
+		t.Errorf("after the permission was restored the scan still reports %v", again.UnreadablePaths)
+	}
+}
+
+// An unrecognised message on git's stderr still marks the project partially read.
+//
+// The path-extracting parser is a nicety for the person; noticing that git said ANYTHING is the
+// correctness. A future git wording, or a locale this build did not anticipate, must not silently
+// become a complete scan — which is the same defect one step removed.
+func TestAnUnparseableGitWarningStillMarksThePartialRead(t *testing.T) {
+	for _, line := range []string{
+		"warning: could not open directory 'locked/': Permission denied",
+		"warning: something this parser has never seen",
+		"Warnung: Verzeichnis konnte nicht geoeffnet werden",
+	} {
+		got := projects.UnreadableFromGitWarnings(line)
+		if len(got) != 1 {
+			t.Errorf("%q produced %v; every non-empty stderr line is something git could not do", line, got)
+		}
+	}
+	if got := projects.UnreadableFromGitWarnings("  \n\n  "); len(got) != 0 {
+		t.Errorf("blank stderr produced %v; a clean read must not be marked partial", got)
+	}
+}

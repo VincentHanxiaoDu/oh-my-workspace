@@ -148,6 +148,12 @@ When part of a project cannot be read, the product SHALL still list the project,
 unreadable portion as unreadable, SHALL continue the walk, SHALL leave the other projects unaffected,
 and SHALL render the result distinguishably from a walk that read everything.
 
+#### Scenario: An unreadable subdirectory inside a git repository
+- **WHEN** a watched directory is a git repository containing a subdirectory that refuses to be read,
+  and the tool the product asks for the file set reports the problem without failing
+- **THEN** the project is reported as partially read and names the unreadable path — the tool's
+  success status is not taken as evidence that everything was read
+
 #### Scenario: An unreadable subdirectory mid-walk
 - **WHEN** a watched directory contains a subdirectory that refuses to be read
 - **THEN** the project appears, the unreadable portion is named, the readable remainder is counted,
