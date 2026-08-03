@@ -10,7 +10,6 @@ When nobody can be named as an author, the machinery says which kind of nobody i
 that only moves specs genuinely has no product judgement to be independent of, and a branch whose
 commits forgot to say who wrote them is a defect the author is told to fix, in those words, at the
 gate that can explain it. Neither is ever silently reported as the other.
-
 ## Requirements
 ### Requirement: Authorship does not depend on which git was asked
 The derivation of a pull request's authors SHALL give the same answer regardless of the version or
@@ -130,6 +129,7 @@ genuine verdict that also quotes command output SHALL still be accepted.
   is posted afterwards
 - **THEN** the gate acts on the genuine verdict, and the order in which the two were posted does not
   change the outcome
+
 ### Requirement: A budget guard SHALL NOT report a healthy budget while calls are being refused
 The API budget guard SHALL treat a refusal carrying a rate-limit body as evidence that calls are
 being refused, and SHALL stand the watches down on it. It SHALL NOT answer with a counter that is
@@ -189,3 +189,148 @@ it carried one. A primary exhaustion SHALL be waited out on the quota reset.
 #### Scenario: A secondary limit is live and the primary quota resets much later
 - **WHEN** a secondary limit is in force and the primary quota's reset is far in the future
 - **THEN** the stand-down is the secondary limit's cooldown and not the primary reset interval
+
+### Requirement: A mergeable signal SHALL rest on positive evidence
+A watch SHALL announce a pull request as ready to merge only on evidence that the gates have spoken
+and passed: at least one completed check run, no check run still running, and a review verdict
+positively read as successful. The absence of a failure, of a pending run, and of a refusal SHALL NOT
+together constitute a pass — on a head where nothing has reported, every one of those tests is
+vacuously true.
+
+A verdict that could not be read SHALL NOT be treated as a verdict that is absent, and neither SHALL
+reach the ready signal.
+
+#### Scenario: Nothing has reported on the head
+- **WHEN** a pull request's head has no check runs at all, no commit statuses and no reviews
+- **THEN** the watch does not announce it as ready
+
+#### Scenario: The gates have passed and no verdict has been published
+- **WHEN** every check run on the head has completed successfully and no review verdict has been
+  published
+- **THEN** the watch does not announce it as ready
+
+#### Scenario: A check run is still running
+- **WHEN** at least one check run on the head has not completed
+- **THEN** the watch does not announce it as ready
+
+#### Scenario: The verdict cannot be read
+- **WHEN** the query for the head's commit statuses fails
+- **THEN** the watch reports the failed lookup and does not announce the pull request as ready
+
+#### Scenario: The evidence is there
+- **WHEN** a check run has completed successfully, none is still running, and the review verdict is
+  successful
+- **THEN** the watch announces the pull request as ready
+
+### Requirement: A head with no answer yet SHALL have its own event
+A watch SHALL emit a distinct event for a pull request whose head has not been answered, saying that
+nothing has reported and that this is not a pass. It SHALL NOT convey that state by emitting nothing:
+silence would then mean both "nothing to report" and "no answer yet", which is the collapse the
+watch's other events exist to prevent.
+
+This SHALL hold on every entry point that evaluates a pull request's state, not only on the one-pass
+sweep.
+
+#### Scenario: Nothing has reported, on the continuous watch
+- **WHEN** a pull request's head has nothing reported on it and the watch is running continuously
+- **THEN** the watch emits its no-answer event for that pull request
+
+#### Scenario: Nothing has reported, on a single pass
+- **WHEN** a pull request's head has nothing reported on it and a single pass over the board is
+  requested
+- **THEN** that pass emits the no-answer event for that pull request
+
+### Requirement: A single pass SHALL terminate whatever it finds
+A one-pass sweep SHALL end, and SHALL exit non-zero when it could not answer, including when it
+stood down for a rate limit. It is the fallback used when the continuous watch has died, so a sweep
+that waits and retries hangs exactly like the watch it replaces.
+
+#### Scenario: The sweep stands down for a budget limit
+- **WHEN** a single pass is requested and the API budget guard reports that the caller should stand
+  down
+- **THEN** the pass ends rather than sleeping and retrying, and exits non-zero
+
+### Requirement: A landed refusal is retired only by the reviewer that made it
+The review gate SHALL consider every verdict posted for the current head, not only the most recent
+one, and SHALL refuse while any reviewer's most recent verdict for that head requests changes. A
+verdict posted by one reviewer SHALL NOT retire a refusal made by another, whoever posted it and
+whenever. Widening who may certify SHALL NOT widen what counts as certified.
+
+The refusal SHALL name the reviewers whose objections are outstanding.
+
+A verdict is bound to the head it names, so a push SHALL leave every earlier verdict inapplicable and
+a refused branch SHALL always be clearable by changing the code.
+
+#### Scenario: An author self-approves over an independent refusal
+- **WHEN** an independent reviewer requests changes on a head and an agent that authored commits in
+  the pull request then approves the same head under a policy permitting self-review
+- **THEN** the gate refuses with the changes-requested outcome, and does not report that no
+  independent agent has looked
+
+#### Scenario: A second independent reviewer approves over the first one's refusal
+- **WHEN** one independent reviewer requests changes on a head and a different independent reviewer
+  then approves the same head
+- **THEN** the gate refuses, because the reviewer that objected has not withdrawn
+
+#### Scenario: A reviewer withdraws its own refusal
+- **WHEN** a reviewer requests changes on a head and later approves the same head
+- **THEN** the gate acts on that reviewer's later verdict, and the refusal no longer stands
+
+#### Scenario: A self-approve with nothing before it
+- **WHEN** an agent that authored commits in the pull request approves the head, no other verdict for
+  that head exists, and the policy permits a self-review
+- **THEN** the gate passes and says the review was a self-review rather than an independent one
+
+#### Scenario: The code is changed in answer to a refusal
+- **WHEN** a head carrying a refusal is superseded by a new head and that new head is approved
+- **THEN** the gate passes, because a verdict applies only to the head it names
+
+#### Scenario: A verdict for the head cannot be attributed
+- **WHEN** any verdict naming the current head cannot be attributed to a poster, whether or not a
+  later verdict for the same head can be
+- **THEN** the gate refuses rather than passing over it to reach the later verdict
+
+### Requirement: A failed lookup SHALL show the part of its output that says what failed
+A watch that reports a failed lookup SHALL show the END of the captured output when that output is
+longer than the space available for it, because the captured stream is everything the command
+printed before it died and the failure is its last line. Output that fits SHALL be shown whole and
+unaltered.
+
+Where output was elided, the rendering SHALL say so, so that an abbreviated reason does not read as
+a complete one.
+
+#### Scenario: The command answered at length and then failed
+- **WHEN** a watch's lookup prints more normal output than the reason budget allows and then fails
+  with an error on its last line
+- **THEN** the reported reason contains that error
+
+#### Scenario: The whole output fits
+- **WHEN** a watch's lookup fails with an output shorter than the reason budget
+- **THEN** the reported reason is that output unchanged, with nothing trimmed and nothing added
+
+### Requirement: A red default branch SHALL name the failing check and SHALL NOT assert an unmeasured cause
+A watch reporting that the default branch is red SHALL name the check that is failing. It SHALL NOT
+attribute the failure to whoever merged last: the default branch can be reddened by commits nobody
+here merged, including direct pushes by the framework, so who merged last is a proxy for authorship
+that stops measuring it exactly when it matters.
+
+Where the failure IS attributable to the caller's own merge, derived by comparing the failing commit
+with the merge commit that caller produced, the watch MAY say so. Where it cannot be derived, the
+watch SHALL say the cause was not determined rather than guess.
+
+A check name that could not be read SHALL NOT be rendered as a red run with nothing failing in it.
+
+#### Scenario: The default branch is red on a commit no merge here produced
+- **WHEN** the default branch's failing commit is a direct push rather than the caller's merge
+- **THEN** the event names the failing check, says the cause was not determined, and does not tell
+  the caller the failure is theirs to fix
+
+#### Scenario: The failing commit is the caller's own merge commit
+- **WHEN** the default branch's failing commit is the merge commit the caller produced
+- **THEN** the event may say the failure is theirs to fix, on the strength of that comparison
+
+#### Scenario: The failing check cannot be read
+- **WHEN** the default branch is red and the query naming which check failed cannot be answered
+- **THEN** the event still reports the branch as red and says the failing check could not be
+  determined
+
