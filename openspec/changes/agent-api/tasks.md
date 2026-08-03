@@ -55,3 +55,31 @@ Every box below is ticked because it happened. Nothing is ticked for being inten
       the AST guard) and is not driven by an actual off-host connection attempt.
 - [x] Recorded in the pull request: sign-in is Issue #19's, so who the person is and what they hold
       comes from the environment today.
+
+## After qa's refusal of #48 — every field says what is actually known
+
+- [x] Every response leaves `Answer` through one funnel that stamps the facts true of the request
+      whatever happened in it. Refusals carry the person; they used to claim none was configured.
+- [x] `HubState` split into `HubConfigured` (a fact about the machine, knowable for a refused
+      request, read without dialling) and `HubContacted` (a fact about this request).
+- [x] `hubContactedSet`, because tri's zero is Undetermined and that is the wrong default for "was
+      a hub contacted" — nothing contacted is a determined no. A test corrected a comment of mine
+      that said the opposite.
+- [x] The undetermined-note count is absent when nothing was examined, rather than a literal zero
+      claiming work that was not done.
+- [x] The discriminator driven: the same refusal with the person set and unset must differ. Driven
+      against a build that hardcodes a name, which a weaker assertion would have passed.
+- [x] Every refusing path swept for the same property, with a control that fails if the sweep
+      exercised nothing.
+
+## After the merged tree went red — one answer for the model
+
+- [x] `agentapi.ModelView` deleted. The agent API serves `model.View`, takes the combined answer
+      from `model.Config.Configured`, and renders through `model.View.Render`.
+- [x] `internal/daemon/agent.go` no longer names `OMW_MODEL`, `OMW_MODEL_KEY` or
+      `OMW_MODEL_KEY_FILE`; it calls `model.Read`.
+- [x] The criterion 13 structural test reflects over the type `Response.Model` actually serves,
+      rather than parsing this package for a struct that no longer exists.
+- [x] A bug of mine fixed by consuming the one answer: a missing credential file is a determined
+      no, not undetermined. The undetermined fixture now stages a file that is present and
+      unreadable.
