@@ -20,6 +20,11 @@ deleted* — diff against a commit ignores untracked files — so the command th
 catch this produces a phantom difference on a file that is byte-identical. Use `cmp` against
 `git show origin/main:<path>`, not `git diff`.
 
+**This presents identically to `AGENT.md` item 6, and item 6's remedy will not catch it.** Both show
+a phantom deletion; there the cause is a moved `main` and `git merge-base` finds it, here the cause
+is an untracked path and `merge-base` returns a clean answer while you are still wrong. Tell them
+apart by whether the path is tracked at `HEAD`, not by the diff.
+
 The mirror case exists too: a file committed on `main` can be **absent** from the tree entirely.
 
 **So at the start of a round, reconcile this file with `origin/main` before trusting it**, and treat
