@@ -1,9 +1,11 @@
 package daemon
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"sync"
@@ -31,6 +33,10 @@ type Control struct {
 	path     string
 	snapshot func() Report
 	done     chan struct{}
+	// storeRoot is the store this control API is about. The agent API (Issue #16) is served
+	// against it, and it is held here rather than re-resolved per request so that a connection
+	// cannot end up answering about a different store than the one the socket belongs to.
+	storeRoot string
 }
 
 // openControl brings the control API up, or declines and says why.
@@ -49,7 +55,7 @@ type Control struct {
 // A tri.Undetermined confirmation refuses exactly as a tri.No does, because §4.6 says the API
 // opens on a confirmation, and "could not confirm" is not one. The two are still reported
 // differently: the returned error's message carries which of them happened.
-func openControl(p runPaths, snapshot func() Report, confirm func(string) (tri.Value, string)) (*Control, tri.Value, string, error) {
+func openControl(p runPaths, storeRoot string, snapshot func() Report, confirm func(string) (tri.Value, string)) (*Control, tri.Value, string, error) {
 	if confirm == nil {
 		confirm = confirmOwnerOnly
 	}
@@ -84,7 +90,7 @@ func openControl(p runPaths, snapshot func() Report, confirm func(string) (tri.V
 		return nil, state, detail, fmt.Errorf("%w: %s", ErrControlNotOwnerOnly, detail)
 	}
 
-	c := &Control{listener: ln, path: p.socket, snapshot: snapshot, done: make(chan struct{})}
+	c := &Control{listener: ln, path: p.socket, storeRoot: storeRoot, snapshot: snapshot, done: make(chan struct{})}
 	go c.serve()
 	return c, tri.Yes, "", nil
 }
@@ -112,21 +118,48 @@ func (c *Control) serve() {
 	}
 }
 
-// answer writes one report and closes.
+// answer reads one request line, writes one answer, and closes.
 //
-// ONE REQUEST, ONE ANSWER, NO PROTOCOL. The only question this interface answers today is "what is
-// your state" (§4.3), and a request format is a thing to get wrong before there is a second
-// question to ask. Issue #16's agent API is where a real protocol belongs.
+// ONE REQUEST, ONE ANSWER. The framing arrived with Issue #16, which is the second question this
+// interface has to answer and therefore the first point at which a request format earns its keep —
+// the note this function used to carry said exactly that. It is a line of JSON so that the server
+// can read a bounded amount and know it is done, rather than deciding what a connection means by
+// how long it waited.
+//
+// A CONNECTION THAT SAYS NOTHING STILL GETS THE STATUS REPORT. That is not politeness: `Inspect`
+// dials this socket to find out whose store a running daemon holds, and a framing change that made
+// an older binary's dial hang would turn a version skew into silence, which is not one of the three
+// answers.
 func (c *Control) answer(conn net.Conn) {
 	defer conn.Close()
-	_ = conn.SetWriteDeadline(time.Now().Add(controlDialTimeout))
-	rep := c.snapshot()
-	body, err := json.Marshal(rep)
-	if err != nil {
-		return
+	_ = conn.SetDeadline(time.Now().Add(controlDialTimeout))
+
+	req := controlRequest{Op: opStatus}
+	line, err := bufio.NewReader(io.LimitReader(conn, maxControlRequest)).ReadBytes('\n')
+	if err == nil || len(line) > 0 {
+		var parsed controlRequest
+		if json.Unmarshal(line, &parsed) == nil && parsed.Op != "" {
+			req = parsed
+		}
 	}
-	_, _ = conn.Write(body)
+
+	switch req.Op {
+	case opAgent:
+		_, _ = conn.Write(c.serveAgent(req.Payload))
+	default:
+		rep := c.snapshot()
+		body, merr := json.Marshal(rep)
+		if merr != nil {
+			return
+		}
+		_, _ = conn.Write(body)
+	}
 }
+
+// maxControlRequest bounds a request line. A peer that can reach this socket is the owner (§4.6),
+// so this is not a defence against them — it is a bound so that a malformed write cannot make the
+// daemon allocate without limit while it is holding the store's write lock.
+const maxControlRequest = 1 << 20
 
 // Path is where the control API listens. Empty when it is not open.
 func (c *Control) Path() string {
@@ -163,7 +196,13 @@ func queryControl(socket string) (Report, error) {
 		return rep, err
 	}
 	defer conn.Close()
-	_ = conn.SetReadDeadline(time.Now().Add(controlDialTimeout))
+	_ = conn.SetDeadline(time.Now().Add(controlDialTimeout))
+	// ASKED FOR EXPLICITLY. The server reads one request line; a client that wrote nothing would
+	// wait out the read deadline before being served the status it wanted, turning every `omw
+	// daemon status` into a two-second pause.
+	if _, err := conn.Write([]byte(`{"op":"status"}` + "\n")); err != nil {
+		return rep, err
+	}
 	dec := json.NewDecoder(conn)
 	if err := dec.Decode(&rep); err != nil {
 		return rep, err
