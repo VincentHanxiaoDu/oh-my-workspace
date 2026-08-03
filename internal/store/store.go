@@ -339,7 +339,15 @@ func Open(path string) (*Store, error) {
 		return nil, pathErr("open", root, ErrUnreadable,
 			"this store is format "+itoa(m.Format)+", which this build does not understand")
 	}
-	return &Store{root: root, id: m.StoreID, undeterminedAtCreation: m.UndeterminedAtCreation}, nil
+	s := &Store{root: root, id: m.StoreID, undeterminedAtCreation: m.UndeterminedAtCreation}
+	// A BATCH COMMITTED BY A PROCESS THAT DIED IS FINISHED BEFORE ANYBODY READS. See batch.go: this
+	// is what widens invariant 4 from one record to a set of them, and it is here rather than in a
+	// caller because the reader that must never see a half-applied batch is a command that knows
+	// nothing about batches. An unreadable journal fails the Open; it is never stepped over.
+	if err := s.recoverBatches(); err != nil {
+		return nil, err
+	}
+	return s, nil
 }
 
 // Exists answers whether a store is present at path, in three values.
