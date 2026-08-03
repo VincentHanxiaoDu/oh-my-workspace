@@ -148,14 +148,15 @@ seen=""
 polls=0
 
 here_bin=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-# Sleep until the limit resets, but never less than one interval and never more than ten minutes —
-# an unreadable reset must not park the watch indefinitely.
-HOLD_SLEEP() {
-  local s; s=$("$here_bin/gh-budget.sh" reset-in 2>/dev/null || echo "$interval")
-  [ "$s" -lt "$interval" ] && s=$interval
-  [ "$s" -gt 600 ] && s=600
-  echo "$s"
-}
+# Sleep until the throttle that is actually holding this watch is expected to lift, but never less
+# than one interval and never more than ten minutes — an unreadable reset must not park the watch
+# indefinitely.
+#
+# `hold-for`, NOT `reset-in`: the two causes clear on different clocks. A PRIMARY exhaustion clears
+# when the hourly quota resets. A SECONDARY (burst) limit clears with QUIET and has nothing to do
+# with that reset — waiting on `reset-in` there is waiting on a signal that never described the
+# problem (Issue #81).
+HOLD_SLEEP() { "$here_bin/gh-budget.sh" hold-for "$interval" 2>/dev/null || echo "$interval"; }
 
 while true; do
   # THE WORK COMES BEFORE THE WATCHING. Below the reserve this watch stops polling and waits for the
@@ -167,13 +168,25 @@ while true; do
   # deliberately idle, and when it resumes. Reading the limit is free and does not spend it.
   bmsg=$("$here_bin/gh-budget.sh" check 2>&1) && bok=0 || bok=$?
   if [ "${bok:-0}" -eq 1 ]; then
-    echo "HOLDING — $bmsg. Not polling: the remaining budget is reserved for this role's own work."
+    echo "HOLDING — $bmsg"
     sleep "$(HOLD_SLEEP)"
     continue
   fi
   out=""
   if ! out=$("$here/queue.sh" "$role" 2>&1); then
-    # A poll that could not be answered is an EVENT, not silence.
+    # A REFUSED CALL IS THE ONLY PLACE A SECONDARY RATE LIMIT IS EVER VISIBLE (Issue #81). The budget
+    # guard above reads `/rate_limit`, which reports the PRIMARY hourly quota and nothing else —
+    # measured at 4896/5000 while every one of these polls was coming back 403. So the 403 is handed
+    # to the guard here, and it becomes the reason the NEXT check holds instead of waving the watch
+    # through. Reporting this as `LOOKUP FAILED` and polling again on the interval is what turned a
+    # throttle into a self-sustaining outage: each retry renews the burst that caused it.
+    if hold=$("$here_bin/gh-budget.sh" note-failure "$out" 2>/dev/null); then
+      echo "HOLDING — GitHub refused this poll with a SECONDARY (burst/concurrency) rate limit, which does NOT appear in the primary quota. Standing down for about ${hold}s; a secondary limit clears with quiet, not on the reset clock, so retrying now extends it."
+      sleep "$(HOLD_SLEEP)"
+      continue
+    fi
+    # A poll that could not be answered is an EVENT, not silence — and it is a DIFFERENT event from
+    # the hold above. A dial timeout is not a throttle and quiet does not fix it.
     echo "LOOKUP FAILED: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"
     sleep "$interval"
     continue
