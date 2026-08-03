@@ -68,23 +68,20 @@ stale merge whose tree genuinely differs from origin's — it has been, on `.wor
 the worst place for it because those are the scripts every role then runs. Fetch and branch from the
 remote ref, and the question never arises.
 
-## 2026-08-03 — `queue.sh` does not know what "mergeable" means. Never merge on its say-so alone.
+## 2026-08-03 — a green in a listing is not a green on this head
 
-It listed **#87 as `GREEN` under `PULL REQUESTS TO UAT, MERGE AND CLOSE`** while GitHub said
-`mergeable: false, mergeable_state: dirty`. A conflicted pull request has no merge ref, so no gate
-ever scheduled — the green belonged to an older head. It renders conflicted-but-untested PRs as
-`NO ANSWER YET`, which invites waiting that can never resolve.
+`queue.sh` offered **#87 for merge showing `GREEN`** while GitHub reported `mergeable: false,
+mergeable_state: dirty`. Filed as #122 — delete this entry when that closes.
 
-**Before merging anything, run `./.workflow/bin/pr.sh state <n>`** — it gets this right and says so
-in words (*"waiting cannot resolve it"*). `watch-prs.sh` also gets it right. Only the queue does not.
-Filed as #122; delete this entry when that closes.
+**Check the head before you merge: `./.workflow/bin/pr.sh state <n>`.** What makes it trustworthy is
+that it anchors every read to the **current head sha** — `commits/$sha/check-runs` and
+`commits/$sha/status` — so a stale green sitting on an older head simply is not on this one, and it
+reports `NOTHING HAS REPORTED on this head yet. That is not a pass — it is no answer.`
+(`pr.sh:114-116`). `watch-prs.sh` takes the same `completed == 0` → `NO-ANSWER` path (`:720-722`).
 
-**And `queue.sh` exits 0 whether or not it errored**, so its exit code tells you nothing about
-whether its output is complete. Read what it printed; do not infer from the code.
-
-*(An earlier version of this entry reported a `line 640: built: command not found` error here. It
-does not reproduce on any tree — branch, `origin/main`, or the shared clone — and I had attributed
-it to the wrong tree. Withdrawn on #122, and deleted here rather than left to mislead.)*
+**Neither tool reads mergeability at all** — `pr.sh state` never asks for the field, and
+`watch-prs.sh` fetches the `pulls?state=open` *list* endpoint, which does not return it. Head-sha
+anchoring is the whole mechanism. Do not credit them with a check they do not perform.
 
 ## 2026-08-03 — measurement traps that have each cost a round
 
