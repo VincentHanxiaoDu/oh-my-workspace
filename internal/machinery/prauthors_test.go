@@ -401,7 +401,11 @@ func TestArchiveOnlyPullRequestCanBeReviewed(t *testing.T) {
 func (f *authorFixture) checkReview(t *testing.T, reviewer, verdict string) (int, string) {
 	t.Helper()
 	script := filepath.Join(repoRoot(t), ".workflow", "bin", "check-review.sh")
-	body := "Reviewed-by: " + reviewer + "\\nReviewed-sha: " + f.head + "\\nVerdict: " + verdict +
+	// The `[role]` marker is what the gate takes the reviewer's identity FROM since Issue #65 — a
+	// verdict with no poster is refused as unattributable, so a fixture without one would be
+	// testing that refusal rather than whatever this caller is asking about.
+	body := "[" + reviewer + "]" +
+		"\\nReviewed-by: " + reviewer + "\\nReviewed-sha: " + f.head + "\\nVerdict: " + verdict +
 		"\\nScope: the change is what the Issue asked for and no wider."
 	f.write("comments.json", `[{"body":"`+body+`"}]`)
 

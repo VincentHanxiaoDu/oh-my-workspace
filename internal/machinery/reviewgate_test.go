@@ -218,6 +218,15 @@ func newReviewFixture(t *testing.T) reviewFixture {
 // value the workflow records in review.rc.
 func (f reviewFixture) checkRC(t *testing.T, bodies ...string) int {
 	t.Helper()
+	rc, _ := f.checkOut(t, bodies...)
+	return rc
+}
+
+// checkOut is checkRC plus what the gate said. The exit code alone cannot tell "no review exists"
+// from "a review exists and I refuse to attribute it" — both are 1, deliberately, because both are
+// "this head is not certified". The distinction lives in the message, so the message is asserted.
+func (f reviewFixture) checkOut(t *testing.T, bodies ...string) (int, string) {
+	t.Helper()
 	quoted := make([]string, 0, len(bodies))
 	for _, b := range bodies {
 		quoted = append(quoted, `{"body":`+jsonQuote(b)+`}`)
@@ -239,7 +248,7 @@ func (f reviewFixture) checkRC(t *testing.T, bodies ...string) int {
 		rc = ee.ExitCode()
 	}
 	t.Logf("check-review.sh exited %d\n%s", rc, out)
-	return rc
+	return rc, string(out)
 }
 
 // jsonQuote quotes a string as a JSON scalar. `encoding/json` would do it, but the bodies here
@@ -249,8 +258,172 @@ func jsonQuote(s string) string {
 	return `"` + r.Replace(s) + `"`
 }
 
+// review is a verdict block with no `[role]` marker above it — the shape every verdict in this
+// repository had before Issue #65. It is kept for the tests that are about something else.
 func review(reviewer, sha, verdict string) string {
 	return "Reviewed-by: " + reviewer + "\nReviewed-sha: " + sha + "\nVerdict: " + verdict
+}
+
+// posted is a verdict as a whole COMMENT: the `[role]` marker that says who is speaking, then the
+// block that says what the verdict is. `poster` and `declared` are separate arguments precisely
+// because Issue #65 is about them being allowed to differ.
+func posted(poster, declared, sha, verdict string) string {
+	return "[" + poster + "]\n" + review(declared, sha, verdict)
+}
+
+// fenced wraps text in a Markdown code fence — a comment QUOTING a verdict rather than giving one.
+func fenced(marker, text string) string {
+	return marker + "\n" + text + "\n" + marker
+}
+
+// TestQuotedVerdictIsNotAVerdict is Issue #65. The gate took the reviewer's name from the comment's
+// TEXT, so any role could mint any other role's approval — and product did it by accident on #63 by
+// quoting the verdict template to ASK for a verdict. The quote sat inside a code fence; `jq`'s
+// `test()` and the `sed -n 's/^Reviewed-by:…'` extraction have no notion of fences, and sed's `^`
+// matches inside one.
+//
+// WHAT THIS TEST CAN AND CANNOT ESTABLISH, said here rather than in a commit message nobody reads:
+// every role on this repository posts through the SAME GitHub account, so `.user.login` separates
+// the human from nobody. The poster's role is derived from the `[role]` marker the roles already
+// sign every comment with and that `queue.sh` already routes on. That marker is a CONVENTION, not
+// an authenticated fact. This closes the accident — a quoted template can no longer be read as a
+// verdict, and a verdict can no longer name somebody other than its poster — and it does NOT make
+// the attestation unforgeable by a role that sets out to forge one.
+func TestQuotedVerdictIsNotAVerdict(t *testing.T) {
+	f := newReviewFixture(t) // the one commit here is `Agent: dev`
+
+	// `product` authored nothing in this range, so under the OLD gate every quoted block below
+	// yields a clean independent approve and exits 0. That is the red these cases are written to
+	// see: a wrong name would make them fail for the independence rule instead, and pass for the
+	// wrong reason.
+	quote := review("product", f.head, "approve")
+
+	cases := []struct {
+		name    string
+		comment string
+		wantRC  int
+		want    string // phrase the gate's output must carry
+	}{
+		{
+			// THE #63 NEAR-MISS, DRIVEN. product asks dev to re-attest by quoting the template.
+			name:    "a fenced quote of a verdict is not a verdict",
+			comment: "[product]\ncould you re-attest this? post exactly:\n\n" + fenced("```", quote) + "\n\nthanks",
+			wantRC:  1,
+			want:    "no review found",
+		},
+		{
+			// The audit on this Issue noted its own limit: a quoted verdict placed at the very TOP
+			// of a comment would have passed it. Placement must not matter.
+			name:    "a fenced quote at the top of the comment is still not a verdict",
+			comment: "[product]\n" + fenced("```", quote) + "\n\n^ that is the shape we want",
+			wantRC:  1,
+			want:    "no review found",
+		},
+		{
+			// `~~~` is a fence too, and a fix that only knew about backticks would be a fix for
+			// the one comment that happened to cause the incident.
+			name:    "a tilde fence is a fence",
+			comment: "[product]\nexample:\n" + fenced("~~~", quote),
+			wantRC:  1,
+			want:    "no review found",
+		},
+		{
+			// A verdict quoted with `>` is being discussed, not given. sed's `^` misses this one
+			// today, so it is not the live hole — it is the next one, and it costs nothing here.
+			name:    "a blockquoted verdict is not a verdict",
+			comment: "[product]\n> Reviewed-by: product\n> Reviewed-sha: " + f.head + "\n> Verdict: approve",
+			wantRC:  1,
+			want:    "no review found",
+		},
+		{
+			// CRITERION 2. Not silently re-attributed to the poster — REFUSED, saying they
+			// disagree. Silent correction hides an attempt to forge.
+			name:    "a verdict naming somebody other than its poster is refused, and says so",
+			comment: posted("product", "qa", f.head, "approve"),
+			wantRC:  1,
+			want:    "DISAGREE",
+		},
+		{
+			// CRITERION 5, against a reviewer that LIED about its name. This is the case the
+			// independence rule has never been tested against: `dev` built this branch, and under
+			// the old gate typing somebody else's name was the whole of what it took.
+			name:    "an author cannot certify its own work by typing another role's name",
+			comment: posted("dev", "product", f.head, "approve"),
+			wantRC:  1,
+			want:    "DISAGREE",
+		},
+		{
+			// CRITERION 5 with the truth told. Unchanged behaviour, now reached by a derived name.
+			name:    "an author that names itself still cannot certify its own work",
+			comment: posted("dev", "dev", f.head, "approve"),
+			wantRC:  1,
+			want:    "authored commits in this PR",
+		},
+		{
+			// CRITERION 4, THE OTHER DIRECTION. A fix that refuses everything passes every case
+			// above and breaks the workflow entirely.
+			name:    "a genuine independent verdict still passes",
+			comment: posted("product", "product", f.head, "approve"),
+			wantRC:  0,
+			want:    "review ok",
+		},
+		{
+			// A genuine verdict is allowed to CONTAIN a fence — reviewers paste output. Only the
+			// fenced text is discarded, never the comment.
+			name: "a genuine verdict is not lost because it also quotes something",
+			comment: posted("product", "product", f.head, "approve") +
+				"\n\nI ran it:\n" + fenced("```", "$ make ci\nok"),
+			wantRC: 0,
+			want:   "review ok",
+		},
+		{
+			// THE UNDECIDED PATH, REFUSING LOUDLY. Nothing in this Issue's criteria says what a
+			// verdict with no `[role]` marker means, and there is no honest default: reading its
+			// `Reviewed-by:` is the hole this Issue is about, and inventing a poster is worse. So
+			// the gate says it COULD NOT DETERMINE who posted it — which is a different value from
+			// "no review exists" and from "this review is forged", and it must not be spelled like
+			// either. See the PR body; the Issue stays open on this.
+			name:    "a verdict whose poster cannot be determined is refused as undetermined",
+			comment: review("product", f.head, "approve"),
+			wantRC:  1,
+			want:    "COULD NOT BE DETERMINED",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rc, out := f.checkOut(t, tc.comment)
+			if rc != tc.wantRC {
+				t.Errorf("check-review.sh exited %d, want %d", rc, tc.wantRC)
+			}
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("the gate said %q, which does not carry %q", strings.TrimSpace(out), tc.want)
+			}
+		})
+	}
+
+	// AND THE #63 CONFIGURATION ITSELF: the quote FIRST, the genuine verdict AFTER. On #63 this
+	// came out right only because `| last` happened to pick the real one. Order must stop
+	// mattering, so drive it in the order that hid the defect AND in the order that exposes it.
+	t.Run("a quote after a genuine verdict does not displace it", func(t *testing.T) {
+		rc, out := f.checkOut(t,
+			posted("product", "product", f.head, "approve"),
+			"[qa]\nfor the record, the verdict was:\n"+fenced("```", quote),
+		)
+		if rc != 0 {
+			t.Errorf("check-review.sh exited %d, want 0 — a later quotation displaced a real "+
+				"verdict, which is the `| last` hazard from the other side\n%s", rc, out)
+		}
+	})
+	t.Run("a quote before a genuine verdict does not become the verdict", func(t *testing.T) {
+		rc, out := f.checkOut(t,
+			"[qa]\nplease post:\n"+fenced("```", quote),
+			posted("product", "product", f.head, "approve"),
+		)
+		if rc != 0 {
+			t.Errorf("check-review.sh exited %d, want 0\n%s", rc, out)
+		}
+	})
 }
 
 // stateFor is the outcome Actions reports for the check step, given its exit code. `outcome` is
@@ -278,7 +451,7 @@ func TestRefusedReviewDoesNotReadAsNoReview(t *testing.T) {
 		{
 			// Criterion 1. `product` authored nothing here, so the refusal is independent.
 			name:     "an independent refusal says changes were requested",
-			comments: []string{review("product", f.head, "changes-requested")},
+			comments: []string{posted("product", "product", f.head, "changes-requested")},
 			wantRC:   2,
 			want:     refusedPhrase,
 			notWant:  absentPhrase,
@@ -288,7 +461,7 @@ func TestRefusedReviewDoesNotReadAsNoReview(t *testing.T) {
 			// review is both a refusal AND non-independent. Two complaints, and the refusal is the
 			// one the reviewer needs back: it had landed, and the status said it had not.
 			name:     "a refusal by an author of the branch still says changes were requested",
-			comments: []string{review("dev", f.head, "changes-requested")},
+			comments: []string{posted("dev", "dev", f.head, "changes-requested")},
 			wantRC:   2,
 			want:     refusedPhrase,
 			notWant:  absentPhrase,
@@ -304,14 +477,14 @@ func TestRefusedReviewDoesNotReadAsNoReview(t *testing.T) {
 		{
 			// Criterion 3. A push invalidates a review; a stale refusal is not a live one.
 			name:     "a refusal naming another sha reads as no current review",
-			comments: []string{review("product", strings.Repeat("0", 40), "changes-requested")},
+			comments: []string{posted("product", "product", strings.Repeat("0", 40), "changes-requested")},
 			wantRC:   1,
 			want:     absentPhrase,
 			notWant:  refusedPhrase,
 		},
 		{
 			name:     "an independent approve passes",
-			comments: []string{review("product", f.head, "approve")},
+			comments: []string{posted("product", "product", f.head, "approve")},
 			wantRC:   0,
 			want:     "Reviewed by an agent",
 			notWant:  absentPhrase,
