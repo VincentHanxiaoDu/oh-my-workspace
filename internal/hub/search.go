@@ -199,8 +199,19 @@ type Corpus struct {
 	reader       PersonID
 	notes        []*Note
 	undetermined []NoteID
-	dir          Directory
-	roster       *Roster
+	// undeterminedNotes are the same notes as undetermined, as pointers, ADDED BY ISSUE #13 and
+	// used only by [Corpus.Statistics].
+	//
+	// WHY IT EXISTS AND WHY IT DISCLOSES NOTHING NEW. `undetermined` is a list of ids and carries
+	// no author and no audience, so a caller holding only it cannot tell whether an unevaluable
+	// note is even in the scope being asked about — and reporting a store-wide figure at a narrowed
+	// scope tells the asker that material exists outside it. Statistics needs to apply [inScope] to
+	// these notes in order to answer for the scope it was asked about and no wider. Nothing here is
+	// handed out: the field is unexported, [Corpus.UndeterminedIDs] still returns only ids, and no
+	// statistic renders anything but a COUNT.
+	undeterminedNotes []*Note
+	dir               Directory
+	roster            *Roster
 }
 
 // Settle filters a store's notes through the visibility predicate for one reader.
@@ -219,7 +230,14 @@ func SettleWith(s *Store, reader PersonID, dir Directory, roster *Roster) Corpus
 	if dir == nil {
 		dir = s.Members()
 	}
-	return Corpus{reader: reader, notes: readable, undetermined: undetermined, dir: dir, roster: roster}
+	return Corpus{
+		reader:            reader,
+		notes:             readable,
+		undetermined:      undetermined,
+		undeterminedNotes: s.notesByID(undetermined),
+		dir:               dir,
+		roster:            roster,
+	}
 }
 
 // Reader is who this corpus was settled for.
