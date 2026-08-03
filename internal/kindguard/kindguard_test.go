@@ -95,16 +95,22 @@ func TestNoDeclarationIsStale(t *testing.T) {
 // turns this red so that somebody looks at it rather than it being absorbed silently.
 func TestTheUnresolvedReadsAreTheKnownOnes(t *testing.T) {
 	rep := repo(t)
-	// These three read kinds they were HANDED rather than kinds they named, which is a different
-	// thing from a kind with no writer and cannot be checked here:
+	// These read kinds they were HANDED rather than kinds they named, which is a different thing
+	// from a kind with no writer and cannot be checked here:
 	//
 	//   internal/reports/activity.go   enumerates every kind in the store and filters by prefix
 	//   internal/commands/store.go     `omw store` reports every kind it finds, whatever they are
 	//   internal/store/store.go        the store's own generic accessors take the kind as a parameter
+	//   internal/status/collect.go     `recordItems` lists every kind [store.Store.Kinds] reports,
+	//     one `s.List(k)` per loop variable. There is no literal kind to check because naming one
+	//     would be the defect: #101 required the status screen to report whatever the store holds,
+	//     and a fixed list would silently omit a kind the store grew. The indirection is the
+	//     requirement, so this read is unchecked and recorded as such (#67, #105).
 	allowed := map[string]bool{
 		"internal/reports/activity.go": true,
 		"internal/commands/store.go":   true,
 		"internal/store/store.go":      true,
+		"internal/status/collect.go":   true,
 	}
 	for _, u := range rep.Unresolved {
 		file := u.Pos[:strings.Index(u.Pos, ":")]
