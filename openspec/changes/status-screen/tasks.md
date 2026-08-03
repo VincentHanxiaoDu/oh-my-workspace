@@ -80,5 +80,7 @@
       developer's real device pointer
 - [x] Pin the member-to-subsystem precedence in both directions — a table over `worse` for the
       function, and a real two-member channels line for the fact that a subsystem calls it
+- [x] Read a device's check-in through `CheckIn.State()`, PR #44's method, and drive the value it
+      made representable — a check-in recorded with no instant — through the member fold
 - [x] Mutate each of the defects the criteria are written about, confirm RED naming the defect,
       and revert

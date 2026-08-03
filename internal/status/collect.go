@@ -426,7 +426,14 @@ func devicesSubsystem(q Query, getenv func(string) string, now time.Time) Subsys
 	worst := sub.State
 	for _, d := range snap.Devices {
 		it := Item{Name: string(d.Label)}
-		switch d.CheckIn.State {
+		// State() IS A METHOD AND NOT A FIELD, and that is PR #44's fix rather than a style
+		// choice here. A check-in recorded at the zero instant used to render as undetermined
+		// while its State field said Yes, so every consumer that read the field disagreed with
+		// the one rendering — the undetermined-ness lived in a rendering instead of in the value.
+		// #44 made the invalid value unrepresentable: the fields are unexported and CheckedInAt
+		// refuses a zero instant. This screen reads the answer through the method, which is now
+		// the only way to read it.
+		switch d.CheckIn.State() {
 		case tri.Yes:
 			it.State, it.Detail = Working, d.CheckIn.Describe()
 		case tri.No:

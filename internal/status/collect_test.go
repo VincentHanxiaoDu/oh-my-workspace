@@ -786,3 +786,68 @@ func TestOneUnknowableMemberStopsItsSubsystemReportingAConfidentState(t *testing
 		t.Error("a screen whose only oddity is an unknowable channel led with everything running")
 	}
 }
+
+// PR #44'S FIX, ARRIVING ON THIS SCREEN AS A REAL VALUE.
+//
+// A device recorded as having checked in with NO instant is now the third answer rather than a Yes
+// — #44 made the invalid value unrepresentable, so `CheckedInAt(zero)` hands back the undetermined
+// state. That is the first real value in the product that exercises the member fold, and this test
+// is that fold on a value nobody in this package constructed.
+//
+// THE CHECK-IN IS PRODUCED THROUGH THE SANCTIONED API, not by building a CheckIn literal — #44's
+// fields are unexported precisely so that an invalid one cannot be written, and a fixture that
+// reached around that would be testing a state the product can no longer hold.
+func TestATimelessCheckInCloudsTheDevicesLineRatherThanReadingAsAYes(t *testing.T) {
+	sb := newSandbox(t)
+	reg, err := devices.Open(sb.getenv)
+	if err != nil {
+		t.Fatalf("could not open the device registry: %v", err)
+	}
+	if _, err := reg.Register("laptop", "machine-1", time.Now().UTC()); err != nil {
+		t.Fatalf("could not register a device: %v", err)
+	}
+
+	// A control: registered and never started, the line is a determined answer.
+	neverStarted := find(t, sb.collect(tri.No, ""), Devices)
+	if !neverStarted.State.Determined() {
+		t.Fatalf("a registered, never-started device already leaves the line %v, so the change "+
+			"below would prove nothing", neverStarted.State)
+	}
+
+	// Now the same device with a check-in recorded at no instant at all.
+	if err := reg.RecordCheckIn("laptop", time.Time{}); err != nil {
+		t.Fatalf("could not record a timeless check-in: %v", err)
+	}
+	timeless := find(t, sb.collect(tri.No, ""), Devices)
+
+	var item *Item
+	for i := range timeless.Items {
+		if timeless.Items[i].Name == "laptop" {
+			item = &timeless.Items[i]
+		}
+	}
+	if item == nil {
+		t.Fatalf("the device left the screen entirely:\n%s", sb.collect(tri.No, "").Render())
+	}
+	if item.State != Undetermined {
+		t.Errorf("a check-in recorded with no instant reads as %v on the status screen; #44 made "+
+			"that value the third answer, and this screen must not turn it back into a yes", item.State)
+	}
+	// THE FOLD, ON A REAL VALUE. The line above the member must not report a confident state.
+	if timeless.State != Undetermined {
+		t.Errorf("the devices line reports %v above a member nobody could determine", timeless.State)
+	}
+	if timeless.StateWord == neverStarted.StateWord {
+		t.Errorf("a device whose check-in could not be determined and one that never checked in "+
+			"leave the devices line reading the same: %q", timeless.StateWord)
+	}
+	// And it reaches the person, and the summary, and the invocation's outcome.
+	screen := sb.collect(tri.No, "")
+	if !screen.AnyUndetermined() {
+		t.Error("the screen does not count as having anything undetermined, so the invocation " +
+			"would report a fully-established answer over a check-in nobody could read")
+	}
+	if screen.Summary == SummaryAllWorking {
+		t.Error("the summary leads with everything running over an undetermined check-in")
+	}
+}
