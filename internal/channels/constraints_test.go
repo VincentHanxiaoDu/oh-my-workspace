@@ -112,12 +112,34 @@ func TestIngestionCannotReachTheNetworkOrTheHub(t *testing.T) {
 	// banned is everything with no local-IPC use whatever, and the narrower assertion that this
 	// package contains no listen or dial of its own is made by
 	// TestThisPackageContainsNoListenOrDial below.
+	// WHY internal/hub IS NOT IN THIS MAP ANY MORE, AND WHY THAT IS NOT A RELAXATION.
+	//
+	// It was, and the ban was right while it measured what it claimed. Then #19 landed
+	// `internal/auth`, `internal/daemon` began importing it to report sign-in state in
+	// `omw daemon status`, and `internal/auth` reads its scope vocabulary from `internal/hub` —
+	// PRD §4.5's one vocabulary. This package imports `internal/daemon` in loop.go for one reason:
+	// to register its background loop. So the graph became
+	//
+	//     channels -> daemon -> auth -> hub
+	//
+	// and a transitive ban turned red over three edges that are each correct. Nothing on the
+	// ingestion path gained the ability to reach the hub: this package contains no reference to
+	// `internal/hub` at all, and its direct imports are daemon, inbox, store and tri.
+	//
+	// A transitive import ban cannot tell "ingestion talks to the hub" from "something I register
+	// with also does bookkeeping I have nothing to do with". THIS IS THE THIRD TIME A PROXY OF THAT
+	// SHAPE HAS DECAYED HERE — the `net` package ban broke when §4.6's unix control socket arrived,
+	// and a regex enumerating Listen|Dial|DialTimeout missed ListenPacket. The lesson each time is
+	// the same: assert the property, not a stand-in that happens to correlate with it today.
+	//
+	// So the rule is now stated exactly: reaching the hub is permitted ONLY through the daemon
+	// edge, and TestIngestionReachesTheHubOnlyThroughTheDaemon below proves there is no other path.
+	// That is strictly more precise than the ban it replaces, which could not distinguish the two.
 	banned := map[string]string{
 		"net/http":   "with no hub configured and no channel connected, nothing may open a connection (criterion 11)",
 		"net/url":    "with no hub configured and no channel connected, nothing may open a connection (criterion 11)",
 		"net/rpc":    "with no hub configured and no channel connected, nothing may open a connection (criterion 11)",
 		"crypto/tls": "with no hub configured and no channel connected, nothing may open a connection (criterion 11)",
-		"github.com/VincentHanxiaoDu/oh-my-workspace/internal/hub": "a connected channel never reaches the hub as part of ingesting (criterion 11), and ingested material never leaves the machine (criterion 14)",
 	}
 	seen := 0
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
@@ -212,4 +234,94 @@ func keys(m map[string]string) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// TestIngestionReachesTheHubOnlyThroughTheDaemon is criterion 11 and criterion 14 stated as the
+// property rather than as a stand-in for it: nothing on the ingestion path may reach the hub, and
+// the ONE edge that does is this package registering its background loop with the daemon.
+//
+// It replaces a blanket transitive ban on internal/hub. That ban was correct until three separately
+// correct edges composed into a path — channels -> daemon (register the loop) -> auth (report
+// sign-in state) -> hub (the one scope vocabulary, PRD §4.5). A transitive ban cannot tell that
+// apart from ingestion actually talking to the hub, and it went red on a product doing exactly what
+// the PRD asks.
+//
+// This asserts BOTH halves, which the ban could only do for one:
+//
+//  1. this package's own imports do not include the hub, and
+//  2. with the daemon edge cut, the hub is UNREACHABLE from here — so the daemon really is the only
+//     route, rather than one route among several nobody had noticed.
+//
+// If ingestion ever gains its own path to the hub, (2) fails. That is the thing worth knowing, and
+// the old ban would have reported it identically to today's false alarm.
+func TestIngestionReachesTheHubOnlyThroughTheDaemon(t *testing.T) {
+	const (
+		prefix = "github.com/VincentHanxiaoDu/oh-my-workspace/"
+		self   = prefix + "internal/channels"
+		hub    = prefix + "internal/hub"
+		daemon = prefix + "internal/daemon"
+	)
+	goBin, err := exec.LookPath("go")
+	if err != nil {
+		t.Skipf("no go toolchain on PATH: %v", err)
+	}
+	out, err := exec.Command(goBin, "list", "-deps", "-f",
+		"{{.ImportPath}}{{range .Imports}} {{.}}{{end}}", self).CombinedOutput()
+	if err != nil {
+		t.Skipf("go list could not compute the import graph: %v\n%s", err, out)
+	}
+	graph := map[string][]string{}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		f := strings.Fields(strings.TrimSpace(line))
+		if len(f) > 0 {
+			graph[f[0]] = f[1:]
+		}
+	}
+	// THE CONTROL. An empty graph would satisfy every assertion below while proving nothing.
+	if len(graph) == 0 || len(graph[self]) == 0 {
+		t.Fatal("the import graph came back empty, so this test examined nothing")
+	}
+
+	// 1. Nothing in this package reaches for the hub itself.
+	for _, imp := range graph[self] {
+		if imp == hub {
+			t.Errorf("internal/channels imports %q directly — ingestion must not reach the hub (criteria 11, 14)", hub)
+		}
+	}
+
+	// 2. Cut the daemon edge; the hub must become unreachable.
+	seen := map[string]bool{self: true}
+	queue := []string{self}
+	for len(queue) > 0 {
+		pkg := queue[0]
+		queue = queue[1:]
+		if pkg == daemon {
+			continue // the one permitted edge: registering the background loop
+		}
+		for _, imp := range graph[pkg] {
+			if seen[imp] {
+				continue
+			}
+			seen[imp] = true
+			queue = append(queue, imp)
+		}
+	}
+	if seen[hub] {
+		t.Errorf("internal/hub is reachable from internal/channels WITHOUT going through internal/daemon — "+
+			"ingestion has acquired its own route to the hub, and ingested material must never leave the "+
+			"machine (criteria 11, 14). Reachable set size: %d", len(seen))
+	}
+	// And the daemon edge really is there, or (2) passes because the walk stopped early.
+	if !seen[daemon] && len(graph[self]) > 0 {
+		hasDaemon := false
+		for _, imp := range graph[self] {
+			if imp == daemon {
+				hasDaemon = true
+			}
+		}
+		if !hasDaemon {
+			t.Fatal("internal/channels no longer imports internal/daemon; this test's premise is stale and it is no longer checking what it claims")
+		}
+	}
+	t.Logf("hub unreachable with the daemon edge cut; %d packages walked", len(seen))
 }
