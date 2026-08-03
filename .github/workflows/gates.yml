@@ -253,11 +253,16 @@ jobs:
             # landed from its comment never being parsed. check-review.sh exits 2 for a parsed
             # refusal and 1 for everything else, which is a fact the step recorded rather than a log
             # line grepped for. The grep version did not work and shipped anyway.
-            if [ "$(cat review.rc 2>/dev/null || echo 1)" = "2" ]; then
-              desc="Changes requested by a reviewer — the review landed and refused this head"
-            else
-              desc="No current review by an independent agent — see the log"
-            fi
+            case "$(cat review.rc 2>/dev/null || echo 1)" in
+              2) desc="Changes requested by a reviewer — the review landed and refused this head" ;;
+              # A FOURTH FACT NEEDS A FOURTH SENTENCE (#84). A verdict naming a sha this repository
+              # does not know was discarded in silence, and a reader of the status could not tell
+              # "nobody refused" from "nobody refused in a way the gate happened to parse". Saying
+              # "No current review" here would be true and would send them hunting for a comment
+              # that is sitting on the pull request naming a sha nobody can find.
+              4) desc="A verdict on this PR names an unknown sha and is not in force — see the log" ;;
+              *) desc="No current review by an independent agent — see the log" ;;
+            esac
           else
             # ACCUSATION IS RESERVED FOR THE ONE OUTCOME THAT MEANS IT. `cancelled`, `skipped` and
             # an empty string all land here and hold, rather than reporting that no review exists.
