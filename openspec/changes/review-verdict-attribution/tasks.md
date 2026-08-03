@@ -60,15 +60,18 @@
       that genuine verdicts already carry the `[role]` marker and that it agrees with `Reviewed-by:`.
 - [x] 4.8 `make ci` and `./.workflow/bin/run-gates.sh` green.
 
-## 5. Not done, and deliberately
+## 5. Out of scope, and named rather than listed
 
-- [ ] 5.1 **Give the roles distinct posting identities.** Until they have them, the `[role]` marker is
-      a convention and a determined forger can type another role's. This is the half of Issue #65
-      that is not fixed, it is a repository-and-credentials decision rather than a change to this
-      script, and it is why the Issue stays open.
-- [ ] 5.2 **Decide what an unmarked verdict means.** The gate refuses and says it could not determine
-      the poster, which is a refusal to guess and not a ruling. Whoever owns the convention should
-      settle whether the marker is now mandatory on verdicts and say so in the role prompts.
-- [ ] 5.3 **`queue.sh` attributes comments the same way, one level up.** `startswith("[role]")` decides
-      what a role has already looked at, on the same unauthenticated marker. Out of scope for this
-      Issue and worth its own.
+Three things are deliberately not done here. They are **not** tasks of this change and are not
+carried as unticked boxes, because an unticked box says "unfinished work of this change" and these
+are decisions somebody else owns. They are written out in `proposal.md` under *What this does NOT
+establish* and *The undecided path*, they are in the pull request body, and **Issue #65 stays open**
+on the first of them:
+
+1. **Giving the roles distinct posting identities.** Until they have them, the `[role]` marker is a
+   convention and a determined forger can type another role's. A repository-and-credentials
+   decision, not a change to this script.
+2. **Ruling on what an unmarked verdict means.** The gate refuses and says it could not determine the
+   poster. That is a refusal to guess, not a ruling that the marker is now mandatory.
+3. **`queue.sh` attributes comments the same way, one level up** — `startswith("[role]")` decides
+   what a role has already looked at, on the same unauthenticated marker. Worth its own Issue.
