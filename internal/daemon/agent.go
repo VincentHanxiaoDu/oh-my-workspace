@@ -198,13 +198,52 @@ func reviseDraft(dir, id, body string) (agentapi.DraftView, error) {
 	return draftView(o, hub.NoteID(id)), nil
 }
 
-// draftView renders one draft. State is ALWAYS "drafted" and Published is ALWAYS false, because the
-// outbox holds exactly the unpublished (PRD §3.11, §2.3) — criterion 2.
+// draftView renders one draft. Published is ALWAYS false, because the outbox holds exactly the
+// unpublished (PRD §3.11, §2.3) — criterion 2.
+//
+// EVERYTHING ELSE ON THIS VIEW IS READ, AND A READ THAT FAILED PRODUCES NO ANSWER (Issue #101,
+// blocker 2). Two lines here used to manufacture determined answers out of failures:
+//
+//   - State was the literal `drafted`, so a draft whose `.state` file could not be opened was
+//     served as resting in the outbox while `omw outbox list` — reading the SAME file through the
+//     SAME [drafts.Outbox.StateOf] — exited 3 and said where it stood could not be read.
+//   - `err == nil &&` silently discarded the timeline's error, leaving Revisions at 0. A draft with
+//     one revision nobody could read was served as `(0 revision(s))`: a determined zero, which is
+//     the conventions note's "a (bool, error) whose error is dropped has broken it", exactly.
+//
+// So StateOf is asked and its three-valued Known is carried, and the timeline's error decides
+// between a determined count and no count at all.
 func draftView(o *drafts.Outbox, id hub.NoteID) agentapi.DraftView {
-	v := agentapi.DraftView{ID: string(id), State: agentapi.DraftedState, Published: false}
-	if vs, err := o.Timeline(id, ""); err == nil && len(vs) > 0 {
-		v.Revisions = len(vs)
-		v.Latest = vs[len(vs)-1].Body
+	v := agentapi.DraftView{ID: string(id), Published: false}
+
+	// THE SAME FUNCTION `omw outbox list` CALLS, so the two surfaces cannot come to disagree about
+	// one draft — the reason src.Tickets is wired to inbox.List rather than to a query like it.
+	r := o.StateOf(id)
+	if r.Known == tri.Yes {
+		v.State = string(r.State)
+	} else {
+		v.State = agentapi.UndeterminedState
+		v.Why = r.Why
+	}
+
+	vs, err := o.Timeline(id, "")
+	switch {
+	case err == nil:
+		n := len(vs)
+		v.Revisions = &n
+		if n > 0 {
+			v.Latest = vs[n-1].Body
+		}
+	case hub.Code(err) == drafts.ErrNoSuchDraft.Code:
+		// A DETERMINED ZERO, AND THE ONLY ONE. The outbox listed this directory and it holds no
+		// revision files: the count was established and it is none. Every other error leaves
+		// Revisions nil.
+		zero := 0
+		v.Revisions = &zero
+	default:
+		if v.Why == "" {
+			v.Why = err.Error()
+		}
 	}
 	return v
 }

@@ -87,8 +87,9 @@ func (f *fixture) listDrafts() ([]DraftView, error) {
 	for _, id := range ids {
 		d := DraftView{ID: string(id), State: DraftedState}
 		if vs, verr := f.outbox.Timeline(id, ""); verr == nil {
-			d.Revisions = len(vs)
-			d.Latest = vs[len(vs)-1].Body
+			n := len(vs)
+			d.Revisions = &n
+			d.Latest = vs[n-1].Body
 		}
 		out = append(out, d)
 	}
@@ -103,7 +104,8 @@ func (f *fixture) revise(id, body string) (DraftView, error) {
 	if err != nil {
 		return DraftView{}, err
 	}
-	return DraftView{ID: id, State: DraftedState, Revisions: len(vs), Latest: vs[len(vs)-1].Body}, nil
+	n := len(vs)
+	return DraftView{ID: id, State: DraftedState, Revisions: &n, Latest: vs[n-1].Body}, nil
 }
 
 // issue asks for a grant the way an agent does, through the surface under test.
