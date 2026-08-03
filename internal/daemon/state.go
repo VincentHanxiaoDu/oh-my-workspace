@@ -369,6 +369,17 @@ type Report struct {
 	ControlDetail string `json:"control_detail,omitempty"`
 	// ControlSocket is the path the control API listens on when it is open.
 	ControlSocket string `json:"control_socket,omitempty"`
+	// Auth is this machine's sign-in state, as one line (Issue #19 criterion 23, PRD §4.3).
+	//
+	// IT IS A STRING RATHER THAN A tri BECAUSE IT IS FOUR FACTS, NOT THREE: signed in, not signed
+	// in, no hub configured, and could not be determined. `internal/auth` owns the wording and both
+	// this report and the CLI take it from the same function — see authstate.go.
+	Auth string `json:"auth"`
+	// AuthCode is the stable machine-readable code behind Auth, so a script reading the control
+	// API tells "no hub configured" from "not signed in" without matching prose.
+	AuthCode string `json:"auth_code,omitempty"`
+	// AuthDetail says more. May be empty.
+	AuthDetail string `json:"auth_detail,omitempty"`
 	// Model is the person's model configuration, as an API surface may report it (Issue #18
 	// criterion 18).
 	//
@@ -382,10 +393,9 @@ type Report struct {
 	// channels included, every registered extension present whatever its state (Issue #21
 	// criterion 20).
 	//
-	// IT IS THE SAME []extension.Entry THE CLI PRINTS, not a projection of it. See
-	// extension_report.go: two surfaces agree because there is one renderer, not because two were
-	// written carefully on the same afternoon. An Entry has no field a credential could occupy
-	// (criterion 22).
+	// IT IS THE SAME LISTING THE CLI PRINTS, not a projection of it. See extension_report.go: two
+	// surfaces agree because there is one renderer, not because two were written carefully on the
+	// same afternoon. An Entry has no field a credential could occupy (criterion 22).
 	//
 	// It is `omitempty`-free ON PURPOSE. A machine with no extensions at all sends an empty
 	// listing, and a reader can tell that from a field the sender did not fill; dropping the key
@@ -394,18 +404,6 @@ type Report struct {
 	// IT IS A Listing AND NOT A []Entry so that "these may not be all of them" crosses the wire
 	// with them. See extension_report.go: the two surfaces disagreed because this side dropped it.
 	Extensions extension.Listing `json:"extensions"`
-
-	// Auth is this machine's sign-in state, as one line (Issue #19 criterion 23, PRD §4.3).
-	//
-	// IT IS A STRING RATHER THAN A tri BECAUSE IT IS FOUR FACTS, NOT THREE: signed in, not signed
-	// in, no hub configured, and could not be determined. `internal/auth` owns the wording and both
-	// this report and the CLI take it from the same function — see authstate.go.
-	Auth string `json:"auth"`
-	// AuthCode is the stable machine-readable code behind Auth, so a script reading the control
-	// API tells "no hub configured" from "not signed in" without matching prose.
-	AuthCode string `json:"auth_code,omitempty"`
-	// AuthDetail says more. May be empty.
-	AuthDetail string `json:"auth_detail,omitempty"`
 }
 
 // wire fills the text fields from the tri values. Called on every path that produces a Report, so
