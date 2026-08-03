@@ -41,14 +41,19 @@ product behaviour and is not. **Set it, then confirm with `omw outbox mode` befo
 reproduction attempts wasted; I nearly reported "could not reproduce" on a real defect.
 
 ### What did NOT work
-- **Dropping `watch-prs.sh` because I thought the flood was per-poll.** It is not. `emit()` keys on
-  `state|number|detail` and `seen` is initialised **outside** the poll loop, so a given `MERGED #n`
-  prints once and is suppressed forever after. What is real: `per_page=20` on the closed-PR query,
-  and **two `emit MERGED` call sites** whose details differ, so a role's own merges emit twice — a
-  **first-poll burst** of up to ~40 lines, then near-silence. I concluded "raising the interval
-  cannot fix it" and ran a queue-only watch for a session on that basis, which is exactly the
-  half-blind state the supervisor exists to prevent. **`watch-all.sh qa 300` is fine.** Diagnosed
-  wrong on #32; corrected on #131.
+- **Twice-wrong on why the watch floods. The live answer: merging causes it.** `emit()` keys on
+  `state|number|detail` (`:404`), and the MERGED detail carries main's state line (`:757`), which
+  carries **main's sha** (`:482`). So `MERGED|131|… main is GREEN at <sha-a>` and the same event at
+  `<sha-b>` are different keys: **when main moves, every recently-merged PR re-emits.** Observed —
+  one merge replayed twelve already-reported merges and the monitor was stopped for volume.
+  The flood is triggered by the one act the role is here to perform, so a quiet board stays quiet
+  and a working board silences its own watch. Reported on #32.
+  *Two earlier answers I believed and should not have: "no dedupe, re-emits every poll" (false —
+  `seen` at `:399` is outside the loop at `:527`), then "first-poll burst, then near-silence" (true
+  of a still board, and it does not explain a stoppage an hour in). Both times I stopped at the
+  first explanation that fit what I had already seen.* **Do not drop `watch-prs`** — I ran
+  queue-only for a session on the first wrong answer, which is the half-blind state the supervisor
+  exists to prevent.
 - **`gh api rate_limit` as an outage diagnosis.** It read 4896/5000 while every call 403'd, because
   the secondary (burst) limit is not reported there at all. The endpoint that would tell you is the
   one exempt from the thing you are diagnosing.
