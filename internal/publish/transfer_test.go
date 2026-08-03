@@ -83,7 +83,7 @@ func newHub(t *testing.T, opts ...ServeOption) *testHub {
 }
 
 func transfer(c *client, id hub.NoteID, addr string, scopes []hub.Scope) Result {
-	return Transfer(c.l, c.o, id, Config{HubAddr: addr, Author: author, Scopes: scopes, Title: "a title"})
+	return Transfer(c.l, c.o, id, Config{HubAddr: addr, Author: author, Scopes: scopes, Title: "a title", Gate: grantingGate{}})
 }
 
 // assertExactlyOneContainer is PRD §3.11's invariant, checked against the DISK and the HUB rather
@@ -474,7 +474,7 @@ func TestNeitherReadNorWriteAloneCanPublish(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			id := hub.NoteID("n-" + strings.Join(scopeNames(held), "-"))
 			draft(t, c, id, "body")
-			res := Transfer(c.l, c.o, id, Config{HubAddr: h.addr, Author: author, Scopes: held, Title: "t"})
+			res := Transfer(c.l, c.o, id, Config{HubAddr: h.addr, Author: author, Scopes: held, Title: "t", Gate: grantingGate{}})
 			if res.Attempt != AttemptRefused {
 				t.Fatalf("attempt = %v, want refused (detail: %s)", res.Attempt, res.Detail)
 			}
@@ -514,7 +514,7 @@ func scopeNames(s []hub.Scope) []string {
 func TestAScopeOutsideTheVocabularyIsRefusedAndPublishesNothing(t *testing.T) {
 	c, h := newClient(t), newHub(t)
 	draft(t, c, "n", "body")
-	res := Transfer(c.l, c.o, "n", Config{HubAddr: h.addr, Author: author, Scopes: []hub.Scope{"publish-notes"}, Title: "t"})
+	res := Transfer(c.l, c.o, "n", Config{HubAddr: h.addr, Author: author, Scopes: []hub.Scope{"publish-notes"}, Title: "t", Gate: grantingGate{}})
 	if res.Attempt != AttemptRefused {
 		t.Fatalf("attempt = %v, want refused", res.Attempt)
 	}
@@ -567,7 +567,7 @@ func TestWithNoHubConfiguredNoConnectionIsAttemptedAtAll(t *testing.T) {
 
 	c := newClient(t)
 	draft(t, c, "n", "body")
-	res := Transfer(c.l, c.o, "n", Config{HubAddr: "", Author: author, Scopes: publisher, Title: "t"})
+	res := Transfer(c.l, c.o, "n", Config{HubAddr: "", Author: author, Scopes: publisher, Title: "t", Gate: grantingGate{}})
 
 	if res.Attempt != AttemptNoHub {
 		t.Fatalf("attempt = %v, want no-hub (detail: %s)", res.Attempt, res.Detail)
@@ -591,7 +591,7 @@ func TestNoHubConfiguredIsDistinguishableFromARefusalAndFromAnUnreachableHub(t *
 	draft(t, c, "b", "body")
 	draft(t, c, "c", "body")
 
-	noHub := Transfer(c.l, c.o, "a", Config{HubAddr: "", Author: author, Scopes: publisher, Title: "t"})
+	noHub := Transfer(c.l, c.o, "a", Config{HubAddr: "", Author: author, Scopes: publisher, Title: "t", Gate: grantingGate{}})
 	unreachable := transfer(c, "b", socketPath(t, "dead.sock"), publisher)
 	refused := transfer(c, "c", h.addr, []hub.Scope{hub.ScopeRead})
 
@@ -620,7 +620,7 @@ func TestWithNoHubTheNoteIsUntouched(t *testing.T) {
 	draft(t, c, "n", "body")
 	before := treeOf(t, c, "n")
 
-	res := Transfer(c.l, c.o, "n", Config{HubAddr: "  ", Author: author, Scopes: publisher, Title: "t"})
+	res := Transfer(c.l, c.o, "n", Config{HubAddr: "  ", Author: author, Scopes: publisher, Title: "t", Gate: grantingGate{}})
 	if res.Attempt != AttemptNoHub {
 		t.Fatalf("attempt = %v", res.Attempt)
 	}

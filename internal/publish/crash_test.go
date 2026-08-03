@@ -77,6 +77,7 @@ func crashChild() {
 		Author:  author,
 		Scopes:  publisher,
 		Title:   "a title",
+		Gate:    grantingGate{},
 	})
 	fmt.Fprintf(os.Stderr, "child: the publish RETURNED (%v: %s) — it was supposed to be killed\n", res.Attempt, res.Detail)
 	os.Exit(13)

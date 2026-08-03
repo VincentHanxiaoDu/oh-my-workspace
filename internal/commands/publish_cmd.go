@@ -97,12 +97,12 @@ refused note, and with no hub configured nothing is opened at all.
 // CRITERION 15: the daemon is REPORTED and started by nothing here. It goes to stderr because it is
 // not the answer the person asked for, and it is said anyway because a person whose daemon is down
 // should not have to infer it.
-func publishOpen(env cli.Env, what string) (*publish.Ledger, *drafts.Outbox, int, bool) {
+func publishOpen(env cli.Env, what string) (*store.Store, *publish.Ledger, *drafts.Outbox, int, bool) {
 	path, err := store.Resolve(env.Getenv)
 	if err != nil {
 		fmt.Fprintf(env.Stderr, "omw publish %s: where your store lives %s.\n", what, tri.Undetermined)
 		fmt.Fprintf(env.Stderr, "  %v\n", err)
-		return nil, nil, cli.ExitUndetermined, false
+		return nil, nil, nil, cli.ExitUndetermined, false
 	}
 	// THE ONE LIVENESS ANSWER (Issue #41). [daemonLiveness] resolves the store the way `omw daemon
 	// status` does and asks the same function, so this command cannot become a fourth guess. It is
@@ -134,26 +134,26 @@ func publishOpen(env cli.Env, what string) (*publish.Ledger, *drafts.Outbox, int
 	case errors.Is(err, store.ErrNotFound):
 		fmt.Fprintf(env.Stderr, "omw publish %s: there is no store at %s, and %v.\n", what, path, drafts.ErrNoStore)
 		fmt.Fprintf(env.Stderr, "  Nothing was sent. Run 'omw store create' to create one on purpose.\n")
-		return nil, nil, cli.ExitFailure, false
+		return nil, nil, nil, cli.ExitFailure, false
 	case errors.Is(err, store.ErrUnreadable), errors.Is(err, store.ErrPermissionDenied):
 		fmt.Fprintf(env.Stderr, "omw publish %s: the store at %s could not be read: %v\n", what, path, err)
 		fmt.Fprintf(env.Stderr, "  An unreadable store is not an empty one, and nothing was sent.\n")
-		return nil, nil, cli.ExitUndetermined, false
+		return nil, nil, nil, cli.ExitUndetermined, false
 	default:
 		fmt.Fprintf(env.Stderr, "omw publish %s: the store at %s %s: %v\n", what, path, tri.Undetermined, err)
 		fmt.Fprintf(env.Stderr, "  Nothing was sent.\n")
-		return nil, nil, cli.ExitUndetermined, false
+		return nil, nil, nil, cli.ExitUndetermined, false
 	}
 	o, err := drafts.InStore(s)
 	if err != nil {
 		fmt.Fprintf(env.Stderr, "omw publish %s: your outbox inside %s could not be opened: %v\n", what, s.Path(), err)
-		return nil, nil, cli.ExitUndetermined, false
+		return nil, nil, nil, cli.ExitUndetermined, false
 	}
 	l, err := publish.InStore(s)
 	if err != nil {
 		fmt.Fprintf(env.Stderr, "omw publish %s: the record of your publications inside %s could not be opened: %v\n", what, s.Path(), err)
 		fmt.Fprintf(env.Stderr, "  Without it, where your notes stand is not known, so nothing was sent.\n")
-		return nil, nil, cli.ExitUndetermined, false
+		return nil, nil, nil, cli.ExitUndetermined, false
 	}
 	// FINISH WHAT A KILLED PROCESS LEFT. A note the ledger records as published may still have a
 	// draft directory behind it; this is where that gets tidied, before anything is listed or sent.
@@ -162,7 +162,7 @@ func publishOpen(env cli.Env, what string) (*publish.Ledger, *drafts.Outbox, int
 			fmt.Fprintf(env.Stderr, "reconciled: %s was published by an earlier run and its draft has now been removed from your outbox.\n", string(id))
 		}
 	}
-	return l, o, cli.Success, true
+	return s, l, o, cli.Success, true
 }
 
 // ---------------------------------------------------------------------------
@@ -174,7 +174,7 @@ func publishState(env cli.Env, args []string) int {
 		fmt.Fprintf(env.Stderr, "omw publish state: name exactly one note.\n")
 		return cli.ExitUsage
 	}
-	l, o, code, ok := publishOpen(env, "state")
+	_, l, o, code, ok := publishOpen(env, "state")
 	if !ok {
 		return code
 	}
@@ -205,7 +205,7 @@ func publishList(env cli.Env, args []string) int {
 		fmt.Fprintf(env.Stderr, "omw publish list: this takes no arguments.\n")
 		return cli.ExitUsage
 	}
-	l, o, code, ok := publishOpen(env, "list")
+	_, l, o, code, ok := publishOpen(env, "list")
 	if !ok {
 		return code
 	}
@@ -243,7 +243,7 @@ func publishNote(env cli.Env, args []string) int {
 		fmt.Fprintf(env.Stderr, "omw publish note: name exactly one draft, and optionally a title.\n")
 		return cli.ExitUsage
 	}
-	l, o, code, ok := publishOpen(env, "note")
+	s, l, o, code, ok := publishOpen(env, "note")
 	if !ok {
 		return code
 	}
@@ -253,11 +253,20 @@ func publishNote(env cli.Env, args []string) int {
 		title = string(id)
 	}
 
+	// THE GATE IS HANDED TO THE TRANSFER, NOT APPLIED HERE (product's ruling, 2026-08-03).
+	//
+	// This command does not decide whether the draft may leave and does not check the result before
+	// sending — [publish.Transfer] asks the gate itself, so a caller that forgets cannot publish
+	// anyway. The model is read through the SAME [drafts.ReadModel] and reached through the SAME
+	// [outboxReviewer] seam `omw outbox review` uses, so the two commands cannot disagree about what
+	// the person's rules said.
+	cfg := drafts.ReadModel(env.Getenv)
 	res := publish.Transfer(l, o, id, publish.Config{
 		HubAddr: strings.TrimSpace(env.Getenv(pubEnvHub)),
 		Author:  hub.PersonID(strings.TrimSpace(env.Getenv(pubEnvIdentity))),
 		Scopes:  publishScopes(env),
 		Title:   title,
+		Gate:    publish.ReviewGate{Store: s, Model: cfg, Reviewer: outboxReviewer(env, cfg)},
 	})
 
 	// THE STATE IS ALWAYS PRINTED, ON EVERY BRANCH. A person who ran publish and got an error still
@@ -301,6 +310,25 @@ func publishNote(env cli.Env, args []string) int {
 		fmt.Fprintf(env.Stderr, "omw publish note: %v (code: %s)\n", hub.ErrNoHubConfigured, res.Code)
 		fmt.Fprintf(env.Stderr, "  Set $%s to the hub's address. Your note is untouched and still drafted.\n", pubEnvHub)
 		return cli.ExitFailure
+
+	case publish.AttemptGateRefused:
+		// YOUR OWN GATE, NOT THE HUB'S. Determined, so ExitFailure — and it says which judge it was,
+		// because a person told "refused" who assumes it was the hub will go and ask the hub.
+		fmt.Fprintf(env.Stdout, "outcome: refused by your own publication gate — the hub was never asked.\n")
+		fmt.Fprintf(env.Stderr, "omw publish note: this draft did not pass your gate (code: %s)\n", res.Code)
+		fmt.Fprintf(env.Stderr, "  %s\n", res.Detail)
+		fmt.Fprintf(env.Stderr, "  Nothing was sent. Your draft is still in your outbox.\n")
+		return cli.ExitFailure
+
+	case publish.AttemptGateUndetermined:
+		// CRITERION: undetermined does NOT fall through to permitted. Its own exit code, and it is
+		// neither a pass nor a refusal — there is no rule the person broke to go looking for.
+		fmt.Fprintf(env.Stdout, "outcome: %s — whether this draft may leave your machine was not established, so it did not.\n", tri.Undetermined)
+		fmt.Fprintf(env.Stderr, "omw publish note: your publication gate %s (code: %s)\n", tri.Undetermined, res.Code)
+		fmt.Fprintf(env.Stderr, "  %s\n", res.Detail)
+		fmt.Fprintf(env.Stderr, "  This is NOT a refusal by your rules, and NOT a refusal by the hub.\n")
+		fmt.Fprintf(env.Stderr, "  Nothing was sent. Your draft is still in your outbox.\n")
+		return cli.ExitUndetermined
 
 	case publish.AttemptLocalFailure:
 		fmt.Fprintf(env.Stdout, "outcome: nothing was sent.\n")

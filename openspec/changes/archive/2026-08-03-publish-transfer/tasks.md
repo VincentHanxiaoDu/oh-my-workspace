@@ -109,3 +109,36 @@ in its own line rather than being ticked as though it were driven.
       the note in EXACTLY `drafted` with no ledger record. "Neither published nor refused" was
       satisfied by `in flight` too, which is why M3 survived the whole repository suite.
 - [x] M3 re-driven and now KILLED on both assertions
+
+## Review round 3 — product's scope ruling of 2026-08-03 (the gate moves into the transfer)
+
+- [x] Reproduced product's defect first, and worse than reported: a `review`-mode draft with no model
+      handed to `omw publish note` against a REAL, REACHABLE hub published with **exit 0** and left
+      the outbox. Product's run only reached an outbound dial against an unreachable hub.
+- [x] Confirmed by grep that `internal/publish` contained **zero** references to the mode or the gate
+- [x] `internal/publish/gate.go` — the gate lives beside `Transfer`, not in a caller. `Permission`'s
+      zero value is `PermissionUndetermined`, so every path that fails to establish an answer lands
+      on "does not publish" structurally rather than by being remembered.
+- [x] `publish.Transfer` consults the gate through `gateDecision`, the single call site, before the
+      body is read, the key is minted, the record is written or anything is dialled
+- [x] A `Config` with **no gate** is undetermined and does not publish — the fail-safe at the seam
+      where Issue #16's agent API will arrive
+- [x] `AttemptGateRefused` and `AttemptGateUndetermined` are distinct from each other and from
+      `AttemptRefused` (which means the HUB said no, and the hub is never asked here)
+- [x] All four directions driven at the package seam AND through the CLI against a real hub:
+      `review` unchecked → refused naming the mode; `auto` → publishes; `manual` → publishes;
+      checked `review` → publishes; unreachable model / non-verdict answer / undetermined model
+      configuration → `could not be determined`, and **not published**
+- [x] The gate's three answers never share an exit code (compared to each other, not to literals)
+- [x] Structural guard: exactly one function in `internal/publish` reaches a hub, it is `Transfer`,
+      and it consults the gate
+- [x] **The guard was watched go red.** A second, ungated `send` caller is planted into the package
+      and the same analysis is required to see two paths and name the planted one.
+- [x] Mutations, each grep-confirmed applied before the result was believed: undetermined falls
+      through to permitted → KILLED (4 tests); a nil gate treated as permitted → KILLED; `Transfer`
+      does not consult the gate at all → KILLED (7 tests **including the structural guard**)
+
+### Not done, and declared rather than decided
+
+- [ ] `omw outbox publish` is NOT removed — that is #38's branch and another agent has it. This
+      branch does the transfer side only. The two are paired and neither is complete alone.

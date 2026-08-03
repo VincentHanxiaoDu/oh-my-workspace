@@ -2,6 +2,7 @@ package commands
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -523,5 +524,125 @@ func TestPublishDistinguishesAnAbsentStoreFromAnUnreadableOneByExitCode(t *testi
 				t.Errorf("a present, readable store was reported as absent or unreadable:\n%s", present.all())
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The publication gate, at the command (product's ruling, 2026-08-03)
+// ---------------------------------------------------------------------------
+
+// pubMode records the person's chosen mode and rules in the store this env names.
+func pubMode(t *testing.T, env map[string]string, mode drafts.Mode) {
+	t.Helper()
+	s, err := store.Open(env[store.PathEnv])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := drafts.WriteMode(s, mode); err != nil {
+		t.Fatal(err)
+	}
+	if err := drafts.WriteRules(s, "never mention customer names"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestOmwPublishNoteRunsThePersonsGateBeforeReachingTheHub is product's defect, at the surface it
+// was found on.
+//
+// WHAT SHIPPED: `omw outbox publish` ran the review gate and `omw publish note` did not. A draft in
+// `review` mode with no model — the exact draft the client calls "NOT checked and will not be
+// published" — went to a REAL hub through `omw publish note` with exit 0 and left the outbox. The
+// gate lived in the caller and a second caller appeared not knowing about it.
+//
+// Every arm below drives a real, REACHABLE hub, so nothing but the gate can stop a publication.
+func TestOmwPublishNoteRunsThePersonsGateBeforeReachingTheHub(t *testing.T) {
+	cases := []struct {
+		name     string
+		mode     drafts.Mode
+		model    bool // is a model configured
+		answer   string
+		reviewer error
+		wantCode int
+		wantHub  int
+		wantSays string
+	}{{
+		name: "review with no model is refused and names the mode", mode: drafts.ModeReview,
+		wantCode: cli.ExitFailure, wantHub: 0, wantSays: "review",
+	}, {
+		name: "auto still publishes", mode: drafts.ModeAuto,
+		wantCode: cli.Success, wantHub: 1, wantSays: "published",
+	}, {
+		name: "manual still publishes — running this command IS the person's act", mode: drafts.ModeManual,
+		wantCode: cli.Success, wantHub: 1, wantSays: "published",
+	}, {
+		name: "a checked review draft still publishes", mode: drafts.ModeReview, model: true, answer: "pass",
+		wantCode: cli.Success, wantHub: 1, wantSays: "published",
+	}, {
+		name: "rules that refuse are a determined refusal", mode: drafts.ModeReview, model: true,
+		answer: "refuse: this names a customer", wantCode: cli.ExitFailure, wantHub: 0,
+		wantSays: "refused by your own publication gate",
+	}, {
+		name: "a model that cannot be reached is UNDETERMINED and does not publish", mode: drafts.ModeReview,
+		model: true, reviewer: errors.New("no route to host"),
+		wantCode: cli.ExitUndetermined, wantHub: 0, wantSays: "not established",
+	}, {
+		name: "an answer that is not a verdict is UNDETERMINED and does not publish", mode: drafts.ModeReview,
+		model: true, answer: "I'm afraid I can't help with that",
+		wantCode: cli.ExitUndetermined, wantHub: 0, wantSays: "not established",
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := pubWorld(t)
+			h := pubHub(t, env) // REAL and REACHABLE
+			pubMode(t, env, tc.mode)
+			if tc.model {
+				env[drafts.ModelEnv] = "a-model"
+				env[drafts.ModelKeyEnv] = "a-key"
+			}
+			withReviewer(t, tc.answer, tc.reviewer)
+			pubDraft(t, env, "n", "the body of this draft")
+
+			got := runPublishCmd(t, env, "note", "n")
+
+			if got.code != tc.wantCode {
+				t.Errorf("exit %d, want %d\n%s", got.code, tc.wantCode, got.all())
+			}
+			if n := h.Count(); n != tc.wantHub {
+				t.Errorf("the hub holds %d note(s), want %d\n%s", n, tc.wantHub, got.all())
+			}
+			if !strings.Contains(got.all(), tc.wantSays) {
+				t.Errorf("the output does not contain %q:\n%s", tc.wantSays, got.all())
+			}
+		})
+	}
+}
+
+// TestTheGatesThreeAnswersNeverShareAnExitCode is the project's rule applied to the gate: a draft
+// determined not to be publishable, a draft that may publish, and a draft whose publishability could
+// not be determined are three answers, and a script must be able to branch on them.
+func TestTheGatesThreeAnswersNeverShareAnExitCode(t *testing.T) {
+	drive := func(model bool, answer string, rerr error) int {
+		env := pubWorld(t)
+		pubHub(t, env)
+		pubMode(t, env, drafts.ModeReview)
+		if model {
+			env[drafts.ModelEnv] = "a-model"
+			env[drafts.ModelKeyEnv] = "a-key"
+		}
+		withReviewer(t, answer, rerr)
+		pubDraft(t, env, "n", "the body")
+		return runPublishCmd(t, env, "note", "n").code
+	}
+	granted := drive(true, "pass", nil)
+	refused := drive(true, "refuse: no", nil)
+	undetermined := drive(true, "", errors.New("unreachable"))
+
+	if granted == refused || granted == undetermined || refused == undetermined {
+		t.Fatalf("the gate's three answers do not have three exit codes: "+
+			"granted=%d refused=%d undetermined=%d", granted, refused, undetermined)
+	}
+	if undetermined != cli.ExitUndetermined {
+		t.Errorf("an undetermined gate exits %d, want %d", undetermined, cli.ExitUndetermined)
 	}
 }

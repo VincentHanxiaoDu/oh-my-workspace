@@ -55,6 +55,14 @@ const (
 	// AttemptLocalFailure — something on this machine stopped the attempt before it began: no such
 	// draft, an unreadable revision, a ledger entry that could not be written.
 	AttemptLocalFailure
+	// AttemptGateRefused — the PERSON'S OWN gate refused this draft. Nothing was sent and the hub
+	// never saw it. Distinct from [AttemptRefused], which means the hub was asked and said no:
+	// "your rules said no" and "the hub said no" are different facts about different judges, and a
+	// person told the wrong one goes looking in the wrong place.
+	AttemptGateRefused
+	// AttemptGateUndetermined — whether this draft may leave could not be established, so it did
+	// not. Not a refusal: there is no rule the person broke. Not a pass either.
+	AttemptGateUndetermined
 )
 
 // Result is what a caller needs to report and to exit on.
@@ -86,6 +94,10 @@ type Config struct {
 	Scopes []hub.Scope
 	// Title is the note's title on the hub.
 	Title string
+	// Gate is the person's publication gate, and [Transfer] refuses without one. See gate.go: a
+	// nil Gate is UNDETERMINED, never permitted, because "no caller told me about a gate" is not
+	// "this person has no gate".
+	Gate Gate
 }
 
 // ErrNoAuthorConfigured — nothing says who this note would be published as.
@@ -124,6 +136,24 @@ func Transfer(l *Ledger, o *drafts.Outbox, id hub.NoteID, cfg Config) Result {
 		return Result{Attempt: AttemptNoHub, Report: before, Code: hub.ErrNoHubConfigured.Code,
 			Detail: "no hub is configured on this machine, so nothing was opened and nothing was sent"}
 	}
+	// THE GATE, AND NOTHING REACHES THE HUB WITHOUT IT (product's ruling, 2026-08-03).
+	//
+	// It sits here — after "no hub configured", which opens nothing and changes nothing, and before
+	// the body is read, the key is minted, the record is written or anything is dialled. Everything
+	// below this line is the transfer; nothing below it runs unless the gate granted.
+	//
+	// A REFUSAL AND AN UNDETERMINED ANSWER ARE DIFFERENT RESULTS with different exit codes, and
+	// neither is [AttemptRefused]: that one means the HUB was asked and said no, and the hub has
+	// not been asked anything here. Conflating them would be the refused-vs-unreachable collapse
+	// again, one layer up.
+	switch d := gateDecision(cfg.Gate, o, id); d.Permission {
+	case PermissionGranted:
+	case PermissionRefused:
+		return Result{Attempt: AttemptGateRefused, Report: StateOf(l, o, id), Code: d.Code, Detail: d.Detail}
+	default:
+		return Result{Attempt: AttemptGateUndetermined, Report: StateOf(l, o, id), Code: d.Code, Detail: d.Detail}
+	}
+
 	if strings.TrimSpace(string(cfg.Author)) == "" {
 		return Result{Attempt: AttemptLocalFailure, Report: before, Code: ErrNoAuthorConfigured.Code,
 			Detail: ErrNoAuthorConfigured.Msg}
