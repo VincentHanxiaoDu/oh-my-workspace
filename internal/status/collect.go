@@ -189,6 +189,25 @@ func storeSubsystem(root string, rootErr error, opened *store.Store, now time.Ti
 			if f := opened.SyncState(); f.Describe() != "" {
 				sub.Detail += "\n  " + f.Describe()
 			}
+			// THE RECORDS ARE ASKED ABOUT, AND THAT IS ISSUE #101's BLOCKER 1 (criteria 1 and 2).
+			//
+			// Before this, "the store is working" meant only that a directory with a marker in it
+			// was present — so a store holding a record nobody could open reported [working], and
+			// the screen led with "everything you have configured is running", byte-identical to
+			// the all-readable control and exit 0. At the same moment `omw store status`, `omw
+			// inbox list`, `omw ticket list`, `omw agent tickets` and `omw diagnostics` all said
+			// the same store could not be read. This screen was the only surface that answered yes
+			// about data it never opened, and it is the one whose whole promise is "is everything
+			// running".
+			//
+			// Each kind is its own member with its own state, so [worse] carries an unreadable one
+			// up to the line and [Summarise] carries it to the summary — the precedence that was
+			// already here and was simply never reached, because nothing ever produced an
+			// undetermined member for this subsystem.
+			for _, it := range recordItems(opened) {
+				sub.Items = append(sub.Items, it)
+				sub.State = worse(sub.State, it.State)
+			}
 		}
 	case tri.No:
 		sub.State = NotConfigured
@@ -199,6 +218,57 @@ func storeSubsystem(root string, rootErr error, opened *store.Store, now time.Ti
 		sub.Detail = "a store may or may not be present at " + root + "; it could not be inspected"
 	}
 	return sub
+}
+
+// recordItems is the store's own inventory, one member per kind of record.
+//
+// IT ASKS THE SAME TWO FUNCTIONS `omw store status` ASKS — [store.Store.Kinds] and
+// [store.Store.List] — rather than walking the directories itself. Criterion 2 says the two
+// surfaces must not disagree about one store, and the way that is true is that they read it the
+// same way; a second walk here would be a second answer that agrees today.
+//
+// A KIND THAT COULD NOT BE LISTED IS UNDETERMINED AND IS NEVER A COUNT. An unreadable record is
+// not an absent one, so no branch here produces a number out of a read that failed — that is
+// criterion 6, and it is the third place on this board where an unreadable thing became a
+// determined zero (#67, #69).
+func recordItems(s *store.Store) []Item {
+	kinds, err := s.Kinds()
+	if err != nil {
+		return []Item{{
+			Name:  "record inventory",
+			State: Undetermined,
+			Detail: "what this store holds " + tri.Undetermined.String() + ": " + err.Error() +
+				". This is NOT a store with nothing in it — omw store status",
+		}}
+	}
+	if len(kinds) == 0 {
+		// EMPTY, AND DETERMINED. `omw store status` says the same thing in its own words; both are
+		// saying that the question was asked and the answer is nothing.
+		return []Item{{
+			Name:   "record inventory",
+			State:  Working,
+			Detail: "no records have been written yet; the store is empty, and that is an established answer",
+		}}
+	}
+	out := make([]Item, 0, len(kinds))
+	for _, k := range kinds {
+		recs, lerr := s.List(k)
+		if lerr != nil {
+			out = append(out, Item{
+				Name:  "records of kind " + string(k),
+				State: Undetermined,
+				Detail: "how many records of this kind are here " + tri.Undetermined.String() + ": " +
+					lerr.Error() + ". An unreadable record is not an absent one, so nothing here is counted",
+			})
+			continue
+		}
+		out = append(out, Item{
+			Name:   "records of kind " + string(k),
+			State:  Working,
+			Detail: fmt.Sprintf("%d record(s), every one of them readable", len(recs)),
+		})
+	}
+	return out
 }
 
 // encryptionItem is §4.1's three-valued answer, carried onto the status screen without collapsing
