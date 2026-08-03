@@ -32,6 +32,14 @@ type Item struct {
 // established without opening anything (§4.2), and criterion 23 requires it render as itself.
 var ErrNoHubConfigured = errors.New("no hub is configured, and this subject is supplied by the hub")
 
+// ErrNoProducer means nothing in this build writes activity for the subject, so its emptiness is
+// not a fact about the period — it is a fact about this client (Issue #67, Blocker 1).
+//
+// IT IS NOT AN EMPTINESS. `omw report run daily` on a machine with a watched project and a commit
+// eleven minutes old answered "no activity in this period" and exited 0, because the reader was
+// correct and the producer was never built. A subject nobody observes has not had a quiet day.
+var ErrNoProducer = errors.New("nothing in this build writes activity for this subject, so whether there was any could not be determined")
+
 // Source is where a report's activity comes from.
 //
 // AN ERROR MEANS UNDETERMINED. A source that cannot read its data returns an error and the subject
@@ -105,6 +113,24 @@ func (s StoreSource) Activity(subject string) ([]Item, error) {
 				it.Subject = path
 			}
 			items = append(items, it)
+		}
+	}
+	if len(items) == 0 {
+		// ISSUE #67, BLOCKER 1. Nothing under this subject — and the answer to "was it a quiet
+		// period" depends entirely on whether anything in this build would have written to it.
+		//
+		// WITH A PRODUCER, an empty result is a determined, successful answer: something looked and
+		// there was nothing. WITHOUT ONE, the emptiness is a fact about this client and not about
+		// the period, and reporting it as a quiet day is a confident negative derived from never
+		// having looked. That is the exact shape §4.3 forbids, and it shipped: `omw report run
+		// daily` said "no activity in this period" for `git` on a machine with a watched project
+		// and a commit eleven minutes old, and exited 0.
+		//
+		// RECORDS PRESENT STILL WIN, which is why this is checked here and not before the read. If
+		// something did write activity — an ingester that lands tomorrow, an import — the report is
+		// about what is there, not about what the catalog believes.
+		if sub, ok := LookupSubject(subject); ok && sub.Producer == "" {
+			return nil, ErrNoProducer
 		}
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].ID < items[j].ID })

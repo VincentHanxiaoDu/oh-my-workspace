@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/drafts"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/health"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/store"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri"
@@ -43,9 +44,20 @@ func seededStore(t *testing.T) string {
 		}
 	}
 	put(KindTicket, "t1", "subject line\n"+secretTicketBody+"\n")
-	put(KindDraft, "d1", "draft heading\n"+secretDraftBody+"\n")
 	put(KindMessage, "m1", "from a channel\n"+secretMessageBody+"\n")
 	put(KindModelCredential, "key", `{"provider":"acme","api_key":"`+secretModelKey+`"}`)
+
+	// THE DRAFT IS SEEDED THE WAY THE PRODUCT WRITES ONE (Issue #67). It used to be put into a
+	// store kind called "draft" that nothing in the product has ever written to, which made every
+	// assertion below about drafts an assertion about a fixture. `omw outbox draft` revises a draft
+	// in the outbox inside the store, so that is what this does.
+	o, err := drafts.InStore(s)
+	if err != nil {
+		t.Fatalf("opening the outbox inside the seeded store: %v", err)
+	}
+	if _, err := o.Revise("d1", "draft heading\n"+secretDraftBody+"\n"); err != nil {
+		t.Fatalf("seeding a draft: %v", err)
+	}
 	return root
 }
 
@@ -626,12 +638,26 @@ func TestPlatformIsRecordedAndTheMissingDeviceLabelIsNamed(t *testing.T) {
 // ---------------------------------------------------------------------------------------------
 
 func TestTheOptInReachesOnlyBodies(t *testing.T) {
-	if len(bodyKinds) != 3 {
-		t.Fatalf("the opt-in reaches %d kinds, want the three body kinds: %v", len(bodyKinds), bodyKinds)
+	if len(bodySources) != 3 {
+		t.Fatalf("the opt-in reaches %d sources, want the three body categories: %v", len(bodySources), bodySources)
 	}
-	for cat, kind := range bodyKinds {
-		if kind == KindModelCredential {
-			t.Errorf("category %s would disclose the model credential on opt-in", cat)
+	// THE CREDENTIAL IS NOT REACHABLE FROM ANY OF THEM. Since Issue #67 a body source is a
+	// function rather than a kind, so this is driven rather than compared: each source is run
+	// against a store holding a real key, with bodies asked for, and none of them may return it.
+	root := seededStore(t)
+	s, err := store.Open(root)
+	if err != nil {
+		t.Fatalf("opening the seeded store: %v", err)
+	}
+	for cat, src := range bodySources {
+		recs, err := src.List(s, true)
+		if err != nil {
+			continue // an undetermined source discloses nothing, which is what this asserts
+		}
+		for _, r := range recs {
+			if strings.Contains(r.Body, secretModelKey) {
+				t.Errorf("category %s would disclose the model credential on opt-in", cat)
+			}
 		}
 	}
 }
