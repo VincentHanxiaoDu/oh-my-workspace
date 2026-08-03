@@ -47,6 +47,12 @@ the next install deleted it — 2 insertions, 24 deletions, no warning (#58).
 whose most recent commit is one of ours rather than a refresh. It fails on a name, not a count, so
 you can act on it.
 
+**It cannot answer on CI, and it says so rather than passing.** The job that runs `make ci` checks
+out at depth 1, so the history it needs is not there and it *skips with a reason*. **Run `make ci`
+locally in a full clone** — a green CI is not evidence this check looked. Anything else you add here
+that walks `git log` has the same problem; probe `git rev-parse --is-shallow-repository` and skip,
+do not assume.
+
 ## Conventions a newcomer gets wrong here
 
 - **`could not determine` and `determined to be nothing` are different values** — a product rule,

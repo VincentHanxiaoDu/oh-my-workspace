@@ -68,6 +68,35 @@ func (c fwCommit) why() string {
 	return "Agent: " + c.role + ", which is not the installing role"
 }
 
+// shallowReason PROBES whether the repository's history is truncated, and returns a stated reason
+// when it is. It does not fail: a shallow clone is not a broken repository, it is a repository
+// this check CANNOT ANSWER IN.
+//
+// This is not hypothetical either. The `build` job in gates.yml — the one that runs `make ci`, and
+// so the one that runs this test — checks out at the default depth of 1, while the jobs that read a
+// commit range set `fetch-depth: 0`. Under depth 1 the walk below returns exactly one commit, every
+// file's "last touch" is that commit, and the check answers confidently from a history it cannot
+// see. It reported a local fix that was not one and called a live declaration stale.
+//
+// Deepening the CI checkout would be the obvious fix and is the wrong one: gates.yml is
+// framework-owned and replaced wholesale by the next install, which is Issue #58 itself. A fix for
+// #58 that lives in a file #58 says will be reverted is not a fix. So the test probes its
+// environment rather than requiring one.
+func shallowReason(t *testing.T, root string) string {
+	t.Helper()
+	out, err := exec.Command("git", "-C", root, "rev-parse", "--is-shallow-repository").Output()
+	if err != nil {
+		return fmt.Sprintf("git could not say whether this repository is shallow (%v)", err)
+	}
+	if strings.TrimSpace(string(out)) != "false" {
+		depth := len(strings.Fields(gitOut(t, root, "log", "--format=%H")))
+		return fmt.Sprintf("this is a SHALLOW clone (%d commit(s) reachable). Whether a "+
+			"framework-owned file carries a local commit is a fact about history, and the history "+
+			"is not here", depth)
+	}
+	return ""
+}
+
 // gitOut runs git in dir and fails the test if it cannot.
 func gitOut(t *testing.T, dir string, args ...string) string {
 	t.Helper()
@@ -171,17 +200,48 @@ func TestNoUndeclaredLocalCommitsOnFrameworkOwnedPaths(t *testing.T) {
 			"commit COULD NOT BE DETERMINED here — this is not a pass", root)
 	}
 
+	// COULD NOT DETERMINE IS NOT DETERMINED TO BE NOTHING, and this is where the distinction bites.
+	// A truncated history yields a small, plausible, WRONG answer rather than an empty one, so the
+	// zero-commit control below never fires and the check reasons on with confidence it has not
+	// earned. Skipped with a reason, which is a third value — not a pass.
+	if why := shallowReason(t, root); why != "" {
+		t.Skipf("this check COULD NOT DETERMINE anything here, and is not passing: %s.\n"+
+			"Run it in a full clone: `git clone <repo>` without --depth, or `git fetch "+
+			"--unshallow`. If you need it on CI, the checkout that runs `make ci` needs "+
+			"`fetch-depth: 0` — and that is a change to agent-dev-flow's gates.yml, not to this "+
+			"repository, for the reason this file exists.", why)
+	}
+
 	commits := frameworkCommits(t, root)
 
-	// THE CONTROL. A walk that found nothing has not shown that nothing is wrong; it has shown
-	// that it looked in the wrong place — a renamed framework directory, a shallow clone, a
-	// pathspec that stopped matching. A check that examined nothing must not report success.
+	// THE CONTROL, for the failures a depth probe does not cover: a renamed framework directory or
+	// a pathspec that stopped matching. A walk that found nothing has not shown that nothing is
+	// wrong, it has shown that it looked in the wrong place. A check that examined nothing must not
+	// report success.
 	if len(commits) == 0 {
 		t.Fatalf("no commit in this repository's history touches any of %v, which cannot be true "+
 			"of a repository that has agent-dev-flow installed. This check examined nothing, so "+
-			"it is red rather than green: fix the paths or the clone depth.", frameworkOwned)
+			"it is red rather than green: fix the paths.", frameworkOwned)
 	}
 	t.Logf("%d commits touch %v", len(commits), frameworkOwned)
+
+	// THE FLOOR. The framework got here somehow: a repository with agent-dev-flow installed has at
+	// least one commit by the installing role, the install itself. A walk that sees only local
+	// commits is not seeing the whole history, whatever git says about shallowness — and it would
+	// report every framework-owned file as a local fix, which is the loudest possible way to be
+	// wrong.
+	refreshes := 0
+	for _, c := range commits {
+		if !c.local() {
+			refreshes++
+		}
+	}
+	if refreshes == 0 {
+		t.Fatalf("none of the %d commits over %v is by the installing role %q, so the install "+
+			"itself is not in view. This history is truncated or the trailer convention has "+
+			"changed; either way the classification below would be wrong, so this is red.",
+			len(commits), frameworkOwned, installingRole)
+	}
 
 	tracked := map[string]bool{}
 	for _, f := range strings.Fields(gitOut(t, root, append([]string{"ls-files", "--"}, frameworkOwned...)...)) {
