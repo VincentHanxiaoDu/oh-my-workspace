@@ -80,7 +80,15 @@ self_test() {
   printf '#!/usr/bin/env bash\necho "boom" >&2\nexit 1\n' > "$ftmp/queue.sh"; chmod +x "$ftmp/queue.sh"
   cp "${BASH_SOURCE[0]}" "$ftmp/watch-queue.sh"
   ( bash "$ftmp/watch-queue.sh" dev 1 >"$ftmp/out" 2>&1 & echo $! > "$ftmp/pid" )
-  sleep 3
+  # WAITS FOR THE SECOND EMIT RATHER THAN SLEEPING THREE SECONDS AND HOPING. Same race, same fix and
+  # same reason as the announce-once arm below: on a busy machine one poll can outlast the whole
+  # window, and this arm then reported that a working watch had stopped after one failure. A red
+  # that means nothing costs a role a round to disprove.
+  local fwaited=0
+  while [ "$fwaited" -lt 30 ]; do
+    [ "$(grep -c '^LOOKUP FAILED' "$ftmp/out" 2>/dev/null || echo 0)" -ge 2 ] && break
+    sleep 1; fwaited=$((fwaited + 1))
+  done
   kill "$(cat "$ftmp/pid")" 2>/dev/null || true
   fout=$(cat "$ftmp/out" 2>/dev/null || echo "")
   n_fail=$(printf '%s\n' "$fout" | grep -c '^LOOKUP FAILED' || true)
@@ -108,7 +116,17 @@ STUB
   chmod +x "$ltmp/queue.sh"
   cp "${BASH_SOURCE[0]}" "$ltmp/watch-queue.sh"
   ( bash "$ltmp/watch-queue.sh" dev 1 >"$ltmp/out" 2>&1 & echo $! > "$ltmp/pid" )
-  sleep 3
+  # WAITS FOR THE OUTCOME INSTEAD OF SLEEPING FOR A GUESS. Measured: --self-test failed once and
+  # then passed six consecutive times, and the role that hit the red spent a round establishing that
+  # its own guard was flaky rather than that anything was wrong. A poll can outlast a fixed window on
+  # a busy machine; a guard that fails at random is close to no guard at all, because every red it
+  # produces has to be investigated and most of them mean nothing. This still fails in bounded time
+  # when the behaviour is genuinely broken.
+  local lwaited=0
+  while [ "$lwaited" -lt 30 ]; do
+    grep -q "operation timed out" "$ltmp/out" 2>/dev/null && break
+    sleep 1; lwaited=$((lwaited + 1))
+  done
   kill "$(cat "$ltmp/pid")" 2>/dev/null || true
   lout=$(cat "$ltmp/out" 2>/dev/null || echo "")
   rm -rf "$ltmp"
@@ -148,10 +166,13 @@ STUB
   # defect that usually runs the other way.
   local tmp out n
   tmp=$(mktemp -d)
+  # THE COUNTER LIVES IN THIS RUN'S OWN DIRECTORY. It was a fixed path in TMPDIR, so two self-tests
+  # running at once — which `make ci` and a role checking the same script both do — shared one
+  # counter and each saw the other's polls.
   cat > "$tmp/queue.sh" <<'STUB'
 #!/usr/bin/env bash
 # Stub: two items on the first call, three on every call after.
-n_file="${TMPDIR:-/tmp}/wq-selftest-count"
+n_file="$(dirname "$0")/wq-selftest-count"
 c=$(cat "$n_file" 2>/dev/null || echo 0); echo $((c+1)) > "$n_file"
 printf '  #1  a\n  #2  b\n'
 [ "$c" -ge 1 ] && printf '  #3  c\n'
@@ -159,16 +180,29 @@ exit 0
 STUB
   chmod +x "$tmp/queue.sh"
   cp "${BASH_SOURCE[0]}" "$tmp/watch-queue.sh"
-  rm -f "${TMPDIR:-/tmp}/wq-selftest-count"
-  # Two polls at a 1s interval, then killed. Three distinct items must produce exactly three lines.
+  # WAIT FOR THE OUTCOME, DO NOT SLEEP FOR A GUESS.
+  #
+  # This arm slept three seconds and asserted on whatever had arrived. That is a race against the
+  # machine, and it lost: measured on a live board, `--self-test` failed once and then passed six
+  # consecutive times, and the role that hit the red spent a round establishing that its own guard
+  # was flaky rather than that anything was wrong. **A guard that fails at random is close to no
+  # guard at all** — every red it produces has to be investigated and most of them mean nothing.
+  #
+  # Each poll calls `gh-budget.sh check`, which can touch the network, so one poll can take longer
+  # than the whole window. Waiting for the condition with a generous ceiling still fails in bounded
+  # time when the emit loop is genuinely broken — it just stops failing when the machine is busy.
   # KILLED PORTABLY: `timeout` is GNU coreutils and is absent on a stock macOS, where this ran and
   # reported `timeout: command not found` — correctly failing rather than passing, which is the only
   # reason it was noticed.
   ( REPO=x/y bash "$tmp/watch-queue.sh" dev 1 >"$tmp/out" 2>&1 & echo $! > "$tmp/pid" )
-  sleep 3
+  local waited=0
+  while [ "$waited" -lt 30 ]; do
+    [ "$(grep -c '^NEW ' "$tmp/out" 2>/dev/null || echo 0)" -ge 3 ] && break
+    sleep 1; waited=$((waited + 1))
+  done
   kill "$(cat "$tmp/pid")" 2>/dev/null || true
   out=$(cat "$tmp/out" 2>/dev/null || echo "")
-  rm -rf "$tmp" "${TMPDIR:-/tmp}/wq-selftest-count"
+  rm -rf "$tmp"
   n=$(printf '%s\n' "$out" | grep -c '^NEW ' || true)
   [ "$n" -eq 3 ] \
     || { echo "SELF-TEST FAIL: expected 3 NEW lines across repeated polls of a queue holding 3 distinct items, got $n: $out" >&2; rc=1; }
