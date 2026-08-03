@@ -649,42 +649,34 @@ func waitUntil(t *testing.T, limit time.Duration, cond func() bool, what string)
 	t.Fatalf("timed out after %v waiting for %s", limit, what)
 }
 
-// CRITERION 11, against the seam that now exists: only the daemon's own run command may start
-// polling. A listing that could start it would be the daemon starting itself on a person's behalf.
+// CRITERION 4's OTHER HALF: the polling is REGISTERED as daemon background work, so it happens
+// because the daemon is running rather than because a command was typed.
 //
-// STRUCTURAL, because the behavioural version cannot distinguish "did not start polling" from
-// "started polling and it did nothing yet". It fails when the next surface reaches for the seam.
-func TestOnlyTheDaemonRunCommandStartsProjectPolling(t *testing.T) {
-	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, ".", nil, parser.ParseComments)
-	if err != nil {
-		t.Fatalf("parsing this package: %v", err)
-	}
-	callers := map[string]int{}
-	for _, pkg := range pkgs {
-		for name, file := range pkg.Files {
-			if strings.HasSuffix(name, "_test.go") {
-				continue
-			}
-			var fn string
-			ast.Inspect(file, func(n ast.Node) bool {
-				if d, ok := n.(*ast.FuncDecl); ok {
-					fn = d.Name.Name
-				}
-				call, ok := n.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "startProjectsPolling" {
-					callers[fn]++
-				}
-				return true
-			})
+// It replaces a structural test that asserted only `daemonRun` called an interim helper in this
+// package. That helper is gone: Issue #6's registry landed and the registration moved into
+// internal/projects' own init, where the daemon imports nothing of it. The property worth asserting
+// is now the registration itself, and that nothing else can trigger a pass.
+func TestProjectPollingIsRegisteredAsDaemonBackgroundWork(t *testing.T) {
+	var found *daemon.Background
+	for _, b := range daemon.Backgrounds() {
+		if b.Name == projects.BackgroundName {
+			bb := b
+			found = &bb
 		}
 	}
-	if len(callers) != 1 || callers["daemonRun"] != 1 {
-		t.Errorf("startProjectsPolling is called from %v; it may be called only from daemonRun.\n"+
-			"  Anything else starts the daemon's work on a person's behalf (criterion 11, PRD §4.2).",
-			callers)
+	if found == nil {
+		var names []string
+		for _, b := range daemon.Backgrounds() {
+			names = append(names, b.Name)
+		}
+		t.Fatalf("projects are not registered as daemon background work, so a running daemon does "+
+			"not watch them (criterion 4). Registered: %v", names)
+	}
+	if found.Interval != projects.PollInterval {
+		t.Errorf("registered interval is %v, want %v — PRD §3.6's every couple of seconds",
+			found.Interval, projects.PollInterval)
+	}
+	if found.Run == nil {
+		t.Error("the registration has nothing to run")
 	}
 }

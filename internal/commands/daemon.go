@@ -301,13 +301,7 @@ func daemonRun(env cli.Env, args []string) int {
 		d.Stop()
 	}()
 
-	// PROJECTS ARE WATCHED FOR AS LONG AS THIS RUN LASTS (Issue #4 criterion 4). One line, and it
-	// moves to daemon.RegisterBackground when Issue #6 lands that registry — see
-	// projects_daemon.go, which explains why it is here and not there yet.
-	stopProjects := startProjectsPolling(path, env.Getenv, env.Stderr)
-
 	serveErr := d.Serve()
-	stopProjects()
 	d.Close()
 	if serveErr != nil {
 		fmt.Fprintf(env.Stderr, "omw daemon run: stopped because it could not write to the store: %v\n", serveErr)

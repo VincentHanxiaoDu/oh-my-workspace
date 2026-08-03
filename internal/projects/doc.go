@@ -92,8 +92,7 @@
 //     prove agreement with nothing. The remaining half is a test that runs both real surfaces, and
 //     it belongs with whichever Issue adds projects to the control API.
 //
-// The daemon side of the contract is one call: a daemon that watches projects runs [Run] against the
-// device's store, which polls on a [PollInterval] ticker. It needs nothing else from this package.
-// That call is made today from internal/commands/projects_daemon.go, which explains why it lives
-// there and why it should move to daemon.RegisterBackground as soon as that registry is on main.
+// The daemon side of the contract is a registration, not a call: [PollPass] is registered as daemon
+// background work from this package's own init, so the daemon runs it every [PollInterval] and
+// imports nothing of this package. See loop.go.
 package projects
