@@ -234,14 +234,45 @@ reviews_waiting() {
     # THE SAME DERIVATION THE GATE USES, from the same file — see pr-authors.sh. If this queue
     # offers you a pull request, the gate will accept your verdict on it; that promise is only
     # keepable while there is one implementation of independence.
-    authors=$("$(dirname "${BASH_SOURCE[0]}")/pr-authors.sh" --pr "$num" 2>/dev/null || echo "")
+    #
+    # AND `2>/dev/null || echo ""` IS HOW THAT PROMISE BROKE (Issue #79). It converted a FAILED
+    # lookup into an empty author set — stderr discarded, non-zero exit swallowed. An empty set has
+    # two documented meanings below and both are answers; this was a third and it is not. Under a
+    # SECONDARY rate limit, which fails intermittently, `--pr` failed while the `--all-trailers`
+    # follow-up succeeded, so the both-empty guard did not fire, `grep -qx "$role"` matched nothing
+    # against the empty string, and the pull request was offered to EVERY role including its author.
+    # Observed: `#46 ... run /review-pr 46   (built by )` on a branch carrying nine `Agent: dev`
+    # trailers. The gate does not fail there — it re-derives from git — so it refused the verdict
+    # after the review had been done.
+    #
+    # EXIT, DO NOT SKIP THE PULL REQUEST. Silently dropping it is the other half of the same defect:
+    # the role reads `(none)` and concludes it has no reviews waiting, which is a wrong answer with a
+    # zero exit code, and this whole file exists to prevent that.
+    authors=$("$(dirname "${BASH_SOURCE[0]}")/pr-authors.sh" --pr "$num") || {
+      echo "::error::who built pull request #$num could not be determined, so the queue cannot say" >&2
+      echo "  whether you are independent of it. This is a LOOKUP FAILURE and NOT a statement that" >&2
+      echo "  nobody authored it, and NOT a statement that you have no reviews waiting. Retry, or" >&2
+      echo "  report the outage — a secondary rate limit clears on its own; retrying in a loop" >&2
+      echo "  deepens it." >&2
+      exit 1
+    }
     # NO TRAILER MEANS INDEPENDENCE CANNOT BE ESTABLISHED, WHICH IS NOT THE SAME AS "YOURS TO DO".
     # The naming gate reports that defect with its remedy and it is not this queue's to duplicate.
     # EMPTY MEANS ONE OF TWO THINGS. No trailers at all is a commit defect the naming gate reports
     # and not work to offer; trailers with every commit spec-only means nobody authored product
     # judgement, so every role is independent and this pull request is waiting on ALL of them.
     if [ -z "$authors" ]; then
-      [ -n "$("$(dirname "${BASH_SOURCE[0]}")/pr-authors.sh" --pr "$num" --all-trailers 2>/dev/null || echo "")" ] || continue
+      # THE SECOND CALL SWALLOWED IT TOO, and a fix applied to one of a pair is how this project's
+      # defects come back. Same rule: a failure here means the distinction between "no trailers at
+      # all" and "all spec-only" was not made, and neither branch below may be taken on it.
+      local trailers
+      trailers=$("$(dirname "${BASH_SOURCE[0]}")/pr-authors.sh" --pr "$num" --all-trailers) || {
+        echo "::error::the commit trailers of pull request #$num could not be read, so the queue" >&2
+        echo "  cannot tell 'no commit carries an Agent: trailer' from 'every commit was spec-only'." >&2
+        echo "  This is a LOOKUP FAILURE and NOT a statement that you have no reviews waiting." >&2
+        exit 1
+      }
+      [ -n "$trailers" ] || continue
     fi
     if printf '%s\n' "$authors" | grep -qx "$role"; then continue; fi
     rst=$(api "repos/$REPO/commits/$sha/status" \
@@ -511,6 +542,41 @@ STUB
     *"/review-pr 9"*) : ;;
     *) echo "SELF-TEST FAIL: a verdict naming a DIFFERENT head suppressed this one — a stale review strands the head it does not describe (got: $out)" >&2; rc=1 ;;
   esac
+  # AND A FAILED AUTHOR LOOKUP MUST OFFER NOTHING AND SAY SO (Issue #79). Narrowed to ONE endpoint
+  # on purpose: a stub that fails everything cannot test this, because the queue dies on the first
+  # failed call and the arm goes green whether or not this path handles anything. Here the commit
+  # list of #9 fails on its FIRST call and succeeds after — which is what a SECONDARY rate limit
+  # does — so `--pr` comes back empty, `--all-trailers` succeeds, the both-empty guard does not
+  # fire, and the empty set matches no role. Measured before the fix: `dev` was offered its own
+  # pull request with `(built by )`.
+  local tmp3
+  tmp3=$(mktemp -d)
+  cat > "$tmp3/gh" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *"pulls/9/commits"*)
+    n=0; [ -f "$TMP3/calls" ] && n=$(cat "$TMP3/calls"); n=$((n+1)); printf '%s' "$n" > "$TMP3/calls"
+    [ "$n" = 1 ] && { echo 'You have exceeded a secondary rate limit' >&2; exit 1; }
+    printf 'c9\tAgent: dev\n' ;;
+  *"/commits/c9"*)      echo 'internal/a.go' ;;
+  *"pulls?state=open"*) echo '[{"number":9,"head":{"ref":"dev/feat/9-x","sha":"cafe"},"title":"feat(x): y"}]' ;;
+  *"/status"*)          echo '{"statuses":[]}' ;;
+  *)                    echo '[]' ;;
+esac
+STUB
+  chmod +x "$tmp3/gh"
+  local arc=0
+  out=$( PATH="$tmp3:$PATH" TMP3="$tmp3" REPO=x/y bash "${BASH_SOURCE[0]}" dev 2>&1 ) || arc=$?
+  [ "$arc" -ne 0 ] || {
+    echo "SELF-TEST FAIL: the author lookup failed and the queue exited 0 — 'could not determine who built this' and 'determined that nobody did' have collapsed, and an agent reads a zero exit as an answer" >&2; rc=1; }
+  case "$out" in
+    *"/review-pr 9"*) echo "SELF-TEST FAIL: a failed author lookup offered this pull request to dev, which authored every commit in it. The gate re-derives authorship from git at verdict time, where the lookup does not fail, so it refuses the verdict the role did the whole review to produce (got: $out)" >&2; rc=1 ;;
+  esac
+  case "$out" in
+    *"::error::"*) : ;;
+    *) echo "SELF-TEST FAIL: the author lookup failed and nothing was printed — a non-zero exit with no reason reads as a bug in the queue rather than an outage (got: $out)" >&2; rc=1 ;;
+  esac
+  rm -rf "$tmp3"
   rm -rf "$tmp"
 
   # THE OWNER'S QUEUE MUST NOT REPORT SILENCE AS A GREEN LIGHT. **This is the whole reason the arm
@@ -562,7 +628,7 @@ STUB
   esac
   rm -rf "$otmp"
 
-  [ "$rc" -eq 0 ] && echo "self-test passed: unknown roles refuse, every role has a queue, a failed lookup is not an empty queue, a pull request awaiting a verdict reaches a role that can give it and no role that cannot, and a verdict already posted does not come back to its author while remaining open to every other role, and the owner is told UNDETERMINED rather than being handed silence as a green light"
+  [ "$rc" -eq 0 ] && echo "self-test passed: unknown roles refuse, every role has a queue, a failed lookup is not an empty queue, a pull request awaiting a verdict reaches a role that can give it and no role that cannot, a verdict already posted does not come back to its author while remaining open to every other role, a failed author lookup offers nothing and says why, and the owner is told UNDETERMINED rather than being handed silence as a green light"
   return $rc
 }
 
