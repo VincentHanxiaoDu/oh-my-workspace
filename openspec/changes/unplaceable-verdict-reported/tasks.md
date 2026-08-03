@@ -60,7 +60,24 @@
       single-quoted one a backslash-backtick is an invalid JSON escape. Same character, opposite
       escaping, one line apart — both spellings are now present deliberately and commented.
 
-## 6. Not part of this change
+## 6. The #98 review's blocker: three outputs for four states
+
+- [x] 6.1 Assert first that a stale verdict and an absent one are byte-identical, and watch it go red.
+- [x] 6.2 Emit a `::notice::` on the path that already computes the non-head shas, carrying the
+      poster so it can say WHOSE verdict went stale, plus the sha and the head to re-post against.
+- [x] 6.3 Move NO exit code and change nothing about merge-eligibility. Asserted, not assumed.
+- [x] 6.4 A notice and not an error: case 2 is the loud one, and announcing every ordinary post-push
+      staleness at that volume would bury it. Pinned by an arm that fails if it becomes an error.
+- [x] 6.5 Keep case 2 distinct from both, and keep case 3 — a verdict naming the correct head —
+      completely silent.
+- [x] 6.6 A stale verdict alongside a current approve still passes AND is still announced, so the
+      notice cannot have been wired only into the failing path.
+- [x] 6.7 Matching self-test arms, so the upstream patch carries its own proof.
+- [x] 6.8 Two mutations, each confirmed by `git diff` against a CLEAN tree — the fix was committed
+      first, so the diff shows the mutation and nothing else — and each judged on the FULL
+      `internal/machinery` suite rather than a filtered `-run`.
+
+## 7. Not part of this change
 
 Sweeping the board for other verdicts of this shape. The Issue asks for it and notes that by
 construction nobody has noticed any of them. It is an audit of the past and it does not change the

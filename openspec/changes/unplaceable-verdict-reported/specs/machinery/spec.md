@@ -24,8 +24,19 @@ takes precedence over an unplaceable verdict, and the unplaceable verdict SHALL 
 
 #### Scenario: A verdict names an earlier commit
 - **WHEN** a verdict names a commit the repository holds that is not the head
-- **THEN** the gate treats it as an ordinary stale review, says nothing about it, and the head's own
-  review decides the outcome
+- **THEN** the gate reports it as an ordinary stale review, naming who posted it, the sha it names
+  and the current head, without changing the outcome or the exit code, and the head's own review
+  decides whether the pull request passes
+
+#### Scenario: A stale verdict and an absent review
+- **WHEN** the only verdict for a pull request names a commit the repository holds that is not the
+  head, and separately when no verdict exists at all
+- **THEN** the two do not produce the same output, because one instructs a reviewer who has already
+  looked to re-post and the other says nobody has looked
+
+#### Scenario: A verdict names the current head
+- **WHEN** a verdict names the head exactly
+- **THEN** the gate reports nothing about its sha
 
 #### Scenario: An unplaceable verdict is the only verdict
 - **WHEN** the only verdict on a pull request names a sha no object exists at
