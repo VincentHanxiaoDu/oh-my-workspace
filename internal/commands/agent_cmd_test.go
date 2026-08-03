@@ -16,6 +16,7 @@ import (
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/drafts"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/hub"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/inbox"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/model"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/store"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri"
 )
@@ -450,7 +451,7 @@ func TestNoAgentCommandPrintsTheCredential(t *testing.T) {
 	root := storeThatExists(t)
 
 	start := runBinaryWithEnv(t, bin, root, []string{
-		daemon.ModelEnv + "=acme", daemon.ModelKeyEnv + "=" + secret,
+		model.EnvProvider + "=acme", model.EnvCredential + "=" + secret,
 	}, "daemon", "start")
 	if start.code != 0 {
 		t.Fatalf("`omw daemon start` exited %d: %s", start.code, start.stderr)

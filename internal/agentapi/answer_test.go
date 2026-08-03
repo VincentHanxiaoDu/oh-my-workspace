@@ -3,6 +3,7 @@ package agentapi
 import (
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -13,6 +14,7 @@ import (
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/drafts"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/hub"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/inbox"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/model"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/store"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri"
 )
@@ -65,7 +67,7 @@ func newFixture(t *testing.T, personScopes ...hub.Scope) *fixture {
 		Drafts:       func() ([]DraftView, error) { return f.listDrafts() },
 		ReviseDraft:  func(id, body string) (DraftView, error) { return f.revise(id, body) },
 		Hub:          func() (*hub.Store, hub.Membership, error) { return h, members, nil },
-		Model:        func() ModelView { return ModelView{Configured: tri.No, Detail: "none configured"} },
+		Model:        func() model.Config { return model.Read(func(string) string { return "" }, nil) },
 	}
 	return f
 }
@@ -709,32 +711,51 @@ func TestAConfiguredAndAnUnconfiguredModelAreDistinguishableAndNeitherLeaksTheKe
 	none := Answer(Request{Op: OpModel, Grant: g.ID}, f.src)
 
 	configured := f.src
-	configured.Model = func() ModelView { return ModelView{Configured: tri.Yes, Provider: "acme"} }
+	configured.Model = func() model.Config {
+		return model.Read(withEnv(map[string]string{model.EnvProvider: "acme", model.EnvCredential: "sk-x"}), nil)
+	}
 	some := Answer(Request{Op: OpModel, Grant: g.ID}, configured)
 
 	unreadable := f.src
-	unreadable.Model = func() ModelView {
-		return ModelView{Configured: tri.Undetermined, Detail: "the credential file could not be read"}
+	// A REAL UNDETERMINED, PRODUCED BY A REAL CONDITION: a credential file path that names
+	// something present and unreadable. A DIRECTORY is used because it fails on every platform and
+	// without depending on which user the test runs as; a chmod 000 file is a no-op for root.
+	//
+	// NOT A MISSING FILE — internal/model calls that a determined NO, and it is right: the
+	// filesystem answered. My own earlier reading of this configuration called a missing file
+	// undetermined, which was wrong, and consuming the one answer fixed it.
+	keyDir := filepath.Join(t.TempDir(), "not-a-file")
+	if err := os.MkdirAll(keyDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	unreadable.Model = func() model.Config {
+		return model.Read(withEnv(map[string]string{
+			model.EnvProvider:       "acme",
+			model.EnvCredentialFile: keyDir,
+		}), nil)
 	}
 	unsure := Answer(Request{Op: OpModel, Grant: g.ID}, unreadable)
 
 	// CRITERION 14: configured and not configured are distinguishable.
-	if none.Model.Configured != tri.No || some.Model.Configured != tri.Yes {
-		t.Errorf("criterion 14: none=%v some=%v; a person's AI must be able to learn which",
-			none.Model.Configured, some.Model.Configured)
+	if none.Model.Chosen() != tri.No || some.Model.Present() != tri.Yes {
+		t.Errorf("criterion 14: none chosen=%v, configured present=%v; a person's AI must be able to learn which",
+			none.Model.Chosen(), some.Model.Present())
 	}
 	// CRITERION 15: and the third answer is neither of them.
-	if unsure.Model.Configured != tri.Undetermined || unsure.Outcome != OutcomeUndetermined {
+	if unsure.Model.Present() != tri.Undetermined || unsure.Outcome != OutcomeUndetermined {
 		t.Errorf("criterion 15: an unreadable credential configuration is %v/%s, want undetermined",
-			unsure.Model.Configured, unsure.Outcome)
+			unsure.Model.Present(), unsure.Outcome)
 	}
 	if unsure.Outcome.Exit() == none.Outcome.Exit() {
 		t.Errorf("criterion 15: `could not determine whether a model is configured` and `none is` share exit code %d",
 			none.Outcome.Exit())
 	}
+	// CRITERION 13: none of the three answers carries the credential. The type has no field for
+	// one — asserted structurally in TestTheModelViewServedHasNoFieldACredentialCouldBeAssignedTo —
+	// and these are the values, checked.
 	for name, r := range map[string]Response{"none": none, "configured": some, "undetermined": unsure} {
-		if r.Model.CredentialReadable {
-			t.Errorf("criterion 13: the %s model answer claims the credential is readable", name)
+		if containsBytes(bodyOfBytes(t, r), "sk-x") {
+			t.Errorf("criterion 13: the %s model answer carries the credential", name)
 		}
 	}
 
@@ -861,6 +882,21 @@ func mustPeople(t *testing.T, p ...hub.PersonID) hub.Visibility {
 		t.Fatal(err)
 	}
 	return v
+}
+
+func bodyOfBytes(t *testing.T, r Response) []byte {
+	t.Helper()
+	b, err := MarshalResponse(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// withEnv makes a getenv over a fixed map, so model.Read can be driven without touching the
+// process environment.
+func withEnv(m map[string]string) func(string) string {
+	return func(k string) string { return m[k] }
 }
 
 func bodyOf(t *testing.T, r Response) string {

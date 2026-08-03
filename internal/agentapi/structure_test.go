@@ -7,11 +7,12 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/hub"
-	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/model"
 )
 
 // ---------------------------------------------------------------------------
@@ -135,9 +136,13 @@ func TestNoAgentAPIResponseCarriesTheCredential(t *testing.T) {
 	// A model source that KNOWS the secret and reports only its presence — the shape a real
 	// provider adapter has.
 	configured := f.src
-	configured.Model = func() ModelView {
-		key := secret
-		return ModelView{Configured: tri.Yes, Provider: "acme", Detail: "a credential of " + itoa(len(key)) + " characters is configured"}
+	configured.Model = func() model.Config {
+		// A REAL model.Config holding the real secret, read the way the daemon reads it. A stub
+		// that never held the credential could not leak it, and a sweep over a source that cannot
+		// fail is not a sweep.
+		return model.Read(withEnv(map[string]string{
+			model.EnvProvider: "acme", model.EnvCredential: secret,
+		}), nil)
 	}
 	// A source whose FAILURES mention the configuration, which is where a leak would actually
 	// happen: an error path that formats what it was holding.
@@ -173,51 +178,44 @@ func TestNoAgentAPIResponseCarriesTheCredential(t *testing.T) {
 	t.Logf("scanned %d responses across every operation for the credential", checked)
 }
 
-// TestTheModelViewHasNoFieldACredentialCouldBeAssignedTo is criterion 13 as a property of the type
-// rather than of today's code.
+// TestTheModelViewServedHasNoFieldACredentialCouldBeAssignedTo is criterion 13 as a property of the
+// type rather than of today's code.
 //
 // A `Credential string` field left empty is one careless assignment away from being populated. This
-// is the check that fires when somebody adds one, before it is ever set.
-func TestTheModelViewHasNoFieldACredentialCouldBeAssignedTo(t *testing.T) {
-	src, err := os.ReadFile("api.go")
-	if err != nil {
-		t.Fatal(err)
+// fires when somebody adds one, before it is ever set.
+//
+// IT REFLECTS OVER THE TYPE THIS PACKAGE ACTUALLY SERVES, which is [model.View] and no longer a
+// struct of this package's own. An earlier revision parsed api.go for a local `ModelView`; that
+// version would have gone quietly green when the local type was deleted, asserting nothing about
+// the type that replaced it. Reflection follows the field rather than the file.
+func TestTheModelViewServedHasNoFieldACredentialCouldBeAssignedTo(t *testing.T) {
+	field, ok := reflect.TypeOf(Response{}).FieldByName("Model")
+	if !ok {
+		t.Fatal("Response has no Model field, so this test proves nothing about what is served")
 	}
-	fset := token.NewFileSet()
-	file, perr := parser.ParseFile(fset, "api.go", src, 0)
-	if perr != nil {
-		t.Fatal(perr)
+	served := field.Type
+	for served.Kind() == reflect.Ptr {
+		served = served.Elem()
 	}
-	found := false
-	ast.Inspect(file, func(n ast.Node) bool {
-		ts, ok := n.(*ast.TypeSpec)
-		if !ok || ts.Name.Name != "ModelView" {
-			return true
-		}
-		found = true
-		st, ok := ts.Type.(*ast.StructType)
-		if !ok {
-			return false
-		}
-		for _, fld := range st.Fields.List {
-			for _, name := range fld.Names {
-				lower := strings.ToLower(name.Name)
-				for _, banned := range []string{"key", "secret", "token", "password", "apikey"} {
-					if strings.Contains(lower, banned) {
-						t.Errorf("criterion 13: ModelView has a field %q; the agent API must have nowhere "+
-							"to put a credential (PRD §3.13)", name.Name)
-					}
-				}
-				if lower == "credential" {
-					t.Errorf("criterion 13: ModelView has a Credential field")
-				}
+	if served.Kind() != reflect.Struct {
+		t.Fatalf("Response.Model is a %s, not a struct", served.Kind())
+	}
+	if served.NumField() == 0 {
+		t.Fatalf("%s has no fields at all, so the scan below would pass vacuously", served)
+	}
+	for i := 0; i < served.NumField(); i++ {
+		name := strings.ToLower(served.Field(i).Name)
+		for _, banned := range []string{"key", "secret", "token", "password", "apikey", "credential"} {
+			// `CredentialPresent` is WHETHER, not WHICH, and is the whole point of the type — so the
+			// check is for a field that could hold the value, which means a string-shaped one whose
+			// name is exactly the banned word or ends in it.
+			if name == banned || (strings.HasSuffix(name, banned) && served.Field(i).Type.Kind() == reflect.String) {
+				t.Errorf("criterion 13: %s has a field %q; the agent API must have nowhere to put a "+
+					"credential (PRD §3.13)", served, served.Field(i).Name)
 			}
 		}
-		return false
-	})
-	if !found {
-		t.Fatal("ModelView was not found in api.go, so this test proves nothing about it")
 	}
+	t.Logf("checked %d field(s) of %s", served.NumField(), served)
 }
 
 // ---------------------------------------------------------------------------
@@ -323,16 +321,4 @@ func TestTheAgentAPIHasNoTransport(t *testing.T) {
 	if scanned == 0 {
 		t.Fatal("no files were scanned")
 	}
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var b []byte
-	for n > 0 {
-		b = append([]byte{byte('0' + n%10)}, b...)
-		n /= 10
-	}
-	return string(b)
 }

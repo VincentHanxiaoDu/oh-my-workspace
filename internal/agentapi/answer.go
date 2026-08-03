@@ -5,6 +5,7 @@ import (
 
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/hub"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/inbox"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/model"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri"
 )
 
@@ -72,9 +73,15 @@ type Sources struct {
 	// criterion 17) and [hub.ErrHubUnreachable] when there is one that did not answer (§3.11,
 	// criterion 7) — two different errors because they are two different facts.
 	Hub func() (*hub.Store, hub.Membership, error)
-	// Model reports whether a model is configured. It CANNOT return the credential: [ModelView]
-	// has no field for one (§3.13, criterion 13).
-	Model func() ModelView
+	// Model is the model configuration, as [model.Read] answers it. It is a [model.Config] rather
+	// than a rendering because this package must not re-derive "is a model configured" — that is
+	// [model.Config.Configured], and the projection that may leave the process is
+	// [model.Config.View]. Both are called; neither is reimplemented.
+	//
+	// A Config carries the person's credential in an unexported field. Nothing here calls
+	// [model.Config.Secret], and internal/model has a structural test that fails if a second caller
+	// of it appears anywhere in the tree.
+	Model func() model.Config
 }
 
 // Answer serves one request. It is the whole of the agent API's behaviour.
@@ -450,21 +457,24 @@ func answerModel(base Response, src Sources) Response {
 	if src.Model == nil {
 		// CRITERION 15 NAMES THIS CASE: whether a credential is configured, undetermined. Not "no
 		// model configured", which is a determined answer criterion 14 also requires be available.
-		m := ModelView{Configured: tri.Undetermined, Detail: "no model configuration could be read on this machine"}
-		base.Model = &m
+		v := model.View{
+			ProviderChosen:    tri.Undetermined.String(),
+			CredentialPresent: tri.Undetermined.String(),
+			Detail:            "no model configuration could be read on this machine",
+		}
+		base.Model = &v
 		base.Outcome = OutcomeUndetermined
 		base.Code = hub.ErrUndetermined.Code
 		return base
 	}
-	m := src.Model()
-	// NEVER THE VALUE, WHATEVER THE SOURCE PUT THERE. The type has no credential field, so there is
-	// nothing to clear; this line states the promise on the wire so a reader meets it.
-	m.CredentialReadable = false
-	base.Model = &m
+	c := src.Model()
+	// THE PROJECTION IS model'S, AND SO IS THE COMBINED ANSWER. This function chooses neither.
+	v := c.View()
+	base.Model = &v
 	base.setHubContacted(tri.No)
 	base.Message = "whether a model is configured is readable here; the credential is not, and there is no " +
 		"agent API operation that returns it (PRD §3.13)"
-	if !m.Configured.Determined() {
+	if !c.Configured().Determined() {
 		base.Outcome = OutcomeUndetermined
 		base.Code = hub.ErrUndetermined.Code
 	}

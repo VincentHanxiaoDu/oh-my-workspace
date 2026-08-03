@@ -7,6 +7,7 @@ import (
 
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/hub"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/inbox"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/model"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri"
 )
 
@@ -175,26 +176,21 @@ type NoteView struct {
 	Body       string `json:"body,omitempty"`
 }
 
-// ModelView is what the agent API says about the model (PRD §3.13, criteria 13 and 14).
+// The agent API reports the model through [model.View] and defines no view of its own.
 //
-// THERE IS NO FIELD FOR THE CREDENTIAL, and that is the design rather than a discipline. A
-// `Credential string` field left empty by today's code is one careless assignment away from being
-// populated; a type with no such field cannot carry one however careless the next change is.
+// IT USED TO DEFINE ONE, AND THAT WAS THE SAME MISTAKE THIS PACKAGE REFUSES TO MAKE ABOUT
+// VISIBILITY. Issue #18's internal/model is THE answer to "is a model configured" — it reads the
+// environment and the store record, answers both halves in three values, and its View is the
+// projection that may leave the process. A second struct here, filled in by a second reading of
+// OMW_MODEL, is a second implementation that agrees today; internal/model's own structural test
+// (TestExactlyOneFileReadsTheModelEnvironment) caught it on the merged tree, having been green on
+// this branch alone.
 //
-// Configured is three-valued because §4.3 applies here too: an unreadable configuration is not "no
-// model configured", and criterion 15 names this case specifically.
-type ModelView struct {
-	Configured     tri.Value `json:"-"`
-	ConfiguredText string    `json:"configured"`
-	// Provider is the provider's NAME, which is not a secret and is what makes criterion 14's
-	// "can learn that a model is configured" useful rather than a bare yes.
-	Provider string `json:"provider,omitempty"`
-	// CredentialReadable is always false and is stated rather than omitted. §3.13 is a promise the
-	// surface should make out loud, so that a reader does not go looking for the field.
-	CredentialReadable bool `json:"credential_readable"`
-	// Detail says why, when Configured is undetermined.
-	Detail string `json:"detail,omitempty"`
-}
+// Criterion 13 survives the change intact, and for a better reason than before: [model.View] has no
+// field a credential could be assigned to either, and internal/model keeps the secret unexported
+// behind Config.Secret with its own structural test on the one legitimate caller. Nothing here can
+// reach it. TestTheModelViewServedHasNoFieldACredentialCouldBeAssignedTo asserts that over the type
+// this package actually serves.
 
 // GrantView is an issued grant, as reported back. It carries no secret: PRD §3.10's token material
 // is Issue #19's, and this is the ledger entry.
@@ -221,7 +217,7 @@ type Response struct {
 	Drafts  []DraftView  `json:"drafts,omitempty"`
 	Notes   []NoteView   `json:"notes,omitempty"`
 	Note    *NoteView    `json:"note,omitempty"`
-	Model   *ModelView   `json:"model,omitempty"`
+	Model   *model.View  `json:"model,omitempty"`
 	Grant   *GrantView   `json:"grant,omitempty"`
 
 	// UndeterminedNotes is how many hub notes this person's readability could not be worked out
@@ -345,17 +341,11 @@ func hubConfiguredState(src Sources) tri.Value {
 func (r *Response) wire() {
 	r.HubConfiguredText = r.HubConfigured.String()
 	r.HubContactedText = r.HubContacted.String()
-	if r.Model != nil {
-		r.Model.ConfiguredText = r.Model.Configured.String()
-	}
 }
 
 func (r *Response) unwire() {
 	r.HubConfigured = triFromText(r.HubConfiguredText)
 	r.HubContacted = triFromText(r.HubContactedText)
-	if r.Model != nil {
-		r.Model.Configured = triFromText(r.Model.ConfiguredText)
-	}
 }
 
 // triFromText is the inverse of [tri.Value.String]. Anything it does not recognise is Undetermined,

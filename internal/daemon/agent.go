@@ -34,6 +34,7 @@ import (
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/drafts"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/hub"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/inbox"
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/model"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/store"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri"
 )
@@ -56,16 +57,6 @@ const (
 	ScopesEnv = "OMW_SCOPES"
 	// OutboxEnv overrides where the outbox lives. Default is `outbox` inside the store.
 	OutboxEnv = "OMW_OUTBOX"
-	// ModelEnv names the model provider (PRD §3.13).
-	ModelEnv = "OMW_MODEL"
-	// ModelKeyEnv holds the credential. NOTHING READS ITS VALUE ONTO A RESPONSE — the agent API's
-	// model view has no field for one. This constant exists so that the test which scans every
-	// response for the credential knows what to look for.
-	ModelKeyEnv = "OMW_MODEL_KEY"
-	// ModelKeyFileEnv points at a file holding the credential. It is supported because it is the
-	// case that produces criterion 15's third answer honestly: a file that cannot be read means
-	// whether a credential is configured could not be determined, which is neither yes nor no.
-	ModelKeyFileEnv = "OMW_MODEL_KEY_FILE"
 	// HubEnv configures a hub. Read only to report whether one is configured and to decide between
 	// "no hub" and "unreachable"; this build has no hub transport and says so.
 	HubEnv = "OMW_HUB"
@@ -125,7 +116,10 @@ func agentSources(storeRoot string, getenv func(string) string) agentapi.Sources
 		return tri.Yes
 	}
 	src.Hub = func() (*hub.Store, hub.Membership, error) { return agentHubSource(getenv) }
-	src.Model = func() agentapi.ModelView { return modelView(getenv) }
+	// THE STORE MAY BE NIL HERE, and model.Read documents that nil means "this caller has no
+	// store" rather than "the store could not be read" — which is the honest distinction when the
+	// daemon's own store failed to open and has already said so.
+	src.Model = func() model.Config { return model.Read(getenv, s) }
 	return src
 }
 
@@ -187,42 +181,14 @@ func draftView(o *drafts.Outbox, id hub.NoteID) agentapi.DraftView {
 	return v
 }
 
-// modelView answers whether a model is configured, in three values, and never with the credential.
+// The model configuration is internal/model's answer, and this file does not have one.
 //
-// CRITERION 13 IS A PROPERTY OF THE TYPE, NOT OF THIS FUNCTION'S CARE. agentapi.ModelView has no
-// field a credential could be assigned to. What this function decides is only which of the three
-// answers is true, and criterion 15's third one is real here: a key FILE that cannot be read means
-// we did not determine whether a credential is configured.
-func modelView(getenv func(string) string) agentapi.ModelView {
-	provider := strings.TrimSpace(getenv(ModelEnv))
-	keyFile := strings.TrimSpace(getenv(ModelKeyFileEnv))
-	hasInline := strings.TrimSpace(getenv(ModelKeyEnv)) != ""
-
-	switch {
-	case keyFile != "":
-		if _, err := os.ReadFile(keyFile); err != nil {
-			// UNDETERMINED, AND THE REASON NAMES THE FILE AND NOT ITS CONTENTS.
-			return agentapi.ModelView{
-				Configured: tri.Undetermined, Provider: provider,
-				Detail: "the credential file named by " + ModelKeyFileEnv + " could not be read, so whether a credential is configured was not determined",
-			}
-		}
-		return agentapi.ModelView{Configured: tri.Yes, Provider: provider}
-	case hasInline:
-		return agentapi.ModelView{Configured: tri.Yes, Provider: provider}
-	case provider != "":
-		// A provider with no credential is a DETERMINED no on the credential, and the provider name
-		// is still worth reporting: §3.13's "everything that does need one says what is missing".
-		return agentapi.ModelView{
-			Configured: tri.No, Provider: provider,
-			Detail: "a provider is named and no credential is configured for it",
-		}
-	default:
-		// CRITERION 14's OTHER HALF: no model configured is a determined answer, not a broken
-		// client, and tickets and drafts keep working around it.
-		return agentapi.ModelView{Configured: tri.No, Detail: "no model provider is configured on this machine"}
-	}
-}
+// Issue #18 owns "is a model configured": model.Read reads the environment and the store record,
+// answers both halves in three values, and opens no connection. This file used to read OMW_MODEL,
+// OMW_MODEL_KEY and OMW_MODEL_KEY_FILE itself and build its own view — green on this branch and red
+// the moment it met main, because internal/model has a structural test that permits exactly one
+// file to name those variables. It was right to fail: two readings of the same configuration is how
+// `omw model show` and the agent API come to disagree about whether a person has a model.
 
 // ---------------------------------------------------------------------------
 // The wire

@@ -345,14 +345,15 @@ func renderAgentResponse(env cli.Env, resp agentapi.Response, asJSON bool) int {
 		}
 	}
 	if resp.Model != nil {
-		fmt.Fprintf(env.Stdout, "model:       %s\n", resp.Model.Configured.Render("configured", "not configured"))
-		if resp.Model.Provider != "" {
-			fmt.Fprintf(env.Stdout, "provider:    %s\n", resp.Model.Provider)
-		}
-		if resp.Model.Detail != "" {
-			fmt.Fprintf(env.Stdout, "             %s\n", resp.Model.Detail)
-		}
-		// PRD §3.13, SAID ON THE SURFACE THAT COULD HAVE LEAKED IT.
+		// model.View.Render IS THE ONE RENDERING, and this surface adds nothing to it. Issue #18's
+		// own comment records why: `omw model show` grew two extra lines that `omw daemon status`
+		// did not have, and the agreement test between the CLI and the control API went red on all
+		// four configurations. Everything a person may be told about their model configuration is
+		// in the View, so every surface that shows one shows it the same way.
+		fmt.Fprintf(env.Stdout, "%s\n", resp.Model.Render())
+		// PRD §3.13, SAID ON THE SURFACE THAT COULD HAVE LEAKED IT. This is about the AGENT API —
+		// which operations exist — rather than about the configuration, so it is not something the
+		// View could carry.
 		fmt.Fprintf(env.Stdout, "credential:  not readable through the agent API, by any operation\n")
 	}
 	if resp.Grant != nil {
