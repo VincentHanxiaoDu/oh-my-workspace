@@ -181,3 +181,42 @@
 - [x] `extensionExitFor` back to `case sum.Undetermined > 0:` — red: "`omw ext list` exited 0 — THE
       SAME CODE A HEALTHY MACHINE EXITS — over an inventory it could not enumerate", and "exit 0,
       want 3"
+
+## Review round 6 — criterion 10 in the state a person is most likely to be in
+
+- [x] Call `model.Readiness` from `outboxReviewGate` — the follow-up `extension_cmd.go` named. The
+      gate returned on `cfg.Configured() == tri.No` BEFORE any reviewer was built, so a person with a
+      broken extension AND no credential recorded was told "no model is configured" at the moment
+      `omw ext list` said FAILED TO LOAD, and sent to fix a credential that would not help them
+- [x] Confine it to the `tri.No` branch: a credential that IS recorded reaches `outboxReviewer`,
+      where the wrap already consults the extension, so the missing half is exactly that branch
+- [x] Drive BOTH directions through the real `omw outbox review`: a broken extension with no
+      credential names the extension failure; a WORKING extension with no credential still says
+      `no-model`, because that is then true
+- [x] A control on the mode, because a draft left in manual mode makes `review` say "not run" and
+      proves nothing — the setup error QA reported against themselves
+- [x] Neuter the gate call — red: "this says \"no-model\" — the sentence criterion 10 forbids — to a
+      person whose extension is broken", on the exact output product refused
+- [x] Drive the credential-present direction through the real command too. Neutering the wrap in
+      `extension_cmd.go` had left `internal/commands` and `internal/model` FULLY green; with it
+      neutered this now goes red on `outboxReviewer`'s own fallback, "this build has no adapter for
+      the provider acme"
+
+## Review round 6 — the model side of the fact-about-the-build defect
+
+- [x] `model.ViewOn(store, registry, config)` answers the adapter question from the extension
+      mechanism rather than from `Lookup`. `omw model show` said "this build has no adapter for
+      teams" — true of every machine running this binary — where the fact about THIS machine was a
+      registered extension that had FAILED TO LOAD. Same defect commit `f55a176` fixed on the
+      channel side, and it reuses that finding's wording rather than inventing a third vocabulary
+- [x] `View.AdapterDetail` carries it, so agreement stays STRUCTURAL: one renderer, a field on the
+      value both surfaces render, not a sentence one surface appends
+- [x] `NotRegistered` deliberately keeps the build sentence — nothing of that name is registered
+      here, so what the build ships is the whole of the answer
+- [x] Both surfaces moved together: `omw model show` / `use` / `key` / `clear`, `omw outbox`, and the
+      control API's `modelViewFor`
+
+## Gates
+
+- [x] `make ci` green
+- [x] `./.workflow/bin/run-gates.sh` green

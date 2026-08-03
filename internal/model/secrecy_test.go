@@ -99,9 +99,13 @@ func TestTheViewHasNowhereToPutACredential(t *testing.T) {
 	// behind a negative, and whether this build has an adapter for the chosen provider. "Adapter"
 	// arrived when criterion 18's agreement test caught two surfaces wording one state differently;
 	// this test refused it until it was listed here, which is the whole point of the check.
+	// "AdapterDetail" is the sixth, added on purpose: it carries the REGISTERED extension's own
+	// reason for failing to load, which is a fact about this machine's code and never about the
+	// person's key. It reaches this struct from `extension.Entry.Detail`, which criterion 22
+	// already holds to the same rule.
 	allowed := map[string]bool{
 		"Provider": true, "ProviderChosen": true, "CredentialPresent": true,
-		"Detail": true, "Adapter": true,
+		"Detail": true, "Adapter": true, "AdapterDetail": true,
 	}
 	vt := reflect.TypeOf(View{})
 	for i := 0; i < vt.NumField(); i++ {

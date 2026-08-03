@@ -213,3 +213,67 @@ func Readiness(s *store.Store, r *extension.Registry, v View) Answer {
 			"credential is supplied (the credential itself is never printed).", v.Provider),
 	}
 }
+
+// ---------------------------------------------------------------------------
+// THE ADAPTER FACT, ABOUT THIS MACHINE RATHER THAN ABOUT THE BUILD
+// ---------------------------------------------------------------------------
+
+// ViewOn is [Config.View] with the adapter question answered from the extension mechanism.
+//
+// # THE DEFECT IT CLOSES
+//
+// [Config.View] derives Adapter from [Lookup], which answers "is there code for this provider
+// COMPILED INTO THIS BUILD". That was the only answer available before this mechanism existed, and
+// once it exists it is the wrong one: a person who registered a provider extension that will not
+// load was told "this build has no adapter for teams" — a fact true of every machine running this
+// binary — at the moment `omw ext list` told them their registered extension had FAILED TO LOAD.
+// One fact, two surfaces, two reasons. Commit f55a176 fixed exactly this on the channel side; this
+// is the model side, and it deliberately reuses that finding's shape rather than inventing a third
+// vocabulary for it.
+//
+// # IT IS A FUNCTION AND NOT A METHOD ON Config, ON PURPOSE
+//
+// The answer depends on the store and on the registry, and a [Config] holds neither. A method that
+// reached for [extension.Default] would make the answer depend on process-global state, which is
+// the reason [extension.Registry] is a value — see [Readiness], which takes the same two arguments
+// for the same reason.
+//
+// # AGREEMENT STAYS STRUCTURAL
+//
+// There is still ONE renderer, [View.Render]. This adds a field to the value both surfaces render,
+// not a sentence one surface appends — which is what [View.Adapter]'s own doc says is the fix that
+// holds.
+//
+// It opens no connection: [extension.Extension.Load] is documented as contacting nothing.
+func ViewOn(s *store.Store, r *extension.Registry, c Config) View {
+	v := c.View()
+	if c.Provider != tri.Yes {
+		// Whether this machine can talk to a provider whose name is not established is not a
+		// question with an answer.
+		return v
+	}
+	if r == nil {
+		r = extension.Default
+	}
+	// FindAs, NOT Find, for the reason Readiness gives: a CHANNEL adapter registered under the
+	// provider's name is not a model adapter for it.
+	e := extension.FindAs(extension.Read(s, r).Entries, c.Name, extension.Model)
+	switch e.Resolved() {
+	case extension.Loaded:
+		// A registered extension that loads IS the adapter, whether or not the build ships one.
+		v.Adapter = tri.Yes.String()
+	case extension.FailedToLoad:
+		v.Adapter = tri.No.String()
+		v.AdapterDetail = "the registered " + c.Name + " model-provider extension FAILED TO LOAD, so review " +
+			"cannot run against it. Your configuration is intact and the extension behind it is broken: " + e.Detail
+	case extension.Undetermined:
+		v.Adapter = tri.Undetermined.String()
+		v.AdapterDetail = "whether the registered " + c.Name + " model-provider extension loads " +
+			tri.Undetermined.String() + ", which is NOT a report that it failed and NOT a report that " +
+			"the code to talk to it is absent: " + e.Detail
+	}
+	// NotRegistered is left alone deliberately: nothing of that name has been registered on this
+	// machine, so what this BUILD ships is the whole of the answer and the existing sentence is the
+	// right one.
+	return v
+}

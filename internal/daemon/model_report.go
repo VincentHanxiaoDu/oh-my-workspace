@@ -46,7 +46,7 @@ import (
 var modelViewFor = func(storeRoot string) model.View {
 	s, err := store.Open(storeRoot)
 	if err != nil {
-		return model.Read(os.Getenv, nil).View()
+		return model.ViewOn(nil, nil, model.Read(os.Getenv, nil))
 	}
-	return model.Read(os.Getenv, s).View()
+	return model.ViewOn(s, nil, model.Read(os.Getenv, s))
 }

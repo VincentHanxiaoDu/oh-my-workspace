@@ -63,6 +63,19 @@ type View struct {
 	// is missing is the code Issue #21's mechanism registers, and telling them "no provider is
 	// chosen" would send them to configure what they already configured.
 	Adapter string `json:"adapter,omitempty"`
+	// AdapterDetail is the fact about THIS MACHINE when there is one, and it REPLACES the sentence
+	// about the build in [View.Render].
+	//
+	// "This build has no adapter for teams" is true of every machine running this binary. Offering
+	// it to a person whose REGISTERED teams provider extension failed to load answers a question
+	// nobody asked and hides the one that is wrong with their machine — the same defect commit
+	// f55a176 fixed on the channel side, where `omw channels list` said "this build has no
+	// transport for Microsoft Teams" while `omw ext list` said the registered adapter had FAILED TO
+	// LOAD. One fact, two surfaces, two reasons, and the wrong layer answering.
+	//
+	// It is filled in by [ViewOn], which is given the store and the registry the answer depends on.
+	// [Config.View] cannot fill it in and does not pretend to: it has neither.
+	AdapterDetail string `json:"adapter_detail,omitempty"`
 }
 
 // View projects a Config down to what may leave the machine's own process.
@@ -139,6 +152,10 @@ func (v View) Render() string {
 // The undetermined branches above do not call this. Whether this build has an adapter for a
 // provider whose NAME could not be established is not a question with an answer.
 func (v View) withAdapter(s string) string {
+	if v.AdapterDetail != "" {
+		// THE FACT ABOUT THIS MACHINE WINS. See View.AdapterDetail.
+		return s + "\n  " + v.AdapterDetail
+	}
 	if v.Adapter != tri.No.String() {
 		return s
 	}
