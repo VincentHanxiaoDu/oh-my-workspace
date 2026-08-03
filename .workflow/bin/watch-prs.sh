@@ -297,14 +297,15 @@ main_state() {
 [ "$role" = "--main-state" ] && { main_state; exit 0; }
 
 here_bin=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-# Sleep until the limit resets, but never less than one interval and never more than ten minutes —
-# an unreadable reset must not park the watch indefinitely.
-HOLD_SLEEP() {
-  local s; s=$("$here_bin/gh-budget.sh" reset-in 2>/dev/null || echo "$interval")
-  [ "$s" -lt "$interval" ] && s=$interval
-  [ "$s" -gt 600 ] && s=600
-  echo "$s"
-}
+# Sleep until the throttle that is actually holding this watch is expected to lift, but never less
+# than one interval and never more than ten minutes — an unreadable reset must not park the watch
+# indefinitely.
+#
+# `hold-for`, NOT `reset-in`: the two causes clear on different clocks. A PRIMARY exhaustion clears
+# when the hourly quota resets. A SECONDARY (burst) limit clears with QUIET and has nothing to do
+# with that reset — waiting on `reset-in` there is waiting on a signal that never described the
+# problem (Issue #81).
+HOLD_SLEEP() { "$here_bin/gh-budget.sh" hold-for "$interval" 2>/dev/null || echo "$interval"; }
 
 while true; do
   # REST, not GraphQL: `gh pr list` is a GraphQL call and that quota runs out on its own schedule,
@@ -318,11 +319,22 @@ while true; do
   # deliberately idle, and when it resumes. Reading the limit is free and does not spend it.
   bmsg=$("$here_bin/gh-budget.sh" check 2>&1) && bok=0 || bok=$?
   if [ "${bok:-0}" -eq 1 ]; then
-    echo "HOLDING — $bmsg. Not polling: the remaining budget is reserved for this role's own work."
+    echo "HOLDING — $bmsg"
     sleep "$(HOLD_SLEEP)"
     continue
   fi
   if ! prs=$(gh api "repos/$REPO/pulls?state=open&per_page=100" 2>&1); then
+    # THE REFUSAL IS THE ONLY PLACE A SECONDARY LIMIT IS VISIBLE (Issue #81) — see the long note in
+    # watch-queue.sh. The guard above reads the PRIMARY quota, which sat at 4896/5000 while every
+    # one of these calls was returning 403, so it waved the watch through the entire outage. Handing
+    # it the 403 is what lets the next check hold; polling on regardless is what renews the burst.
+    if hold=$("$here_bin/gh-budget.sh" note-failure "$prs" 2>/dev/null); then
+      echo "HOLDING — GitHub refused this poll with a SECONDARY (burst/concurrency) rate limit, which does NOT appear in the primary quota. Standing down for about ${hold}s; a secondary limit clears with quiet, not on the reset clock, so retrying now extends it."
+      # A SWEEP STILL FAILS. It answers a question asked once, and `HOLDING` is not an answer to it —
+      # exit 0 here would tell a caller its board is quiet in the middle of a refusal.
+      [ "$sweep" = no ] || exit 1
+      sleep "$(HOLD_SLEEP)"; continue
+    fi
     echo "LOOKUP FAILED: $(printf '%s' "$prs" | tr '\n' ' ' | cut -c1-160)"
     # A SWEEP THAT COULD NOT READ THE BOARD MUST EXIT NON-ZERO. It is answering a question asked
     # once, and a caller that sees exit 0 and no events concludes there is nothing waiting on it —
