@@ -13,7 +13,19 @@
 #
 # Blank lines and lines beginning with `#` are ignored.
 
-283715b .workflow/bin/queue.sh Issue #59: `reviews_waiting` re-offered a head to the role that had already refused it, because a `changes-requested` verdict publishes `failure` and only `success` suppressed. The queue now reads the `Reviewed-by:`/`Reviewed-sha:` attestation. NOT YET UPSTREAMED — it belongs in agent-dev-flow and the next refresh will delete it. What survives the refresh is `internal/machinery/reviewassignment_test.go`, which executes the installed script and goes red the moment the fix is gone, and `queue.sh --self-test` carries matching arms so the upstream patch arrives with its own proof. This entry is a debt, not a dismissal.
+
+3815b13 .workflow/bin/queue.sh Issue #79: `reviews_waiting` converted a FAILED author lookup into an empty author set — `2>/dev/null || echo ""` — and an empty set matches no role, so a pull request was offered to every role including the one that wrote it. Both call sites now exit non-zero and say what failed. NOT YET UPSTREAMED — it belongs in agent-dev-flow and the next refresh will delete it. What survives the refresh is `internal/machinery/authorlookup_test.go`, which executes the installed script against a stub `gh` that fails only the author lookup and goes red the moment the fix is gone; `queue.sh --self-test` carries a matching arm so the upstream patch arrives with its own proof. This entry is a debt, not a dismissal.
+#
+# IT CARRIES #59's DEBT TOO, and that is why the older line for this file is gone rather than
+# forgotten. `283715b .workflow/bin/queue.sh` declared the #59 fix — `reviews_waiting` re-offering a
+# head to the role that had already refused it, because a `changes-requested` verdict publishes
+# `failure` and only `success` suppressed. That fix is STILL local and STILL not upstreamed; 283715b
+# simply stopped being the most recent commit on the file, so the check reported the line as inert
+# and it would have gone quiet either way. Both fixes leave with the same refresh, and
+# `internal/machinery/reviewassignment_test.go` is what survives it for #59, exactly as
+# `authorlookup_test.go` is for #79.
+
+3815b13 .workflow/bin/pr-authors.sh Issue #79: `--pr` printed nothing and exited 0 when the API could not be reached, so `could not determine who built this` and `determined that nobody did` shared a value. It now exits 3 — for the commit list and for the per-commit file list, where an unreadable diff was being read as a commit that touched nothing outside `openspec/`. `--range` is untouched, so `check-review.sh`, its only caller, needs no change; that was checked by driving `check-review.sh --self-test`. NOT YET UPSTREAMED — same debt, same reason, and `pr-authors.sh --self-test` carries the matching arms.
 
 # The healthy state is no entries at all.
 #
