@@ -343,23 +343,17 @@ func outboxDraft(env cli.Env, args []string) int {
 		// matters, not only when they eventually try to publish.
 		cfg := model.Read(env.Getenv, s)
 		fmt.Fprintf(env.Stdout, "%s\n", model.ViewOn(s, extensionRegistry, cfg).Render())
-		switch cfg.Configured() {
-		case tri.Yes:
-			fmt.Fprintf(env.Stdout, "%s\n", o.StateOf(id).Render())
-			fmt.Fprintf(env.Stdout, "your rules will be checked when you run 'omw outbox review %s' or publish it.\n", string(id))
-			return cli.Success
-		case tri.No:
-			_ = o.SetState(id, drafts.StateBlocked, "you chose review mode and no model is configured, so nothing can check your rules")
-			fmt.Fprintf(env.Stdout, "%s\n", o.StateOf(id).Render())
-			fmt.Fprintf(env.Stderr, "omw outbox draft: %v (code: %s)\n", model.ErrNoModel, model.ErrNoModel.Code)
-			fmt.Fprintf(env.Stderr, "  You chose review. This draft has NOT been checked and will not be published.\n")
-			return cli.ExitFailure
-		default:
-			_ = o.SetState(id, drafts.StateBlocked, "you chose review mode and whether a model is configured could not be determined")
-			fmt.Fprintf(env.Stdout, "%s\n", o.StateOf(id).Render())
-			fmt.Fprintf(env.Stderr, "omw outbox draft: %v (code: %s)\n", model.ErrUndetermined, model.ErrUndetermined.Code)
-			return cli.ExitUndetermined
+		// ISSUE #112: THE SAME DECISION AS THE REVIEW GATE'S, MADE BY THE SAME FUNCTION. This
+		// branch used to read `cfg.Configured()` itself and say `no-model` to a person whose
+		// extension was broken — criterion 10's forbidden sentence, one gate over from where #21
+		// closed it. There is no second copy of the ordering rule here to drift from that one.
+		if code, refused := outboxReviewModelRefusal(env, s, o, id, "draft", cfg,
+			"You chose review. This draft has NOT been checked and will not be published."); refused {
+			return code
 		}
+		fmt.Fprintf(env.Stdout, "%s\n", o.StateOf(id).Render())
+		fmt.Fprintf(env.Stdout, "your rules will be checked when you run 'omw outbox review %s' or publish it.\n", string(id))
+		return cli.Success
 
 	default: // auto
 		// CRITERION 9: the mode had an effect. The draft leaves the resting state — and what
@@ -589,37 +583,78 @@ type outboxGateResult struct {
 	code     int
 }
 
-// outboxExtensionRefusal is CRITERION 10, at the gate rather than only behind it.
+// outboxReviewModelRefusal is CRITERION 10, and it is THE ONE PLACE a review-mode capability decides
+// what is wrong with this machine's model. Every review-mode gate calls it; none decides for itself.
 //
-// # THE DEFECT IT CLOSES
+// # THE DEFECT IT CLOSES, AND THE ONE THAT CAME BACK
 //
 // `outboxReviewer` is wrapped in `extension_cmd.go` so that a broken extension is named instead of
-// being opened, and that wrap is correct — but the review gate returns on `cfg.Configured() ==
-// tri.No` BEFORE control ever reaches a reviewer. So the person whose extension is broken AND who
+// being opened, and that wrap is correct — but a gate that returns on `cfg.Configured() == tri.No`
+// does so BEFORE control ever reaches a reviewer. So the person whose extension is broken AND who
 // has not yet recorded a credential — the ordinary way this goes wrong, not an edge case — was told
 // "no model is configured" at the very moment `omw ext list` said FAILED TO LOAD, and sent to fix a
-// credential that would not have helped them. `extension_cmd.go` named calling `model.Readiness`
-// from here as the follow-up; this is it.
+// credential that would not have helped them.
 //
-// # THE ORDER IS THE CRITERION, AND IT IS NOT DECIDED HERE
+// #21 closed that at `outboxReviewGate`. **#112 is the same sentence from `omw outbox draft`**,
+// which had written its own copy of the branch and so could not benefit from the fix — the third
+// instance in one day of "a check placed at a caller, and a second caller that does not know about
+// it". So the fix is not a third call added at a third site: the whole decision, all three
+// situations, moved in here and both gates now hold nothing but a call. **A fourth gate cannot
+// state the ordering rule differently, because there is no longer a second statement of it to
+// copy** — and `TestTheReviewModeModelRefusalIsMadeInExactlyOnePlace` fails on any package that
+// tries.
+//
+// # THE ORDER IS THE CRITERION, AND IT IS NOT DECIDED HERE EITHER
 //
 // [model.Readiness] already documents "the extension is consulted BEFORE the credential", and this
 // function adds no second opinion about which situation the machine is in: it asks Readiness and
-// acts on the one situation that is this gate's to refuse. A WORKING extension with no credential
-// is still SituationNoModelConfigured, so it still gets the no-model refusal below — that sentence
-// is then true, and replacing it would be this defect with the directions swapped.
-func outboxExtensionRefusal(env cli.Env, s *store.Store, o *drafts.Outbox, id hub.NoteID, what string, cfg model.Config) (int, bool) {
-	answer := model.Readiness(s, extensionRegistry, cfg.View())
-	if answer.Situation != model.SituationExtensionFailedToLoad {
+// acts. A WORKING extension with no credential is still SituationNoModelConfigured, so it still
+// gets the no-model refusal below — that sentence is then true, and replacing it would be this
+// defect with the directions swapped.
+//
+// # WHAT IT DOES NOT DO
+//
+// It refuses only where the gate would otherwise have refused: `cfg.Configured() == tri.Yes` is
+// handed straight back as "not refused". A credential that IS recorded reaches `outboxReviewer`,
+// where the extension is already consulted, and moving that refusal forward to here would be a
+// behaviour change wearing a consolidation's clothes.
+//
+// `tail` is the one sentence that differs between callers — what this particular command has and
+// has not done — and it is the ONLY thing a caller may vary. The code, the headline and the
+// persisted state reason are this function's, for every caller, which is what #112 criterion 1
+// asks for.
+func outboxReviewModelRefusal(env cli.Env, s *store.Store, o *drafts.Outbox, id hub.NoteID, what string, cfg model.Config, tail string) (int, bool) {
+	configured := cfg.Configured()
+	if configured == tri.Yes {
 		return cli.Success, false
 	}
-	_ = o.SetState(id, drafts.StateBlocked, "you chose review mode and the chosen provider's extension did not load, so nothing can check your rules")
+	if answer := model.Readiness(s, extensionRegistry, cfg.View()); answer.Situation == model.SituationExtensionFailedToLoad {
+		_ = o.SetState(id, drafts.StateBlocked, "you chose review mode and the chosen provider's extension did not load, so nothing can check your rules")
+		fmt.Fprintf(env.Stdout, "%s\n", o.StateOf(id).Render())
+		fmt.Fprintf(env.Stderr, "omw outbox %s: %v (code: %s)\n", what, model.ErrProviderFailedToLoad, answer.Code)
+		fmt.Fprintf(env.Stderr, "  %s\n", answer.Reason)
+		fmt.Fprintf(env.Stderr, "  This is NOT 'no model is configured', and recording a credential will not fix it.\n")
+		fmt.Fprintf(env.Stderr, "  %s\n", tail)
+		return cli.ExitFailure, true
+	}
+	if configured == tri.No {
+		// THE CENTRAL REFUSAL (criteria 13, 14, 15). It names the missing model, it exits non-zero,
+		// the draft is left in a state that does not read as "awaiting you", and NOTHING IS
+		// PUBLISHED. Behaving like manual here (say nothing, leave it resting) and behaving like
+		// auto (publish it unchecked) are the two failures Issue #12 exists to prevent.
+		_ = o.SetState(id, drafts.StateBlocked, "you chose review mode and no model is configured, so nothing can check your rules")
+		fmt.Fprintf(env.Stdout, "%s\n", o.StateOf(id).Render())
+		fmt.Fprintf(env.Stderr, "omw outbox %s: %v (code: %s)\n", what, model.ErrNoModel, model.ErrNoModel.Code)
+		if cfg.Missing != "" {
+			fmt.Fprintf(env.Stderr, "  %s\n", cfg.Missing)
+		}
+		fmt.Fprintf(env.Stderr, "  %s\n", tail)
+		return cli.ExitFailure, true
+	}
+	_ = o.SetState(id, drafts.StateBlocked, "you chose review mode and whether a model is configured could not be determined")
 	fmt.Fprintf(env.Stdout, "%s\n", o.StateOf(id).Render())
-	fmt.Fprintf(env.Stderr, "omw outbox %s: %v (code: %s)\n", what, model.ErrProviderFailedToLoad, answer.Code)
-	fmt.Fprintf(env.Stderr, "  %s\n", answer.Reason)
-	fmt.Fprintf(env.Stderr, "  This is NOT 'no model is configured', and recording a credential will not fix it.\n")
-	fmt.Fprintf(env.Stderr, "  Nothing has been published, and this draft is not merely awaiting you.\n")
-	return cli.ExitFailure, true
+	fmt.Fprintf(env.Stderr, "omw outbox %s: %v (code: %s)\n", what, model.ErrUndetermined, model.ErrUndetermined.Code)
+	return cli.ExitUndetermined, true
 }
 
 // outboxReviewGate runs the person's chosen gate over one draft.
@@ -642,32 +677,12 @@ func outboxReviewGate(env cli.Env, s *store.Store, o *drafts.Outbox, id hub.Note
 
 	cfg := model.Read(env.Getenv, s)
 	fmt.Fprintf(env.Stdout, "%s\n", model.ViewOn(s, extensionRegistry, cfg).Render())
-	if cfg.Configured() == tri.No {
-		// CRITERION 10, AND ONLY WHERE THIS GATE WOULD OTHERWISE SAY "no model is configured".
-		// A credential that IS recorded reaches `outboxReviewer`, where the extension is already
-		// consulted; the missing half is exactly this branch, which returns before any reviewer
-		// exists. See outboxExtensionRefusal.
-		if code, refused := outboxExtensionRefusal(env, s, o, id, what, cfg); refused {
-			return outboxGateResult{code: code}
-		}
-	}
-	switch cfg.Configured() {
-	case tri.No:
-		// THE CENTRAL REFUSAL (criteria 13, 14, 15). It names the missing model, it exits non-zero,
-		// the draft is left in a state that does not read as "awaiting you", and NOTHING IS
-		// PUBLISHED. Behaving like manual here (say nothing, leave it resting) and behaving like
-		// auto (publish it unchecked) are the two failures this Issue exists to prevent.
-		_ = o.SetState(id, drafts.StateBlocked, "you chose review mode and no model is configured, so nothing can check your rules")
-		fmt.Fprintf(env.Stdout, "%s\n", o.StateOf(id).Render())
-		fmt.Fprintf(env.Stderr, "omw outbox %s: %v (code: %s)\n", what, model.ErrNoModel, model.ErrNoModel.Code)
-		fmt.Fprintf(env.Stderr, "  %s\n", cfg.Missing)
-		fmt.Fprintf(env.Stderr, "  Nothing has been published, and this draft is not merely awaiting you.\n")
-		return outboxGateResult{code: cli.ExitFailure}
-	case tri.Undetermined:
-		_ = o.SetState(id, drafts.StateBlocked, "you chose review mode and whether a model is configured could not be determined")
-		fmt.Fprintf(env.Stdout, "%s\n", o.StateOf(id).Render())
-		fmt.Fprintf(env.Stderr, "omw outbox %s: %v (code: %s)\n", what, model.ErrUndetermined, model.ErrUndetermined.Code)
-		return outboxGateResult{code: cli.ExitUndetermined}
+	// THE WHOLE MODEL DECISION, MADE ONCE, ELSEWHERE. This gate used to hold its own copy of the
+	// three-way branch, and `omw outbox draft` held another — which is how #112 happened. See
+	// outboxReviewModelRefusal.
+	if code, refused := outboxReviewModelRefusal(env, s, o, id, what, cfg,
+		"Nothing has been published, and this draft is not merely awaiting you."); refused {
+		return outboxGateResult{code: code}
 	}
 
 	rules := drafts.ReadRules(s)

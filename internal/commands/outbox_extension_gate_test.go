@@ -193,3 +193,77 @@ func TestModelShowNamesTheFailedLoadRatherThanTheMissingAdapter(t *testing.T) {
 			"load. This is f55a176's defect on the model side:\n%s", show)
 	}
 }
+
+// =================================================================================================
+// ISSUE #112 — THE SAME DEFECT ONE GATE OVER, ON `omw outbox draft`.
+//
+// `outboxReviewGate` was closed at #21/#53. `omw outbox draft` never went through it: its
+// `case drafts.ModeReview:` read `model.Read` and branched on `cfg.Configured()` itself, so a
+// person with a broken extension and no credential was told `no-model` at the moment they wrote a
+// draft — the exact sentence criterion 10 forbids — and the code, the headline AND the persisted
+// state reason all said so. The state reason is the one that outlives the terminal.
+//
+// Both directions are here for the reason the review-gate pair above gives: a build that always
+// blamed the extension would pass the first and be a new defect.
+// =================================================================================================
+
+// A BROKEN EXTENSION WITH NO CREDENTIAL NAMES THE EXTENSION FAILURE — AT `draft`, criterion 1.
+func TestDraftWithNoCredentialNamesTheBrokenExtensionRatherThanTheMissingModel(t *testing.T) {
+	const boom = "libacme.so was built against a different interface"
+	env := obExtWorld(t, "acme", loadErr(boom))
+
+	got := runOutboxCmd(t, env, "draft", "d2", "another draft")
+	all := got.all()
+
+	if got.code == cli.Success {
+		t.Fatalf("a broken extension let the draft gate succeed:\n%s", all)
+	}
+	if !strings.Contains(all, model.ErrProviderFailedToLoad.Code) {
+		t.Errorf("the extension failure is not named. `omw ext list` says this provider FAILED TO LOAD, "+
+			"and `omw outbox draft` must say the same thing with the code %q:\n%s", model.ErrProviderFailedToLoad.Code, all)
+	}
+	if !strings.Contains(all, boom) {
+		t.Errorf("the extension's own reason %q is not carried, so the person cannot act on it:\n%s", boom, all)
+	}
+	if strings.Contains(all, model.ErrNoModel.Code) {
+		t.Errorf("this says %q — the sentence criterion 10 forbids — to a person whose extension is "+
+			"broken. Recording a credential will not fix their machine:\n%s", model.ErrNoModel.Code, all)
+	}
+
+	// THE PERSISTED REASON, WHICH OUTLIVES THE TERMINAL. #112 names it explicitly: the headline can
+	// be scrolled away, the state cannot, and it said `no model is configured` about a machine
+	// whose model IS configured.
+	st := runOutboxCmd(t, env, "state", "d2").all()
+	if !strings.Contains(st, "extension") {
+		t.Errorf("the persisted state reason does not name the extension at all:\n%s", st)
+	}
+	if strings.Contains(st, "no model is configured") {
+		t.Errorf("the PERSISTED state reason says \"no model is configured\" about a machine whose "+
+			"model is configured and whose extension is broken. This one outlives the terminal:\n%s", st)
+	}
+}
+
+// A WORKING EXTENSION WITH NO CREDENTIAL STILL SAYS no-model AT `draft` — criterion 2.
+func TestDraftWithNoCredentialAndAWorkingExtensionStillSaysNoModel(t *testing.T) {
+	env := obExtWorld(t, "acme", nil)
+
+	got := runOutboxCmd(t, env, "draft", "d2", "another draft")
+	all := got.all()
+
+	if got.code == cli.Success {
+		t.Fatalf("no credential is recorded and the draft gate succeeded anyway:\n%s", all)
+	}
+	if !strings.Contains(all, model.ErrNoModel.Code) {
+		t.Errorf("the extension loads and no credential is recorded, so %q is the true answer and it "+
+			"is missing:\n%s", model.ErrNoModel.Code, all)
+	}
+	if strings.Contains(all, model.ErrProviderFailedToLoad.Code) {
+		t.Errorf("this blames the extension on a machine whose extension is fine. That is the same "+
+			"defect with the directions swapped:\n%s", all)
+	}
+	st := runOutboxCmd(t, env, "state", "d2").all()
+	if !strings.Contains(st, "no model is configured") {
+		t.Errorf("the persisted state reason must say no model is configured, because on this "+
+			"machine that is true:\n%s", st)
+	}
+}
