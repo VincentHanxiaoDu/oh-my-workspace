@@ -61,6 +61,14 @@ run_check() {
     # notices — keep the queue watch and new Issues still arrive, so nothing looks wrong while every
     # red gate and every review request goes unheard. Restarting by hand is not a mechanism; it is a
     # thing an agent has to remember while doing something else.
+    # AND IT MUST NOT ALSO CARRY THE SUPERSEDED INSTRUCTION. A prompt that says both "start one
+    # supervised monitor" and "start these two" has told the role two different things; the reader
+    # follows whichever it saw first, and the one it saw first was the stale one at the old interval.
+    # This survived a refresh: the new block was inserted and the old block was left above it.
+    grep -q 'Monitor(command: "\./\.workflow/bin/watch-queue\.sh' "$f" \
+      && { echo "::error::$role.md still starts watch-queue.sh as its own monitor as well as under watch-all.sh — two instructions, and the stale one comes first" >&2; rc=1; }
+    grep -q 'Monitor(command: "\./\.workflow/bin/watch-prs\.sh' "$f" \
+      && { echo "::error::$role.md still starts watch-prs.sh as its own monitor as well as under watch-all.sh — two instructions, and the stale one comes first" >&2; rc=1; }
     grep -q 'watch-all\.sh' "$f" \
       || { echo "::error::$role.md starts the two watches unsupervised — when one dies nothing brings it back and the role keeps half its coverage without knowing which half" >&2; rc=1; }
     # AND IT MUST NOT DEPEND ON THAT WATCH SURVIVING. A monitor is a process and processes end, and
@@ -92,6 +100,17 @@ run_check() {
     grep -qi 'starts with `\[' "$f" \
       || { echo "::error::$role.md never tells the role to mark its comments with [<role>] — queue.sh cannot see what it has already done, and will offer the work again" >&2; rc=1; }
   done
+
+  # A RELEASE VERDICT MUST BE RECORDED WHERE THE OWNER CAN FIND IT, NOT SAID IN A REPLY.
+  # Measured: "do not ship bbee48f, four blockers" was formed correctly and reached the owner only
+  # because they happened to be reading that window. The sha was in no file, no Issue, no label.
+  # The owner has one derived view — `queue.sh owner` — and it is fed by the `blocks:release` label
+  # and by a `[product]` comment naming RELEASE. A prompt that does not say so produces verdicts
+  # that exist only in a terminal.
+  grep -q 'blocks:release' "$dir/product-workflow.md" 2>/dev/null \
+    || { echo "::error::product-workflow.md never says to label a blocker 'blocks:release', so nothing a release waits on reaches the owner's queue" >&2; rc=1; }
+  grep -qi 'AskUserQuestion' "$dir/product-workflow.md" 2>/dev/null \
+    || { echo "::error::product-workflow.md does not tell product to ask the owner — a decision they were never asked for is not one they made" >&2; rc=1; }
 
   # R4 — CLOSURE AUTHORITY LIVES IN THE PROMPT OF THE ROLE THAT CLOSES, and nowhere else.
   grep -qi 'you close bugs and chores' "$dir/qa-workflow.md" 2>/dev/null \
