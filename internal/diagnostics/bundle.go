@@ -238,8 +238,13 @@ var categoryNames = []string{
 // compile against them. When they land, these constants are the ones to delete in favour of theirs.
 const (
 	KindTicket = store.Kind("ticket")
-	// KindMessage is a raw message ingested from a channel (PRD §2.1). Criterion 5 is about this
-	// one specifically.
+	// KindMessage is what a raw message ingested from a channel WOULD be stored under (PRD §2.1).
+	//
+	// NOTHING WRITES IT AND NOTHING HERE READS IT — see listMessages. It is kept as the name the
+	// ingester will use when it lands, so that the reader and the writer agree by construction
+	// rather than by two people choosing the same string. Wiring it back into a List call without
+	// building that ingester puts Issue #67's asserted zero straight back, and internal/kindguard
+	// fails the build if anybody does.
 	KindMessage = store.Kind("message")
 	// KindModelCredential is the person's model key (PRD §3.13, Issue #18). It is named here ONLY
 	// so that it can be excluded by name and so that a test can prove the exclusion against a real
@@ -304,19 +309,20 @@ func listTickets(st *store.Store, wantBodies bool) ([]collectedRecord, error) {
 	return fromStoreRecords(recs, wantBodies), nil
 }
 
-// listMessages enumerates raw ingested messages.
+// listMessages would enumerate raw ingested messages, and cannot, because NOTHING IN THIS BUILD
+// WRITES ONE.
 //
-// NOTHING IN THIS BUILD WRITES THEM. Channel ingestion turns a message into a TICKET
-// (internal/channels/ingest.go) and stores no raw message. Reading the kind anyway returns zero
-// records from a directory that has never existed, which is the same defect as Blocker 2 — so this
-// says so instead. Recorded as debt on Issue #32; Issue #67 named three surfaces and this is not
-// one of them.
-func listMessages(st *store.Store, wantBodies bool) ([]collectedRecord, error) {
-	recs, err := st.List(KindMessage)
-	if err != nil {
-		return nil, err
-	}
-	return fromStoreRecords(recs, wantBodies), nil
+// Channel ingestion turns a message into a TICKET (internal/channels/ingest.go) and stores no raw
+// message. This used to read `store.Kind("message")` anyway, which returned zero records from a
+// directory that has never existed and rendered as `message-inventory  collected (0)` — the same
+// asserted zero as Blocker 2, in the same bundle, and a support engineer reads it as "this person
+// has no ingested messages" (found in review of PR #92).
+//
+// So it answers with what is actually true. The INGESTION is the open work, tracked on Issue #32;
+// until it lands the bundle says it could not determine this rather than claiming a zero, because a
+// declaration of known debt must not also be what keeps a wrong answer on a person's screen.
+func listMessages(*store.Store, bool) ([]collectedRecord, error) {
+	return nil, errNoProducerInThisBuild
 }
 
 func fromStoreRecords(recs []store.Record, wantBodies bool) []collectedRecord {
@@ -348,6 +354,14 @@ func listDrafts(st *store.Store, wantBodies bool) ([]collectedRecord, error) {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
+		return nil, err
+	}
+	// THE MARKER IS STATTED HERE RATHER THAN LEFT TO drafts.Open, so that "there is no outbox at
+	// that path" and "the outbox is there and would not be read" do not both arrive as Open's
+	// no-outbox refusal. An outbox whose directory denies access produced the detail "no draft
+	// outbox at that path", which is a determined negative standing in for a permission error —
+	// the same collapse this Issue is about, one layer down (noted in review of PR #92).
+	if _, err := os.Stat(filepath.Join(dir, drafts.MarkerName)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
 	o, err := drafts.Open(dir)

@@ -239,13 +239,17 @@ func TestOptInIncludesBodiesAndTheManifestSaysSo(t *testing.T) {
 		t.Errorf("the two bundles' manifests render the request identically as %q, so they are not distinguishable from the manifest alone", dm.BodiesRequest)
 	}
 
-	// Criterion 7: the SAME field that reads withheld by default reads as included.
+	// EVERY BODY CATEGORY IS WITHHELD BY DEFAULT, whatever it can go on to establish.
 	for _, name := range []string{CatTicketBodies, CatDraftBodies, CatMessageBodies} {
-		d := category(t, dm, name)
-		o := category(t, om, name)
-		if d.State != StateWithheld {
+		if d := category(t, dm, name); d.State != StateWithheld {
 			t.Errorf("%s in the default bundle is %q, want %q", name, d.State, StateWithheld)
 		}
+	}
+
+	// Criterion 7: the SAME field that reads withheld by default reads as included, for the
+	// categories this build can actually produce.
+	for _, name := range []string{CatTicketBodies, CatDraftBodies} {
+		o := category(t, om, name)
 		if o.State != StateCollected {
 			t.Errorf("%s in the opt-in bundle is %q, want %q", name, o.State, StateCollected)
 		}
@@ -254,13 +258,25 @@ func TestOptInIncludesBodiesAndTheManifestSaysSo(t *testing.T) {
 		}
 	}
 
+	// MESSAGES ARE NOT A THING THIS BUILD CAN COLLECT, and asking for bodies does not change that.
+	// Nothing writes a raw message — channel ingestion stores tickets — so the opt-in reaches an
+	// undetermined category rather than a confident zero. The seeded `message` record below is a
+	// store record no part of the product wrote, and it stays out of the bundle for that reason.
+	msg := category(t, om, CatMessageBodies)
+	if msg.State != StateUndetermined || msg.Reason != ReasonNotInThisBuild {
+		t.Errorf("%s under an explicit opt-in is %q/%q, want undetermined/%q", CatMessageBodies, msg.State, msg.Reason, ReasonNotInThisBuild)
+	}
+
 	// And the bodies really are there — an opt-in that quietly withheld would satisfy the negative
 	// test above while making the feature useless.
 	files := bundleFiles(t, opt.Path)
-	for _, secret := range []string{secretTicketBody, secretDraftBody, secretMessageBody} {
+	for _, secret := range []string{secretTicketBody, secretDraftBody} {
 		if !containsAny(files, secret) {
 			t.Errorf("bodies were asked for and %s is nowhere in the bundle", secret)
 		}
+	}
+	if containsAny(files, secretMessageBody) {
+		t.Errorf("the bundle carried a record under a kind the product does not write, which it did not establish and cannot describe")
 	}
 }
 

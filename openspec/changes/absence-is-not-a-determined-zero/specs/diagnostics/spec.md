@@ -19,6 +19,14 @@ at the same moment.
 - **THEN** the collected draft bodies contain the drafts that exist, and the manifest reports the
   same number of them as the outbox listing does
 
+### Requirement: The bundle's summary does not overstate what it holds
+The summary a person reads before handing a bundle over SHALL be derived from the manifest rather
+than from a fixed sentence, so that it cannot name as included a category the bundle did not collect.
+
+#### Scenario: Bodies are asked for and one category could not be established
+- **WHEN** a person asks for bodies and one of the body categories is undetermined
+- **THEN** the summary names only the categories the manifest marks collected
+
 ### Requirement: Records that could not be enumerated are said, never counted as none
 Where a bundle cannot enumerate a kind of record, the manifest SHALL report that category as
 undetermined, with a machine-readable reason and a sentence stating that this is not a report that
@@ -35,6 +43,12 @@ from records that exist and would not be read.
 - **THEN** the draft inventory is undetermined, carries a reason and a sentence a person can read,
   and differs in both state and reason from the entry produced for a store that genuinely holds no
   drafts
+
+#### Scenario: A kind of record nothing in this build writes
+- **WHEN** a bundle is produced, with or without an explicit request for bodies, for a kind of record
+  that nothing in the build writes
+- **THEN** that category is undetermined and names this build's lack of a producer as the reason,
+  rather than being collected with a count of zero
 
 #### Scenario: An outbox that holds nothing
 - **WHEN** a bundle is produced on a machine with a store and no drafts in it

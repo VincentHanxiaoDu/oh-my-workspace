@@ -129,11 +129,12 @@ type Report struct {
 // only says a human has seen it and where the decision lives. The test over this repository fails
 // on any UNDECLARED violation and also on any declaration that no longer corresponds to a real
 // finding, so an entry cannot outlive the thing it excuses.
-var Declared = map[string]string{
-	"message": "Issue #32 (debt): `omw diagnostics` counts raw ingested messages under this kind, and " +
-		"channel ingestion stores TICKETS rather than raw messages, so nothing writes it. Issue #67 " +
-		"named three surfaces and this is a fourth; recorded rather than widened into that change.",
-}
+// IT IS EMPTY, AND STAYING EMPTY IS THE POINT. `message` was declared here on the first draft of
+// this change, and the review of PR #92 was right that a declaration must not be what keeps a wrong
+// answer on a person's screen: the bundle went on rendering `message-inventory  collected (0)` while
+// the entry recorded that it was known. `internal/diagnostics` now says it could not determine that
+// count, the kind is no longer read, and TestNoDeclarationIsStale removed the excuse for us.
+var Declared = map[string]string{}
 
 // Analyze parses every non-test Go file under fsys and reports the kinds read with no writer.
 //
@@ -425,19 +426,39 @@ func kindConversion(e ast.Expr) (string, bool) {
 	return s, true
 }
 
+// scanFile records every store read and write in one file.
+//
+// IT WALKS THE WHOLE FILE, NOT ONLY DECLARED FUNCTIONS. An earlier version inspected `*ast.FuncDecl`
+// bodies alone, which made a store call inside a package-level FUNCTION LITERAL invisible — not
+// flagged, and not listed as unresolved either, so the guard found nothing and said nothing. That is
+// the one outcome this package's design refuses, and it was not hypothetical: internal/diagnostics
+// holds a package-level map of `recordSource{List: …}`, and writing those closures inline instead of
+// as named functions is an ordinary tidy-up that would have hidden the very code the guard exists to
+// protect (found in review of PR #92).
+//
+// So the walk descends into every body, declared or literal, and [accountForEveryRead] afterwards
+// asserts that no read-shaped call was reached by neither.
 func scanFile(fset *token.FileSet, f *ast.File, name string, g *globals, rep *Report) {
 	pkg := path.Dir(name)
 	at := func(p token.Pos) string { return fset.Position(p).String() }
 	imported := importedNames(f)
+	seen := map[string]bool{}
 
-	ast.Inspect(f, func(n ast.Node) bool {
-		fn, ok := n.(*ast.FuncDecl)
-		if !ok || fn.Body == nil {
-			return true
-		}
-		locals := localKinds(fn.Body, g)
-		ast.Inspect(fn.Body, func(n ast.Node) bool {
+	// walk scans one node with the kind-holding variables visible to it. Entering a function body —
+	// declared or literal — extends that scope and recurses, so a closure sees the names its
+	// enclosing function bound as well as its own.
+	var walk func(n ast.Node, locals map[string][]string)
+	walk = func(n ast.Node, locals map[string][]string) {
+		ast.Inspect(n, func(n ast.Node) bool {
 			switch x := n.(type) {
+			case *ast.FuncDecl:
+				if x.Body != nil {
+					walk(x.Body, extend(locals, localKinds(x.Body, g)))
+				}
+				return false
+			case *ast.FuncLit:
+				walk(x.Body, extend(locals, localKinds(x.Body, g)))
+				return false
 			case *ast.CallExpr:
 				sel, ok := x.Fun.(*ast.SelectorExpr)
 				if !ok {
@@ -451,6 +472,7 @@ func scanFile(fset *token.FileSet, f *ast.File, name string, g *globals, rep *Re
 					return true
 				}
 				if m, ok := readMethods[sel.Sel.Name]; ok && len(x.Args) == m.Args {
+					seen[at(x.Pos())] = true
 					record(g, locals, x.Args[m.KindArg], Use{Pkg: pkg, Pos: at(x.Pos())}, &rep.Reads, &rep.Unresolved)
 				}
 				if m, ok := writeMethods[sel.Sel.Name]; ok && len(x.Args) == m.Args {
@@ -489,8 +511,56 @@ func scanFile(fset *token.FileSet, f *ast.File, name string, g *globals, rep *Re
 			}
 			return true
 		})
+	}
+	walk(f, nil)
+	accountForEveryRead(fset, f, name, imported, seen, rep)
+}
+
+// accountForEveryRead is the assertion that the walk above missed nothing.
+//
+// WHY A SECOND PASS RATHER THAN TRUST. The walk is the third shape of this scan; the first two each
+// had a hole, and the second one's hole was invisible — no finding, no unresolved entry, nothing to
+// notice. So the file is swept once more for calls shaped like a store read, and any that the walk
+// did not reach is recorded as unresolved. A future syntax nobody anticipated therefore shows up as
+// an unchecked read, which a test fails on, rather than as silence.
+func accountForEveryRead(fset *token.FileSet, f *ast.File, name string, imported, seen map[string]bool, rep *Report) {
+	pkg := path.Dir(name)
+	ast.Inspect(f, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		if id, ok := sel.X.(*ast.Ident); ok && imported[id.Name] {
+			return true
+		}
+		m, ok := readMethods[sel.Sel.Name]
+		if !ok || len(call.Args) != m.Args {
+			return true
+		}
+		pos := fset.Position(call.Pos()).String()
+		if seen[pos] {
+			return true
+		}
+		rep.Unresolved = append(rep.Unresolved, Use{Pkg: pkg, Pos: pos})
 		return true
 	})
+}
+
+// extend returns a copy of outer with inner's bindings laid over it. A copy, because two sibling
+// closures must not see each other's variables.
+func extend(outer, inner map[string][]string) map[string][]string {
+	out := make(map[string][]string, len(outer)+len(inner))
+	for k, v := range outer {
+		out[k] = v
+	}
+	for k, v := range inner {
+		out[k] = v
+	}
+	return out
 }
 
 func record(g *globals, locals map[string][]string, e ast.Expr, at Use, into *[]Use, unresolved *[]Use) {

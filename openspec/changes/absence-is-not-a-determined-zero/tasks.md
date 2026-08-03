@@ -60,18 +60,49 @@
 - [x] 4.7 Declare `message` with the Issue that will settle it, and fail on a declaration that
       outlives its finding.
 
-## 5. Gates
+## 5. Review of PR #92 — changes requested, all three acted on
 
-- [x] 5.1 Every mutation confirmed by grep to be on the exercised path before believing red or green.
-- [x] 5.2 `-count=1` throughout.
-- [x] 5.3 `make ci` green.
-- [x] 5.4 `./.workflow/bin/run-gates.sh` green before pushing.
+- [x] 5.1 The guard was blind to function literals: a store read in one was neither flagged NOR
+      listed as unresolved. Red first with the reviewer's own fixture, which reported
+      `reads=[] unresolved=[] violations=[]`.
+- [x] 5.2 The scan walks every body, declared and literal, with scope-chained locals.
+- [x] 5.3 `accountForEveryRead` sweeps each file again and records any read-shaped call the walk did
+      not reach, so the next unanticipated shape is VISIBLE as unresolved rather than silent.
+- [x] 5.4 Three fixtures: a read in a package-level literal, a WRITE in one (so walking literals
+      cannot turn closure-written kinds into false violations), and the property both are instances
+      of — every read-shaped call accounted for, across `go`, `defer`, struct fields and nesting.
+- [x] 5.5 Reproduce the reviewer's real mutation: point the draft category back at
+      `store.Kind("draft")` through a `func` literal. It compiles, and `kindguard` now goes RED
+      naming kind and file:line where it previously stayed green. Reverted, confirmed clean by
+      `git diff --quiet`.
+- [x] 5.6 `message-inventory` no longer asserts `collected (0)`. Red first through
+      `omw diagnostics`; `listMessages` returns `errNoProducerInThisBuild`, so both message
+      categories render undetermined with `could-not-determine-capability-not-in-this-build`.
+- [x] 5.7 Remove the `message` entry from `kindguard.Declared` — `TestNoDeclarationIsStale` demanded
+      it once the kind stopped being read, which is the mechanism working.
+- [x] 5.8 Keep the declaration mechanism tested now that the map is empty: a declared finding is
+      still reported and does not fail the build.
+- [x] 5.9 The command's closing summary named "ticket, draft and message text" unconditionally. It
+      now points at what the manifest marked collected — a summary that overstates what was handed
+      over is the line a person reads before pressing send.
+- [x] 5.10 The reviewer's non-blocking nit: an outbox that denied access reported "no draft outbox at
+      that path", a determined negative standing in for a permission error. `listDrafts` now stats
+      the marker itself; the detail reads `permission denied`.
+
+## 6. Gates
+
+- [x] 6.1 Every mutation confirmed by grep to be on the exercised path before believing red or green.
+- [x] 6.2 `-count=1` throughout, and every mutation confirmed by `git diff` and not by grep alone.
+- [x] 6.3 `make ci` green.
+- [x] 6.4 `./.workflow/bin/run-gates.sh` green before pushing.
 
 ## Not done, deliberately
 
-- **The `message` inventory.** A fourth surface with the same defect, found while building the
-  guard. Recorded on Issue #32 and declared in `kindguard.Declared` rather than widened into this
-  change.
+- **Ingestion of raw channel messages.** The BUNDLE no longer asserts a zero it cannot count — that
+  was fixed in review — but nothing yet writes a raw message. The ingestion work stays on Issue #32.
+- **The `omw daemon status` / `omw model show` exit-code split** on an unreadable credential. Both
+  print the same sentence; only the exit codes differ (product drove this and corrected the review's
+  stronger characterisation). Recorded on #66 and #67; #67 does not close until it is settled.
 - **A producer for `git` or `token_usage`.** Criterion 2 accepts either half.
 - **The Issue's smaller non-blocking findings.** Named there, not in its acceptance criteria.
 - **Archiving this change.** Not this role's act.

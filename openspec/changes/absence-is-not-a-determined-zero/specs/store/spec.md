@@ -17,8 +17,15 @@ be excused by a cleanup path.
 A read whose kind the check cannot resolve SHALL be reported as unresolved rather than treated as
 checked, because a check that quietly stopped looking is the failure it exists to catch.
 
-A declared exception SHALL name where its decision lives, SHALL remain visible as a finding, and
+A declared exception SHALL NOT be what keeps a wrong answer on a person's screen: where the reading
+surface can state that it could not determine the answer, it SHALL do so and the exception SHALL be
+removed. A declared exception SHALL name where its decision lives, SHALL remain visible as a finding, and
 SHALL fail the build once it no longer corresponds to a real finding.
+
+#### Scenario: A read written in an unusual place
+- **WHEN** a record kind is read inside a function literal, including one at the top level of a file
+- **THEN** the check sees that read, and where any read-shaped call is reached by neither analysis it
+  is reported as unresolved rather than passing unnoticed
 
 #### Scenario: A kind is read and never written
 - **WHEN** the check runs over source in which a record kind is read and no package writes it

@@ -134,6 +134,43 @@ func TestDiagnosticsDraftBodiesReachTheDraftsThatExist(t *testing.T) {
 	}
 }
 
+// THE SAME DEFECT, THE SAME BUNDLE, ONE CATEGORY OVER (found in review of PR #92).
+//
+// Nothing in this build writes a raw ingested message: channel ingestion turns a message into a
+// TICKET and stores no raw message. The bundle counted the kind anyway and reported
+// `message-inventory  collected (0)` — a support engineer reads that and concludes the person has
+// no ingested messages, on exactly the reasoning #67 was filed to refuse. A count that can only
+// ever be zero is not a count.
+func TestTheBundleDoesNotAssertZeroMessagesItCannotCount(t *testing.T) {
+	env := obWorld(t)
+	man, _, _ := runBundle(t, env, "--include-bodies")
+
+	for _, name := range []string{diagnostics.CatMessageInventory, diagnostics.CatMessageBodies} {
+		c := categoryNamed(t, man, name)
+		if c.State == diagnostics.StateCollected {
+			t.Errorf("%s is reported as collected (%d) although nothing in this build writes those "+
+				"records; a zero nobody could have counted is an assertion, not a measurement: %+v",
+				name, c.Items, c)
+		}
+		if c.State != diagnostics.StateUndetermined {
+			t.Errorf("%s is %q, want undetermined: %+v", name, c.State, c)
+		}
+		if c.Reason != diagnostics.ReasonNotInThisBuild {
+			t.Errorf("%s gives reason %q, which does not say this build has nothing that writes them", name, c.Reason)
+		}
+		if !strings.Contains(c.Detail, "NOT a report that there are none") {
+			t.Errorf("%s does not say it is not a report that there are none: %q", name, c.Detail)
+		}
+	}
+
+	// AND IT IS STILL DISTINGUISHABLE FROM A REAL EMPTINESS. Tickets are written by the inbox, so a
+	// store with no tickets is a determined zero and must not have been swept into the same answer.
+	tickets := categoryNamed(t, man, diagnostics.CatTicketInventory)
+	if tickets.State != diagnostics.StateCollected || tickets.Items != 0 {
+		t.Errorf("a store with no tickets is no longer a determined zero: %+v", tickets)
+	}
+}
+
 // ISSUE #67 CRITERION 4, AND THE ASSERTION THAT MAKES THIS SUITE WORTH RUNNING.
 //
 // "There are no drafts" and "the drafts could not be enumerated" must produce DIFFERENT manifest

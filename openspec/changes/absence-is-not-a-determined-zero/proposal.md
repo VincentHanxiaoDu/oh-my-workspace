@@ -71,11 +71,30 @@ when one does. The three-valued answers live inside the manifest, and the exit-c
 fact is driven on `omw outbox list`, which does answer the question (0 with a count, 3 when nothing
 was established).
 
+## Changed in review (PR #92)
+
+- **The guard was blind to function literals.** It inspected declared function bodies only, so a
+  store read inside a `func` literal was neither reported nor listed as unresolved — it produced
+  nothing at all, which is the one outcome the design refuses. This mattered immediately: the fix
+  for Blocker 2 is a package-level map of `recordSource{List: …}`, and writing those closures inline
+  is an ordinary tidy-up that would have hidden the very code the guard protects. The scan now walks
+  every body, and a second pass records any read-shaped call it did not reach.
+- **`message-inventory` no longer asserts a zero it cannot count.** It was left reading a kind
+  nothing writes, declared as known debt. The review was right that a declaration must not also be
+  what keeps a wrong answer on a person's screen: the mechanism for saying so was already in this
+  diff. Both message categories now render undetermined, and the declaration is gone — the staleness
+  test required its removal once the kind stopped being read.
+
 ## Out of scope, recorded rather than widened
 
-- **`store.Kind("message")` is read by the bundle and written by nothing** — the same defect on a
-  fourth surface. Declared in `kindguard.Declared` with a reference, so the guard reports it and a
-  declaration that outlives the finding fails the build. Filed on the rolling debt Issue #32.
+- **Ingestion of raw channel messages.** The bundle now says it cannot determine the count; nothing
+  yet produces one. Issue #32.
+- **`omw daemon status` and `omw model show` disagree on the exit code** for an unreadable
+  credential. Both print the same undetermined sentence, byte for byte — product drove this and
+  corrected the review's stronger reading of it — but one exits 3 and the other 0, so a script
+  learns two things about one machine. Recorded on #66 and #67. **#67 does not close until it is
+  settled**, and the tension is architectural: something has to rule on whether the daemon's report
+  and a caller's command may differ in their codes.
 - The Issue's other smaller findings (`channels status <unknown-id>`, inconsistent usage exit codes,
   `--help` not universal, no `omw version`, two `draft` verbs, tense after a clean stop). Named in
   the Issue, not in its acceptance criteria.

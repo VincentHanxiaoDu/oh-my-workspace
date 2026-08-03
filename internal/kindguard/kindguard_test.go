@@ -50,6 +50,33 @@ func TestNoStoreKindIsReadByOnePackageAndWrittenByNone(t *testing.T) {
 	}
 }
 
+// THE DECLARATION MECHANISM STILL WORKS, AND IS STILL VISIBLE.
+//
+// `Declared` is empty today — the one entry it held kept a wrong answer on a person's screen and was
+// removed in review of PR #92 by fixing the answer. It is kept because the next known gap will need
+// it, and an untested escape hatch is one nobody can trust when they reach for it. A declared
+// finding is still REPORTED; the declaration only takes it out of what the build fails on.
+func TestADeclaredFindingIsStillReportedAndNotFailed(t *testing.T) {
+	prev := Declared
+	Declared = map[string]string{"ghost": "Issue #999: recorded, not suppressed"}
+	t.Cleanup(func() { Declared = prev })
+
+	rep := analyzeSource(t, preamble+`
+const KindGhost = store.Kind("ghost")
+
+func Count(s *store.Store) int { r, _ := s.List(KindGhost); return len(r) }
+`)
+	if len(rep.Violations) != 1 {
+		t.Fatalf("a declared kind is no longer reported as a finding at all: %v", rep.Violations)
+	}
+	if rep.Violations[0].Declared == "" {
+		t.Errorf("the finding does not carry the reason it is tolerated: %+v", rep.Violations[0])
+	}
+	if len(rep.Undeclared()) != 0 {
+		t.Errorf("a declared finding still fails the build: %v", rep.Undeclared())
+	}
+}
+
 // A DECLARATION CANNOT OUTLIVE THE THING IT EXCUSES.
 func TestNoDeclarationIsStale(t *testing.T) {
 	rep := repo(t)
@@ -237,6 +264,85 @@ func Count(s *store.Store) int {
 	}
 	if len(rep.Undeclared()) != 1 || rep.Undeclared()[0].Kind != "ghost" {
 		t.Fatalf("a typed kind read with no writer produced %v", rep.Violations)
+	}
+}
+
+// A READ INSIDE A FUNCTION LITERAL IS SEEN.
+//
+// THIS IS THE SHAPE THE FIX FOR BLOCKER 2 IS ONE REFACTOR AWAY FROM. `internal/diagnostics` now
+// holds a package-level map of `recordSource{List: …}`; writing those closures inline instead of as
+// named functions is an ordinary tidy-up, and an analysis that only walked `*ast.FuncDecl` bodies
+// would have stopped seeing the very code this guard was written to protect — not by flagging it,
+// and not by listing it as unresolved, but by silently finding nothing at all. Reviewed on PR #92,
+// where reintroducing Blocker 2 through a `func` literal turned diagnostics and commands red and
+// left this package green.
+func TestAReadInsideAFunctionLiteralIsNotInvisible(t *testing.T) {
+	rep := analyzeSource(t, preamble+`
+type src struct{ List func(s *store.Store) int }
+
+var sources = map[string]src{
+	"draft": {List: func(s *store.Store) int { r, _ := s.List(store.Kind("ghost")); return len(r) }},
+}
+`)
+	if len(rep.Undeclared()) != 1 {
+		t.Fatalf("a read inside a function literal produced %d violations, want 1 (reads=%v unresolved=%v)",
+			len(rep.Undeclared()), rep.Reads, rep.Unresolved)
+	}
+	if got := rep.Undeclared()[0].Kind; got != "ghost" {
+		t.Errorf("the violation names %q, want ghost", got)
+	}
+}
+
+// A WRITE INSIDE A FUNCTION LITERAL COUNTS TOO. Without this, walking literals would turn every
+// closure-written kind into a false violation — the opposite failure, and just as wrong.
+func TestAWriteInsideAFunctionLiteralCounts(t *testing.T) {
+	rep := analyzeSource(t, preamble+`
+type src struct {
+	List  func(s *store.Store) int
+	Write func(s *store.Store) error
+}
+
+var sources = map[string]src{
+	"real": {
+		List:  func(s *store.Store) int { r, _ := s.List(store.Kind("real")); return len(r) },
+		Write: func(s *store.Store) error { return s.PutJSON(store.Kind("real"), "id", nil) },
+	},
+}
+`)
+	if len(rep.Violations) != 0 {
+		t.Errorf("a kind read and written inside function literals was reported: %v", rep.Violations)
+	}
+	if !hasKind(rep.Reads, "real") || !hasKind(rep.Writes, "real") {
+		t.Errorf("the analysis did not see both halves inside literals: reads=%v writes=%v", rep.Reads, rep.Writes)
+	}
+}
+
+// NO STORE-SHAPED CALL IS EVER SILENTLY DROPPED, whatever syntax it is written in.
+//
+// The two tests above name shapes somebody thought of. This one asserts the property they are
+// instances of: every call this package recognises as a store read is accounted for, as a resolved
+// read or as an unresolved one. A shape nobody anticipated shows up here as unresolved — visible,
+// which is the outcome the design requires — rather than as nothing at all.
+func TestEveryReadShapedCallIsAccountedFor(t *testing.T) {
+	rep := analyzeSource(t, preamble+`
+type holder struct{ fn func() }
+
+var atPackageLevel = func(s *store.Store) int { r, _ := s.List(store.Kind("one")); return len(r) }
+
+func Named(s *store.Store) int {
+	inner := func() int { r, _ := s.List(store.Kind("two")); return len(r) }
+	go func() { s.List(store.Kind("three")) }()
+	defer func() { s.Get(store.Kind("four"), "id") }()
+	h := holder{fn: func() { s.List(store.Kind("five")) }}
+	_ = h
+	return inner()
+}
+`)
+	for _, want := range []string{"one", "two", "three", "four", "five"} {
+		if !hasKind(rep.Reads, want) {
+			t.Errorf("the read of kind %q was not accounted for at all; reads=%v unresolved=%v",
+				want, rep.Reads, rep.Unresolved)
+		}
 	}
 }
 
