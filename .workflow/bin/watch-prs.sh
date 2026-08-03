@@ -66,6 +66,17 @@ case "${1:-}" in
         echo "::error::unknown option '$1'. This is a typo, not an argument — refusing." >&2; exit 2; } ;;
 esac
 
+# THE REASON A LOOKUP FAILED IS AT THE END OF ITS OUTPUT, NEVER AT THE START — see the long note in
+# watch-queue.sh, where the same `cut -c1-N` threw away a `dial tcp … operation timed out` and kept
+# the headings that preceded it (Issue #64). A SHORT REASON IS STILL SHOWN WHOLE, byte for byte as
+# before: a fix that always printed a tail would mangle the common case.
+reason() { # reason <text> <budget>
+  local flat budget=$2
+  flat=$(printf '%s' "$1" | tr '\n' ' ')
+  if [ "${#flat}" -le "$budget" ]; then printf '%s' "$flat"; return 0; fi
+  printf '…%s' "${flat: -$((budget - 1))}"
+}
+
 resolve_repo() {
   [ -n "${REPO:-}" ] && return 0
   local url; url=$(git config --get remote.origin.url 2>/dev/null || echo "")
@@ -134,6 +145,37 @@ self_test() {
 {"workflow_runs":[{"status":"in_progress","conclusion":null,"head_sha":"abcdef1234"}]}|still running
 {"workflow_runs":[]}|MAIN STATE UNKNOWN
 CASES
+  # A RED MAIN NAMES THE CHECK, AND DOES NOT NAME A CULPRIT IT DID NOT MEASURE (Issue #64).
+  # The stub is the observed event: a red push run whose failing job is the naming gate, on a
+  # DIRECT PUSH sha that no merge here produced.
+  cat > "$tmp/gh" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *"/jobs"*) echo '{"jobs":[{"name":"Build and tests","conclusion":"success"},{"name":"Branch name and commit convention","conclusion":"failure"}]}' ;;
+  *)         echo '{"workflow_runs":[{"id":77,"status":"completed","conclusion":"failure","head_sha":"19f05904aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}' ;;
+esac
+STUB
+  chmod +x "$tmp/gh"
+  got=$(PATH="$tmp:$PATH" REPO=x/y bash "$tmp/watch-prs.sh" --main-state 2>/dev/null || echo "")
+  case "$got" in
+    *"Branch name and commit convention"*) : ;;
+    *) echo "SELF-TEST FAIL: a red main did not name the failing check — the reader is sent to the Actions tab for what the watch was already told (got: $got)" >&2; rc=1 ;;
+  esac
+  case "$got" in
+    *"yours to fix"*) echo "SELF-TEST FAIL: a red main nobody here merged into was still called the reader's to fix — this is the wrong attribution, on the one thing the reader acts on (got: $got)" >&2; rc=1 ;;
+    *) : ;;
+  esac
+  case "$got" in
+    *"NOT DETERMINED"*) : ;;
+    *) echo "SELF-TEST FAIL: an underived cause was not said to be undetermined (got: $got)" >&2; rc=1 ;;
+  esac
+  # AND WHEN IT *IS* DERIVABLE IT MAY STILL SAY SO — derived from the sha, not from who merged last.
+  got=$(PATH="$tmp:$PATH" REPO=x/y bash "$tmp/watch-prs.sh" --main-state 19f05904aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 2>/dev/null || echo "")
+  case "$got" in
+    *"yours to fix"*) : ;;
+    *) echo "SELF-TEST FAIL: main's red IS the caller's own merge commit and the watch did not say so — refusing to attribute what it did measure is the opposite error (got: $got)" >&2; rc=1 ;;
+  esac
+
   # AND WHEN THE LOOKUP ITSELF FAILS. An outage must not be spelled the same way as a green main.
   printf '#!/usr/bin/env bash\necho boom >&2\nexit 1\n' > "$tmp/gh"; chmod +x "$tmp/gh"
   got=$(PATH="$tmp:$PATH" REPO=x/y bash "$tmp/watch-prs.sh" --main-state 2>/dev/null || echo "")
@@ -276,25 +318,102 @@ emit() { # emit <state> <number> <title> [detail]
 #
 # THREE ANSWERS, NEVER TWO. A run still going is not a pass, and a lookup that failed is not a pass
 # either; both would otherwise be spelled the same way as green and a red main would go unmentioned.
+#
+# AND A RED MAIN NAMES THE CHECK THAT IS RED, AND DOES NOT NAME A CULPRIT IT DID NOT MEASURE
+# (Issue #64). This previously read:
+#
+#   MERGED #51 … — you merged this — MAIN IS RED at 19f05904 (failure) — YOU merged into it, so
+#   this is yours to fix before merging anything else
+#
+# **`main` was red and the alarm was right to fire.** The merges did not cause it:
+#
+#   Build and tests                        success
+#   Generated files not hand-authored      success
+#   Tasks complete                         success
+#   Branch name and commit convention      failure   ← 19f0590's subject is 113 characters, limit 72
+#
+# `19f05904` is a DIRECT PUSH to main by the framework, one parent, so the merge-commit exemption in
+# `check-naming.sh` does not apply to it. It is not any merge's doing. Inferring the cause from who
+# merged last is a proxy for authorship that stops measuring it the moment anything else can redden
+# main — and something else can, BY DESIGN, because the framework pushes to main.
+#
+# Sending the merger to fix a commit they did not write is the same error `pr-authors.sh` exists to
+# end: an attribution that does not match the diff. So the attribution is DERIVED — main's failing
+# commit is compared with the merge commit the caller actually made — and where it cannot be
+# derived it says CAUSE NOT DETERMINED rather than guessing. An undetermined answer must not wear
+# the face of a determined one (PRD §4.3), and this one was acted on twice.
+#
+# The lookups are cached in these globals: one poll asks about main once, however many merged pull
+# requests it has to describe.
+MAIN_LINE=""
+MAIN_RED_SHA=""
+
+# WHICH CHECK IS RED, by name. A bare `(failure)` sends the reader to the Actions tab to find out
+# what the watch had already been told, and half of `Branch name and commit convention` was a red
+# herring for the rule that actually fired.
+failing_checks() { # $1 = run id
+  local raw names
+  [ -n "$1" ] || { printf 'failing check NOT DETERMINED — the run carried no id'; return 0; }
+  # PARSED HERE, NOT WITH `gh --jq`, for the same reason `main_state` parses here: the self-test
+  # drives this through a stub `gh`, and a stub cannot implement `--jq`. A branch that only runs
+  # against the real binary is a branch nothing tests.
+  raw=$(gh api "repos/$REPO/actions/runs/$1/jobs" 2>/dev/null) \
+    || { printf 'failing check NOT DETERMINED — the run'\''s jobs could not be read'; return 0; }
+  names=$(printf '%s' "$raw" \
+    | jq -r '[.jobs[]? | select(.conclusion=="failure" or .conclusion=="timed_out" or .conclusion=="cancelled") | .name] | join(", ")' 2>/dev/null) \
+    || { printf 'failing check NOT DETERMINED — the run'\''s jobs could not be parsed'; return 0; }
+  # AN UNREADABLE ANSWER IS NOT AN EMPTY ONE. A run that is red must have a red job in it; if none
+  # came back, the query did not answer and must not be rendered as "nothing was failing".
+  [ -n "$names" ] || { printf 'failing check NOT DETERMINED — the run is red but no failing job was returned'; return 0; }
+  printf '%s' "$names"
+}
+
 main_state() {
-  local run concl st sha
+  local run concl st sha runid
+  [ -n "$MAIN_LINE" ] && { printf '%s' "$MAIN_LINE"; return 0; }
   run=$(gh api "repos/$REPO/actions/runs?branch=main&event=push&per_page=1" 2>/dev/null) || {
-    echo "MAIN STATE UNKNOWN (could not read the push run — check main yourself before merging more)"
-    return 0
+    MAIN_LINE="MAIN STATE UNKNOWN (could not read the push run — check main yourself before merging more)"
+    printf '%s' "$MAIN_LINE"; return 0
   }
   st=$(printf '%s' "$run" | jq -r '.workflow_runs[0].status // ""' 2>/dev/null || echo "")
   concl=$(printf '%s' "$run" | jq -r '.workflow_runs[0].conclusion // ""' 2>/dev/null || echo "")
   sha=$(printf '%s' "$run" | jq -r '.workflow_runs[0].head_sha // "" | .[0:8]' 2>/dev/null || echo "")
+  runid=$(printf '%s' "$run" | jq -r '.workflow_runs[0].id // ""' 2>/dev/null || echo "")
   case "$st|$concl" in
-    "|"|"")        echo "MAIN STATE UNKNOWN (no push run found on main — check main yourself)" ;;
-    *"|success")   echo "main is GREEN at ${sha:-?}" ;;
-    completed"|"*) echo "MAIN IS RED at ${sha:-?} (${concl:-no conclusion}) — YOU merged into it, so this is yours to fix before merging anything else" ;;
-    *)             echo "main's build is still running at ${sha:-?} — not green yet, watch it out" ;;
+    "|"|"")        MAIN_LINE="MAIN STATE UNKNOWN (no push run found on main — check main yourself)" ;;
+    *"|success")   MAIN_LINE="main is GREEN at ${sha:-?}" ;;
+    completed"|"*)
+      MAIN_RED_SHA=$(printf '%s' "$run" | jq -r '.workflow_runs[0].head_sha // ""' 2>/dev/null || echo "")
+      MAIN_LINE="MAIN IS RED at ${sha:-?} — the failing check is: $(failing_checks "$runid")" ;;
+    *)             MAIN_LINE="main's build is still running at ${sha:-?} — not green yet, watch it out" ;;
   esac
+  printf '%s' "$MAIN_LINE"
+}
+
+# WHOSE IT IS, DERIVED OR NOT CLAIMED. `$1` is the commit the caller's own merge produced. If main's
+# failing commit IS that commit, the red is attributable and saying so is useful. Anything else —
+# a different sha, an unreadable merge sha, a red main nobody here merged into — is NOT derivable
+# from what was measured, and gets said as such.
+attributed_main_state() { # $1 = the merge commit sha this caller produced, may be empty
+  # CALLED WITHOUT A COMMAND SUBSTITUTION, DELIBERATELY. `main_state` records what it found in
+  # globals, and a `$(...)` runs it in a subshell where those assignments die with the subshell —
+  # so the attribution below silently saw an empty `MAIN_RED_SHA` and never fired. The self-test
+  # arm caught it; reading the code did not.
+  local line
+  main_state >/dev/null
+  line=$MAIN_LINE
+  [ -n "$MAIN_RED_SHA" ] || { printf '%s' "$line"; return 0; }
+  if [ -n "${1:-}" ] && [ "${1:-}" = "$MAIN_RED_SHA" ]; then
+    printf '%s — this red IS the merge commit you just made, so it is yours to fix before merging anything else' "$line"
+    return 0
+  fi
+  printf '%s — CAUSE NOT DETERMINED: main'\''s failing commit is not the merge you made, and this watch does not infer the author from who merged last. The framework pushes to main directly, so read that commit before assuming the red is yours' "$line"
 }
 
 # The self-test drives main's colour through this, so what it asserts is what the watch runs.
-[ "$role" = "--main-state" ] && { main_state; exit 0; }
+# `--main-state [merge-sha]`: with no sha the attribution cannot be derived and is not claimed,
+# which is also the honest default for a person asking "what does main look like?".
+[ "$role" = "--main-state" ] && { attributed_main_state "${2:-}"; echo; exit 0; }
 
 here_bin=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # Sleep until the throttle that is actually holding this watch is expected to lift, but never less
@@ -335,7 +454,7 @@ while true; do
       [ "$sweep" = no ] || exit 1
       sleep "$(HOLD_SLEEP)"; continue
     fi
-    echo "LOOKUP FAILED: $(printf '%s' "$prs" | tr '\n' ' ' | cut -c1-160)"
+    echo "LOOKUP FAILED: $(reason "$prs" 160)"
     # A SWEEP THAT COULD NOT READ THE BOARD MUST EXIT NON-ZERO. It is answering a question asked
     # once, and a caller that sees exit 0 and no events concludes there is nothing waiting on it —
     # which is this whole file's subject, arriving through its own front door.
@@ -396,7 +515,7 @@ while true; do
 
     # Check runs on the head sha. A failure here is itself a lookup failure, not a green.
     if ! runs=$(gh api "repos/$REPO/commits/$sha/check-runs" 2>&1); then
-      echo "LOOKUP FAILED: check runs for #$num: $(printf '%s' "$runs" | tr '\n' ' ' | cut -c1-120)"
+      echo "LOOKUP FAILED: check runs for #$num: $(reason "$runs" 120)"
       continue
     fi
     failing=$(printf '%s' "$runs" | jq -r '[.check_runs[]? | select(.conclusion=="failure" or .conclusion=="timed_out" or .conclusion=="cancelled") | .name] | join(", ")' 2>/dev/null || echo "")
@@ -473,16 +592,17 @@ while true; do
   # place — `queue.sh` routes `feat`/`spec` to product and everything else to qa. Same rule here, so
   # the role told to merge it is the role told how it went.
   if merged=$(gh api "repos/$REPO/pulls?state=closed&per_page=20&sort=updated&direction=desc" 2>/dev/null); then
-    mainstate=""
-    while IFS=$'\t' read -r num title branch; do
+    while IFS=$'\t' read -r num title branch msha; do
       [ -n "$num" ] || continue
       case "$branch" in "$role"/*) emit MERGED "$num" "$title" ;; esac
 
       case "$branch" in */feat/*|*/spec/*) merger=product ;; *) merger=qa ;; esac
       [ "$merger" = "$role" ] || continue
-      [ -n "$mainstate" ] || mainstate=$(main_state)
-      emit MERGED "$num" "$title" "you merged this — $mainstate"
-    done < <(printf '%s' "$merged" | jq -r '.[] | select(.merged_at != null) | [.number, .title, .head.ref] | @tsv' 2>/dev/null || true)
+      # THE MERGE COMMIT COMES FROM THE PULL REQUEST ITSELF, and it is what makes the attribution a
+      # derivation rather than a guess: main's failing commit either IS this merge or it is not.
+      # `main_state` caches its own lookups, so this stays one question about main per poll.
+      emit MERGED "$num" "$title" "you merged this — $(attributed_main_state "$msha")"
+    done < <(printf '%s' "$merged" | jq -r '.[] | select(.merged_at != null) | [.number, .title, .head.ref, (.merge_commit_sha // "")] | @tsv' 2>/dev/null || true)
   fi
 
   # A SWEEP IS ONE PASS AND THEN IT IS OVER.
