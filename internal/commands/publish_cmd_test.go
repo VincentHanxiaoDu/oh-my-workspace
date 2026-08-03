@@ -451,3 +451,77 @@ func TestNoScopesConfiguredMeansNoPublishGrant(t *testing.T) {
 		t.Errorf("the refusal does not name the missing scope:\n%s", got.all())
 	}
 }
+
+// ---------------------------------------------------------------------------
+// A determined absence is not an undetermined answer (Issue #10, QA §4)
+// ---------------------------------------------------------------------------
+
+// pubUnreadableStore builds a REAL store — created by [store.Create], so it carries a real marker —
+// and then takes the permission to read it away. A bare directory would not do: [store.Open]
+// rejects it as [store.ErrNotFound], which compares the wrong two things.
+func pubUnreadableStore(t *testing.T) map[string]string {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a mode-000 directory anyway, so this arm cannot be built here")
+	}
+	env := pubWorld(t)
+	root := env[store.PathEnv]
+	if err := os.Chmod(root, 0o000); err != nil {
+		t.Fatalf("making the store unreadable: %v", err)
+	}
+	t.Cleanup(func() { os.Chmod(root, 0o700) })
+	return env
+}
+
+// TestPublishDistinguishesAnAbsentStoreFromAnUnreadableOneByExitCode is the three-valued contract at
+// the CLI seam: `could not determine` and `determined to be nothing` must never share an exit code.
+//
+// A store that is ABSENT is a DETERMINED fact — store.Open said ErrNotFound, which the store package
+// documents as "the truth, and a caller that finds it must say so". Reporting it as
+// ExitUndetermined tells a script "unknown, try again" about a machine that simply has no store, and
+// it will retry or alert forever. A store that cannot be READ is the genuinely undetermined one.
+//
+// This is the mirror of Issues #68/#48, which report an undetermined answer as a determined
+// negative. Same rule, opposite direction — so the fix is not to make everything undetermined.
+//
+// All three subcommands are driven. A fix verified on one and assumed for the other two is how the
+// collapse shipped in the first place.
+func TestPublishDistinguishesAnAbsentStoreFromAnUnreadableOneByExitCode(t *testing.T) {
+	for _, sub := range [][]string{{"note", "n"}, {"state", "n"}, {"list"}} {
+		name := sub[0]
+		t.Run(name, func(t *testing.T) {
+			// DETERMINED: there is no store here, and that is an answer.
+			absent := runPublishCmd(t, obNoStore(t), sub...)
+			if absent.code != cli.ExitFailure {
+				t.Errorf("no store at all: exit %d, want %d (ExitFailure) — an absent store is a "+
+					"DETERMINED negative, not something that could not be determined\n%s",
+					absent.code, cli.ExitFailure, absent.all())
+			}
+			if !strings.Contains(absent.all(), "there is no store at") {
+				t.Errorf("no store at all: the output does not name the absence:\n%s", absent.all())
+			}
+
+			// UNDETERMINED: a store is there and this user cannot read it.
+			unreadable := runPublishCmd(t, pubUnreadableStore(t), sub...)
+			if unreadable.code != cli.ExitUndetermined {
+				t.Errorf("unreadable store: exit %d, want %d (ExitUndetermined)\n%s",
+					unreadable.code, cli.ExitUndetermined, unreadable.all())
+			}
+
+			// THE CRITERION. Whatever the codes are, these two facts must not share one.
+			if absent.code == unreadable.code {
+				t.Errorf("an absent store and an unreadable store both exit %d — "+
+					"`determined to be nothing` and `could not determine` have collapsed into one "+
+					"answer, and no script can tell them apart", absent.code)
+			}
+
+			// A store that IS there and IS readable gets past the store entirely: whatever this
+			// subcommand then exits, it is not one of the two failures above.
+			present := runPublishCmd(t, pubWorld(t), sub...)
+			if strings.Contains(present.all(), "there is no store at") ||
+				strings.Contains(present.all(), "could not be read") {
+				t.Errorf("a present, readable store was reported as absent or unreadable:\n%s", present.all())
+			}
+		})
+	}
+}

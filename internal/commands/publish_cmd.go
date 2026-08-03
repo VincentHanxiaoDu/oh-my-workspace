@@ -15,6 +15,7 @@
 package commands
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -120,10 +121,27 @@ func publishOpen(env cli.Env, what string) (*publish.Ledger, *drafts.Outbox, int
 			fmt.Fprintf(env.Stderr, "  %s\n", why)
 		}
 	}
+	// THREE FACTS, THREE ANSWERS — the same distinction [outboxOpenStore] makes, in the same words,
+	// because these are the same three facts about the same store.
+	//
+	// A store that is ABSENT is a DETERMINED negative: [store.ErrNotFound] is documented as the
+	// truth, and a caller that finds it must say so. Collapsing it into ExitUndetermined tells a
+	// script "unknown, try again" about a machine that simply has no store, and it retries forever.
+	// Only a store that is there and cannot be READ is undetermined.
 	s, err := store.Open(path)
-	if err != nil {
-		fmt.Fprintf(env.Stderr, "omw publish %s: the store at %s could not be opened: %v\n", what, path, err)
+	switch {
+	case err == nil:
+	case errors.Is(err, store.ErrNotFound):
+		fmt.Fprintf(env.Stderr, "omw publish %s: there is no store at %s, and %v.\n", what, path, drafts.ErrNoStore)
+		fmt.Fprintf(env.Stderr, "  Nothing was sent. Run 'omw store create' to create one on purpose.\n")
+		return nil, nil, cli.ExitFailure, false
+	case errors.Is(err, store.ErrUnreadable), errors.Is(err, store.ErrPermissionDenied):
+		fmt.Fprintf(env.Stderr, "omw publish %s: the store at %s could not be read: %v\n", what, path, err)
 		fmt.Fprintf(env.Stderr, "  An unreadable store is not an empty one, and nothing was sent.\n")
+		return nil, nil, cli.ExitUndetermined, false
+	default:
+		fmt.Fprintf(env.Stderr, "omw publish %s: the store at %s %s: %v\n", what, path, tri.Undetermined, err)
+		fmt.Fprintf(env.Stderr, "  Nothing was sent.\n")
 		return nil, nil, cli.ExitUndetermined, false
 	}
 	o, err := drafts.InStore(s)

@@ -86,3 +86,26 @@ in its own line rather than being ticked as though it were driven.
       Swapping it changes no observable outcome on any path a test can reach, because the failure it
       opens needs a kill inside a window a test cannot aim at without a hook in product code. It is
       not claimed as driven anywhere. That disclosure is the task, and it is done.
+
+## Review round 2 — qa's blocking finding on `7da9cb1` (§4)
+
+- [x] `publishOpen` distinguishes the three facts about the store instead of collapsing them:
+      `store.ErrNotFound` is a DETERMINED negative and exits `ExitFailure` (1);
+      `ErrUnreadable`/`ErrPermissionDenied` and anything unrecognised stay `ExitUndetermined` (3)
+- [x] The wording and the distinction are `outboxOpenStore`'s, not a second vocabulary for the same
+      three facts
+- [x] `TestPublishDistinguishesAnAbsentStoreFromAnUnreadableOneByExitCode` drives all three
+      subcommands (`note`, `state`, `list`) and compares the two exit codes TO EACH OTHER, so it
+      cannot pass by the two collapsing onto a shared value again
+- [x] The unreadable arm is a REAL store from `store.Create` with its permissions removed — a bare
+      directory is rejected as `ErrNotFound` and would compare the wrong two things
+- [x] Confirmed RED before the fix on all three subcommands, and confirmed the mutation that restores
+      the collapse is killed while leaving the message text correct — the test discriminates on the
+      exit code, not on prose
+
+## Review round 2 — qa's non-blocking finding 2 (M3, §3)
+
+- [x] `TestARefusalAndAnUnreachableHubDifferMachineCheckably` now asserts the never-sent path leaves
+      the note in EXACTLY `drafted` with no ledger record. "Neither published nor refused" was
+      satisfied by `in flight` too, which is why M3 survived the whole repository suite.
+- [x] M3 re-driven and now KILLED on both assertions

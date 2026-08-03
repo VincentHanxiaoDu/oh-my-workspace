@@ -387,6 +387,8 @@ func TestARefusalAndAnUnreachableHubDifferMachineCheckably(t *testing.T) {
 	draft(t, c, "n", "body")
 
 	unreachable := transfer(c, "n", socketPath(t, "dead.sock"), publisher)
+	// Read the ledger HERE, before the refusal below writes a record of its own over the same note.
+	_, recordAfterUnreachable, unreachableLedgerErr := c.l.read("n")
 	refused := transfer(c, "n", h.addr, []hub.Scope{hub.ScopeRead})
 
 	if unreachable.Attempt == refused.Attempt {
@@ -408,6 +410,22 @@ func TestARefusalAndAnUnreachableHubDifferMachineCheckably(t *testing.T) {
 	}
 	if !unreachable.Report.InOutbox() {
 		t.Errorf("after an unreachable-hub attempt the note is not in the outbox")
+	}
+	// EXACTLY `drafted`, AND NO RECORD LEFT BEHIND. "Neither published nor refused" is satisfied by
+	// `in flight` too, so the assertions above pass just as happily if transfer.go stops clearing the
+	// record on the never-sent path — and then an unreachable hub would leave this note's published
+	// answer permanently UNDETERMINED when it is determinedly NO. Nothing left the machine, so the
+	// determined answer is available and must be given.
+	if unreachable.Report.State != StateDrafted {
+		t.Errorf("after an unreachable-hub attempt the state is %q, want %q — nothing left this "+
+			"machine, so the note is not in flight and its fate is not unknown",
+			unreachable.Report.State, StateDrafted)
+	}
+	if unreachableLedgerErr != nil {
+		t.Errorf("reading the ledger back: %v", unreachableLedgerErr)
+	} else if recordAfterUnreachable {
+		t.Errorf("an attempt that was never sent left a record behind; the note would read as " +
+			"outstanding forever")
 	}
 	// And the renderings differ as strings, which is what a person sees.
 	if unreachable.Report.Render() == refused.Report.Render() {
