@@ -114,9 +114,13 @@ hand_edit_gate() {
 # HAS reached the specification. A change that shipped and whose spec was never regenerated at all
 # is indistinguishable, by anything in this repository, from one that has not shipped yet — the
 # in-flight fixture `outbox-drafts-and-modes` and the shipped-and-unarchived
-# `unplaceable-verdict-reported` were byte-for-byte alike on every local signal. Refusing to guess
-# there is the point: this gate stays silent on what it cannot tell rather than blocking the
-# release critical path.
+# `unplaceable-verdict-reported` were alike on every local signal. Refusing to guess there is the
+# point: this gate does not block on what it cannot tell.
+#
+# AND IT DOES NOT ANSWER 'NO' THERE EITHER. Only the full match is a determination. A partial or
+# absent match is reported as UNDETERMINED, in its own words, because those are two different facts
+# and the first version of this arm gave them one confident rendering — announcing "its work has not
+# landed" about a change that had shipped. Not blocking and answering 'no' are not the same act.
 archive_gate() {
   local base=$1 rc=0 regen cap dir slug delta reqs req n hit spec
 
@@ -170,13 +174,27 @@ archive_gate() {
         echo "  and commit the move together with this regeneration." >&2
         rc=1
       else
-        echo "  in flight, not blocked: $slug (capability '$cap') — $hit of $n requirements are in $spec," \
-             "so its work has not landed and it is not owed an archive."
+        # A PARTIAL OR ABSENT MATCH IS NOT A DETERMINATION THAT THE WORK HAS NOT LANDED, and saying
+        # so was this gate's own first defect. It printed `in flight, not blocked … so its work has
+        # not landed` about `unplaceable-verdict-reported` — which HAD shipped, in #98 — in the same
+        # sentence shape and under the same label as the genuinely in-flight
+        # `outbox-drafts-and-modes`. Two different facts, one rendering, and the confident half was
+        # false. PRD §4.3: a state that could not be determined is shown as undetermined, never as a
+        # 'no'. That rule does not stop applying because the thing rendering it is a gate.
+        #
+        # The absent case and the partial case are the SAME KIND OF FACT as the empty delta above,
+        # and they get the same word. What the gate can determine is that the content HAS landed;
+        # everything short of that it cannot, and it now says which.
+        echo "  cannot tell for $slug (capability '$cap'): $hit of $n requirements are in $spec." \
+             "Whether this change has shipped is UNDETERMINED from this repository — a partial or" \
+             "absent match does not establish that it is still in flight. Not blocked."
       fi
     done
   done
 
-  [ "$rc" -eq 0 ] && echo "archive check: every regenerated capability's change directory is either gone or still in flight."
+  # THE CLOSING LINE SAYS WHAT WAS DETERMINED AND NOT MORE. "Every directory is gone or still in
+  # flight" would re-assert, in the summary, the very claim the arm above refuses to make.
+  [ "$rc" -eq 0 ] && echo "archive check: no change directory was found whose content has already landed. Anything reported above as UNDETERMINED was not judged either way."
   return "$rc"
 }
 
@@ -318,7 +336,27 @@ self_test() {
   printf -- '- [x] a\n' > "$tmp/inflight/openspec/changes/archive/2026-01-01-other/tasks.md"
   git -C "$tmp/inflight" add -A; git -C "$tmp/inflight" commit -qm "chore: archive somebody else's change"
   out=$(_run "$tmp/inflight") || { echo "SELF-TEST FAIL: an in-flight change was accused of needing an archive" >&2; rc=1; }
-  case "$out" in *"in flight, not blocked: c1"*) : ;; *) echo "SELF-TEST FAIL: the in-flight change passed for the wrong reason: $out" >&2; rc=1 ;; esac
+  # AND IT MUST NOT BE ANSWERED AS A 'NO'. `0 of N` was rendered `so its work has not landed`, which
+  # is a determination, and it was FALSE about `unplaceable-verdict-reported` on real `main` — a
+  # change that had shipped. Not blocking is right; claiming to know is not.
+  case "$out" in *"cannot tell for c1"*) : ;; *) echo "SELF-TEST FAIL: the unshipped case passed for the wrong reason: $out" >&2; rc=1 ;; esac
+  case "$out" in *"UNDETERMINED from this repository"*) : ;; *) echo "SELF-TEST FAIL: a 0-of-N result was reported as a determination rather than as undetermined: $out" >&2; rc=1 ;; esac
+  case "$out" in *"its work has not landed"*) echo "SELF-TEST FAIL: the confident sentence is back — a 0-of-N result is not a finding that the work has not landed: $out" >&2; rc=1 ;; esac
+
+  # 8b. A PARTIAL MATCH IS THE SAME KIND OF FACT and must render the same way. Driven separately
+  #     because `hit == 0` and `0 < hit < n` reach it by different arithmetic, and a branch written
+  #     for one of them can be wrong for the other.
+  _mkchange "$tmp/partial" "## Requirements\n"
+  printf '## ADDED Requirements\n\n### Requirement: One\nIt SHALL.\n\n#### Scenario: a\n- **WHEN** a\n- **THEN** b\n\n### Requirement: Two\nIt SHALL.\n\n#### Scenario: c\n- **WHEN** c\n- **THEN** d\n' \
+    > "$tmp/partial/openspec/changes/c1/specs/thing/spec.md"
+  printf '# thing Specification\n\n## Purpose\nA thing.\n\n## Requirements\n\n### Requirement: One\nIt SHALL.\n\n#### Scenario: a\n- **WHEN** a\n- **THEN** b\n' \
+    > "$tmp/partial/openspec/specs/thing/spec.md"
+  mkdir -p "$tmp/partial/openspec/changes/archive/2026-01-01-other"
+  printf -- '- [x] a\n' > "$tmp/partial/openspec/changes/archive/2026-01-01-other/tasks.md"
+  git -C "$tmp/partial" add -A; git -C "$tmp/partial" commit -qm "chore: half of c1's requirements have landed"
+  out=$(_run "$tmp/partial") || { echo "SELF-TEST FAIL: a partial match was BLOCKED" >&2; rc=1; }
+  case "$out" in *"1 of 2 requirements"*) : ;; *) echo "SELF-TEST FAIL: a partial match did not report the count it measured: $out" >&2; rc=1 ;; esac
+  case "$out" in *"UNDETERMINED from this repository"*) : ;; *) echo "SELF-TEST FAIL: a partial match was not reported as undetermined: $out" >&2; rc=1 ;; esac
 
   # 9. A DELTA WITH NO REQUIREMENT HEADINGS MUST BE UNDETERMINED, NOT GREEN-BY-VACUITY. "Every one
   #    of zero is present" is true, and an empty delta would otherwise be accused on nothing.
@@ -340,7 +378,7 @@ self_test() {
   out=$(_run "$tmp/untouched") || { echo "SELF-TEST FAIL: a PR regenerating nothing was blocked by the archive arm" >&2; rc=1; }
   case "$out" in *"regenerates no capability spec"*) : ;; *) echo "SELF-TEST FAIL: the archive arm did not say why it had nothing to judge: $out" >&2; rc=1 ;; esac
 
-  [ "$rc" -eq 0 ] && echo "self-test passed: no generated tree passes and says so, a hand edit fails, regeneration alongside an archive passes, a regeneration that leaves its change directory standing fails naming the archive command, an in-flight change stays green, and an unreachable base fails without claiming it looked"
+  [ "$rc" -eq 0 ] && echo "self-test passed: no generated tree passes and says so, a hand edit fails, regeneration alongside an archive passes, a regeneration that leaves its change directory standing fails naming the archive command, a change directory standing with a partial or absent match is reported UNDETERMINED rather than answered as no, and an unreachable base fails without claiming it looked"
   return "$rc"
 }
 

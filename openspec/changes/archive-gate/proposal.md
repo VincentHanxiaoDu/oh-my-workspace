@@ -24,8 +24,12 @@ and said nothing about a spec regenerated with the archive only half done.
   and the in-flight one *both* had every box ticked, so completeness separates nothing.
 - **The arm is scoped to what the pull request regenerates**, so an author is never made responsible
   for a directory somebody else left standing.
-- **A delta declaring no requirements is undetermined, not green.** "Every one of zero is present"
-  is vacuously true and would accuse a file that answers nothing.
+- **Only a full match is a determination.** A delta declaring no requirements, one whose
+  requirements are absent from the specification, and one only partly present are all reported as
+  **undetermined** with the count measured. None of them blocks. The first version of this arm
+  rendered `0 of N` as `so its work has not landed` — which was false about
+  `unplaceable-verdict-reported` on `main`, printed in the same sentence shape as the genuinely
+  in-flight directory beside it. Not blocking and answering `no` are different acts.
 - **`internal/machinery/archivegate_test.go`** executes the installed script, so a framework refresh
   that removes the arm turns this repository's suite red instead of restoring the defect quietly.
 

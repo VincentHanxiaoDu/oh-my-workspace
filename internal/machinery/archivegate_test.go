@@ -184,6 +184,13 @@ func TestACorrectArchivePassesUnchanged(t *testing.T) {
 // legitimately in flight; blocking it blocks #38 and #46, which are the release critical path. A
 // gate that stops in-flight work is worse than no gate.
 //
+// AND NOT BLOCKING IS NOT THE SAME ACT AS ANSWERING 'NO'. The first version of this arm rendered a
+// `0 of N` result as `so its work has not landed`, which is a determination — and on real `main` it
+// was FALSE about `unplaceable-verdict-reported`, a change that had shipped in #98, printed in the
+// same sentence shape and under the same label as the genuinely in-flight directory beside it.
+// PRD §4.3 does not stop applying because the thing rendering the state is a gate. So this arm
+// pins BOTH halves: the pass, and the refusal to claim more than the pass supports.
+//
 // The delta is the REAL one and the spec is the REAL `main` state — none of its ten requirements
 // merged — beside somebody else's regeneration of the same capability file.
 func TestAnInFlightChangeIsNotAccused(t *testing.T) {
@@ -202,9 +209,46 @@ func TestAnInFlightChangeIsNotAccused(t *testing.T) {
 		t.Fatalf("an in-flight change was accused of owing an archive. This blocks the release path:\n%s", out)
 	}
 	// PASSING FOR THE RIGHT REASON. A pass because the arm never looked at c1 is the vacuous green
-	// this repository has been burned by; the gate must say it considered it and found it in flight.
-	if !strings.Contains(out, "in flight, not blocked: c1") {
-		t.Errorf("the in-flight change passed without the gate saying it had looked at it:\n%s", out)
+	// this repository has been burned by; the gate must say it considered it.
+	if !strings.Contains(out, "cannot tell for c1") {
+		t.Errorf("the change passed without the gate saying it had looked at it:\n%s", out)
+	}
+	if !strings.Contains(out, "UNDETERMINED from this repository") {
+		t.Errorf("a 0-of-N result was reported as a determination rather than as undetermined:\n%s", out)
+	}
+	// THE EXACT SENTENCE THAT WAS FALSE ON `main`. Pinned by its own assertion so a refresh, or a
+	// later simplification, cannot quietly restore it.
+	if strings.Contains(out, "so its work has not landed") {
+		t.Errorf("the confident sentence is back. A 0-of-N result is not a finding that the work has "+
+			"not landed — it was printed about `unplaceable-verdict-reported`, which had shipped:\n%s", out)
+	}
+}
+
+// A PARTIAL MATCH IS THE SAME KIND OF FACT AS AN ABSENT ONE, and it reaches the branch by different
+// arithmetic — a branch written for `hit == 0` can be wrong for `0 < hit < n`. Half a change's
+// requirements present says nothing about whether the other half is unwritten or merely unmerged.
+func TestAPartialMatchIsUndeterminedRatherThanAnswered(t *testing.T) {
+	delta := "## ADDED Requirements\n\n### Requirement: One\nIt SHALL.\n\n#### Scenario: a\n" +
+		"- **WHEN** a\n- **THEN** b\n\n### Requirement: Two\nIt SHALL.\n\n#### Scenario: c\n" +
+		"- **WHEN** c\n- **THEN** d\n"
+	before := "# notes Specification\n\n## Purpose\nNotes.\n\n## Requirements\n"
+	after := before + "\n### Requirement: One\nIt SHALL.\n\n#### Scenario: a\n- **WHEN** a\n- **THEN** b\n"
+
+	dir, base := seedProject(t, before, delta)
+	write(t, filepath.Join(dir, "openspec", "specs", "notes", "spec.md"), after)
+	write(t, filepath.Join(dir, "openspec", "changes", "archive", "2026-01-01-other", "tasks.md"), "- [x] a\n")
+	git(t, dir, "add", "-A")
+	git(t, dir, "commit", "-qm", "chore: half of c1's requirements have landed")
+
+	out, code := archiveGate(t, dir, base)
+	if code != 0 {
+		t.Fatalf("a partial match was BLOCKED, which is a determination the gate cannot support:\n%s", out)
+	}
+	if !strings.Contains(out, "1 of 2 requirements") {
+		t.Errorf("the gate did not report the count it actually measured:\n%s", out)
+	}
+	if !strings.Contains(out, "UNDETERMINED from this repository") {
+		t.Errorf("a partial match was not reported as undetermined:\n%s", out)
 	}
 }
 
@@ -261,8 +305,8 @@ func TestAnUnreachableBaseIsNotReportedAsAClearArchive(t *testing.T) {
 	if code == 0 {
 		t.Fatalf("an unreachable base PASSED:\n%s", out)
 	}
-	if strings.Contains(out, "either gone or still in flight") {
-		t.Errorf("a lookup failure was rendered as a clear archive check:\n%s", out)
+	if strings.Contains(out, "no change directory was found whose content has already landed") {
+		t.Errorf("a lookup failure was rendered as a completed archive check:\n%s", out)
 	}
 }
 
@@ -278,7 +322,8 @@ func TestTheInstalledGateSelfTestCoversTheArchiveArm(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the installed gate's own self-test failed:\n%s", out)
 	}
-	if !strings.Contains(string(out), "change directory standing") {
+	if !strings.Contains(string(out), "change directory standing") ||
+		!strings.Contains(string(out), "UNDETERMINED rather than answered as no") {
 		t.Errorf("the self-test passed without claiming to cover the archive arm, so a refresh could remove it silently:\n%s", out)
 	}
 }

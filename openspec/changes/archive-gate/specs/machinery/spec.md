@@ -13,8 +13,13 @@ A change SHALL be judged to have landed when every `### Requirement:` heading in
 post-condition of archiving, and no other signal SHALL be substituted for it — in particular the
 completeness of a change's task list SHALL NOT be read as evidence that its work has landed.
 
-A change whose delta has NOT landed SHALL pass, and the gate SHALL say that it considered it and
-found it in flight, so that a pass is distinguishable from an absence of checking.
+Only a complete match SHALL be a determination. Where some or none of a delta's requirements are
+present, the gate SHALL NOT block and SHALL NOT report that the change's work has not landed; it
+SHALL report the count it measured and state that whether the change has shipped is undetermined
+from this repository. Not blocking and answering `no` are different acts, and the gate SHALL make
+them distinguishable, so that a pass is also distinguishable from an absence of checking.
+
+The closing summary SHALL NOT restate as settled anything the gate reported as undetermined.
 
 The judgement SHALL be confined to the capabilities the pull request regenerates. A pull request
 that regenerates no capability specification SHALL pass and SHALL say why it had nothing to judge.
@@ -35,10 +40,17 @@ A base commit that cannot be resolved SHALL fail and SHALL NOT render as a compl
   produced it under `openspec/changes/archive/`
 - **THEN** the gate passes, unchanged
 
-#### Scenario: Work that has not landed is not accused
+#### Scenario: Work whose delta is absent from the specification is not accused
 - **WHEN** a pull request regenerates a capability specification and an unarchived change directory
-  declares a delta for that capability whose requirements are not present in it
-- **THEN** the gate passes and reports that change as in flight rather than passing silently
+  declares a delta for that capability none of whose requirements are present in it
+- **THEN** the gate passes, names the change and the count it measured, and reports whether that
+  change has shipped as undetermined rather than as a finding that its work has not landed
+
+#### Scenario: Only some of a change's requirements are present
+- **WHEN** an unarchived change directory declares a delta for a regenerated capability some but not
+  all of whose requirements are present in it
+- **THEN** the gate passes and reports the same undetermined answer, because a partial match
+  establishes neither that the change has shipped nor that it is still in flight
 
 #### Scenario: A pull request that regenerates nothing
 - **WHEN** a pull request changes no `openspec/specs/<x>/spec.md`

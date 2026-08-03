@@ -55,7 +55,36 @@
 - [x] 6.4 Full package with `-count=1` and `-v`, selection proven by `=== RUN`.
 - [x] 6.5 Declare `.workflow/bin/check-generated.sh` in `framework-local-commits.txt`.
 
-## 7. Not part of this change
+## 7. #109's review: the gate broke the rule it enforces
+
+- [x] 7.1 Accept the finding. Run against real `main` the arm printed `in flight, not blocked …
+      so its work has not landed` about `unplaceable-verdict-reported`, which shipped in #98. A
+      determination, in the same sentence shape as the genuinely in-flight directory, and false.
+      PRD §4.3 does not stop applying because the thing rendering the state is a gate.
+- [x] 7.2 Three-way rendering: a full match is the defect; `hit == 0` and `0 < hit < n` are both
+      UNDETERMINED, named with the count measured, and neither blocks.
+- [x] 7.3 Fix the closing summary too — `either gone or still in flight` restated the same claim.
+- [x] 7.4 Fix the header comment: the gate does not "stay silent", it answers, and now it answers
+      the right thing.
+- [x] 7.5 Two self-test arms — the `0 of N` case and a separate `1 of 2` partial case, which reaches
+      the branch by different arithmetic.
+- [x] 7.6 `TestAPartialMatchIsUndeterminedRatherThanAnswered`, plus an assertion pinning the exact
+      false sentence out of existence in `TestAnInFlightChangeIsNotAccused`.
+- [x] 7.7 Mutation: restore the confident sentence, confirmed **by `git diff`**. Four self-test arms
+      and three Go tests red. Restored.
+- [x] 7.8 Re-run the reviewer's decisive drive against real `main` at `42becb7b`: both directories
+      now report UNDETERMINED, neither blocks, and the false sentence is gone.
+
+## 8. The reviewer's stated gaps, closed
+
+- [x] 8.1 A REAL `openspec archive outbox-drafts-and-modes -y` on `main`, not a hand-moved
+      directory. The CLI reports `+ 10 added` to `openspec/specs/notes/spec.md`, and the gate passes
+      on the result — confirming the rule matches the tool's actual output and not an assumption
+      about it.
+- [x] 8.2 The same tree with the change directory restored: rc=1, all 10 requirements.
+- [x] 8.3 `make ci` and `./.workflow/bin/run-gates.sh`, which the reviewer did not run.
+
+## 9. Not part of this change
 
 Issue #108 carries far more than this: #101's holder binding, #64's four remaining cases, #95's
 upstreaming debt, and the `[role]` marker in the four `AGENT.md` files that lack it. None of it is
