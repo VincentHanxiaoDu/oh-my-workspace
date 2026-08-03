@@ -106,9 +106,12 @@ it to the wrong tree. Withdrawn on #122, and deleted here rather than left to mi
   repair and re-ran a job, saw a gate go green, and reported the repair as the cause; a third party
   had meanwhile deleted the thing that was actually blocking it. The ordering was there to check and
   I did not check it. Change one thing, or establish the order.
-- **A wait loop can stop waiting early and look like a result.** Mine keyed on the literal string
-  `still running`, which `pr.sh` stops printing once fewer than two checks are outstanding, so it
-  returned while a check was live. Count incomplete runs from the API rather than matching prose.
+- **A wait loop keyed on prose can stop waiting early and look like a result.** Mine polled
+  `pr.sh state` until the string `still running` disappeared. **A red makes it disappear while checks
+  are still live** — `pr.sh` tests the failure branch *before* the pending one, so one failing check
+  suppresses the running line and the loop returns mid-flight. My own captured output showed
+  `in_progress Build and tests` and a `RED:` section together, with no running line.
+  **Key on `pr.sh`'s exit code — `0` green, `1` red, `2` no answer — never on its wording.**
 
 **The general rule this project keeps teaching: a negative result means nothing until the probe is
 shown to fire on something known-present.** State the control, every time.
