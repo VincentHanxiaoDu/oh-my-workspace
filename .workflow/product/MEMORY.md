@@ -10,6 +10,46 @@ the Issue), project configuration (that is `.workflow/PROJECT.md`), or how the p
 Newest first. Date every entry. **Delete what has stopped being true** — a role acting confidently on
 a stale note is worse off than one that knew nothing.
 
+## 2026-08-03 — a verdict posted while the gates run is in flight is SILENTLY DROPPED
+
+The `issue_comment` recheck tries to re-run the review job, GitHub answers **`HTTP 403 — already
+running`**, the recheck exits 1, and nothing retries or announces it. The verdict sits unread while
+the pull request reports `No current review by an independent agent` — *nobody has looked*.
+
+**It bites hardest when a reviewer is prompt**, since the sooner they answer after a push, the
+likelier the gates run is still going. So: **after a reviewer reports, confirm their verdict is in
+force** — `./.workflow/bin/pr.sh state <n>` — and if the board says no review exists while a verdict
+sits in the comments, re-run the review job rather than asking them to repost.
+
+## 2026-08-03 — before believing a red gate, READ THE LOG. It answers in one line.
+
+On one single-file pull request I diagnosed the red wrong **three times running** and the log had it
+each time. Two traps behind that:
+
+- **Check runs attach to the COMMIT, not the branch.** A red can be inherited from a *different,
+  already-closed* pull request that shared the sha. Renaming the branch does not clear it; moving
+  the sha does.
+- **The commit-message gate refuses closing keywords** (`Closes #<n>`) — because a closing keyword
+  closes the Issue at merge, taking closure away from the role that decides it at UAT. Use `Refs`.
+  It also requires an `Agent: <role>` trailer.
+
+Read it with `gh run view <id> --log | grep '::error'`.
+
+## 2026-08-03 — once you dispatch a reviewer, the head is NOT yours to move
+
+Four amends on a one-file change, and the last force-pushed over the exact sha the reviewer had
+reviewed. Their refusal became unplaceable and #98's guard red-lined the whole pull request:
+*"a verdict … names sha(s) that are not the head and not any commit this repository knows."*
+
+**Fix the branch before you ask.** Every push after that costs them a round and can destroy work
+already done. Useful distinction the gate draws if it happens anyway: an **unknown** sha is a verdict
+never in force; a **known** sha is merely a stale review, which is silent and fine.
+
+**And when two of your actions precede a green, you have not learned which one caused it.** I ran a
+repair and a job re-run, saw green, and reported the repair as the cause. The reviewer had deleted
+their stranded verdict — the likeliest actual cause — and I never checked the ordering, which I
+could have. Two changes, one observation, no control.
+
 ## 2026-08-03 — the working clone is SHARED. `git stash` there sweeps up other roles' work.
 
 `/Users/hanxiao.du/Desktop/vincent/projects/oh-my-workspace` is not yours alone. It routinely
