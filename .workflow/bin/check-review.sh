@@ -95,21 +95,83 @@ run_gate() {
 
   # The most recent review for THIS head sha. A push invalidates every prior review, which is why
   # the sha is part of the attestation rather than implied by it.
-  local block
-  block=$(jq -r --arg h "$head" '
-    [ .[] | .body
-      | select(test("Reviewed-by:"))
-      | select(test("Reviewed-sha:[[:space:]]*" + $h)) ] | last // ""' "$comments")
+  #
+  # A VERDICT IS A COMMENT, NOT A STRING FOUND INSIDE ONE (Issue #65). The previous build projected
+  # `.body` out of the comment object and took the reviewer's name from the text — so a comment
+  # QUOTING the verdict template read as a verdict, by whoever the quote happened to name. product
+  # did it by accident on #63 while asking dev to re-attest, and it lost only because a genuine
+  # verdict was posted afterwards and this selector takes `last`. Two things were wrong and both
+  # are fixed here:
+  #
+  #   1. FENCED AND QUOTED TEXT IS DISCARDED BEFORE ANYTHING IS PARSED. `jq`'s `test()` had no
+  #      notion of a code fence and `sed`'s `^` matches happily inside one. `strip_fences` removes
+  #      ``` and ~~~ blocks; the selection is anchored to a line start so a `> `-quoted verdict is
+  #      not one either. Only the fenced text goes — a reviewer that pastes command output into a
+  #      real verdict still has a real verdict.
+  #   2. THE REVIEWER IS THE POSTER, NOT THE NAME IN THE TEXT. `.role` is the `[role]` marker the
+  #      roles already sign every comment with and that `queue.sh` already routes on, kept from the
+  #      comment object rather than thrown away with it.
+  #
+  # `.user.login` IS DELIBERATELY NOT USED, and this is the load-bearing limitation. Every role on
+  # this repository posts through the SAME GitHub account, so the login identifies the human and
+  # would make all five roles one reviewer — turning the independence rule off entirely. The
+  # `[role]` marker is what distinguishes them and it is a CONVENTION, NOT AN AUTHENTICATED FACT.
+  # So: this closes the accident, and it does not make a verdict unforgeable by a role that sets
+  # out to forge one. Anything stronger needs distinct posting identities, which is not this
+  # script's to decide.
+  local sel block role declared
+  sel=$(jq -c --arg h "$head" '
+    def strip_fences:
+      split("\n")
+      | reduce .[] as $l ({inb:false, out:[]};
+          if ($l | test("^[[:space:]]{0,3}(```|~~~)")) then .inb = (.inb | not)
+          elif .inb then .
+          else .out += [$l] end)
+      | .out | join("\n");
+    [ .[]
+      | ((.body // "") | gsub("\r"; "")) as $raw
+      | { role: (($raw | split("\n")[0]
+                       | capture("^\\[(?<r>[A-Za-z][A-Za-z0-9_-]*)\\][[:space:]]*$") | .r) // null),
+          body: ($raw | strip_fences) }
+      | select(.body | test("(^|\n)Reviewed-by:"))
+      | select(.body | test("(^|\n)Reviewed-sha:[[:space:]]*" + $h))
+    ] | last // empty' "$comments")
 
-  [ -n "$block" ] || {
+  [ -n "$sel" ] || {
     echo "::error::no review found for head $head. A push invalidates any earlier review — this head needs its own." >&2
+    echo "  A verdict QUOTED inside a code fence or a '>' block is not a verdict and is not counted (#65)." >&2
     return 1
   }
 
-  reviewer=$(printf '%s' "$block" | sed -n 's/^Reviewed-by:[[:space:]]*//p' | head -1)
-  verdict=$(printf '%s' "$block"  | sed -n 's/^Verdict:[[:space:]]*//p'     | head -1)
+  role=$(printf '%s' "$sel" | jq -r '.role // ""')
+  block=$(printf '%s' "$sel" | jq -r '.body')
 
-  [ -n "$reviewer" ] || { echo "::error::the review names no reviewer" >&2; rc=1; }
+  declared=$(printf '%s' "$block" | sed -n 's/^Reviewed-by:[[:space:]]*//p' | head -1 | sed 's/[[:space:]]*$//')
+  verdict=$(printf  '%s' "$block" | sed -n 's/^Verdict:[[:space:]]*//p'     | head -1 | sed 's/[[:space:]]*$//')
+
+  # WHO POSTED IT IS ESTABLISHED BEFORE WHAT IT SAYS IS READ. An unattributable verdict is not a
+  # weak verdict, it is not a verdict — so the block below returns rather than setting rc and
+  # carrying on. Its three refusals are three DIFFERENT facts and none of them is "no review
+  # exists"; they share exit 1 with that only because all four mean this head is not certified.
+  [ -n "$role" ] || {
+    echo "::error::a review block for $head was found, but WHO POSTED IT COULD NOT BE DETERMINED, so it certifies nothing. REFUSING." >&2
+    echo "  THIS IS NOT A FINDING THAT THE REVIEW IS ABSENT OR FORGED. It is an inability to attribute it." >&2
+    echo "  The remedy is the convention every role already follows: '[<role>]' ALONE on the comment's" >&2
+    echo "  very first line, above the Reviewed-by:/Reviewed-sha:/Verdict: block. Re-post it and this clears." >&2
+    echo "  The name inside the block is NOT read as a fallback: that is exactly the hole #65 is about." >&2
+    return 1
+  }
+  [ -n "$declared" ] || { echo "::error::the review names no reviewer" >&2; return 1; }
+  if [ "$role" != "$declared" ]; then
+    # NOT SILENTLY RE-ATTRIBUTED TO THE POSTER. Quietly correcting the name would let an attempt to
+    # certify somebody else's work — or one's own under another name — pass unremarked, and the
+    # attempt is the thing worth seeing.
+    echo "::error::this verdict was posted by '[$role]' but declares 'Reviewed-by: $declared'. THE TWO DISAGREE, so it is REFUSED — not re-attributed to either of them." >&2
+    echo "  Its Verdict: line was not acted on at all, because a verdict whose author is in doubt is not a verdict." >&2
+    echo "  If '[$role]' wrote this review, correct the Reviewed-by: line to '$role' and re-post." >&2
+    return 1
+  fi
+  reviewer=$role
   case "$verdict" in
     approve) : ;;
     # EXIT 2, NOT 1. A refused review and an absent one are different facts, and they shared an
@@ -180,7 +242,12 @@ self_test() {
 Agent: dev-a"
   local head; head=$(git -C "$tmp" rev-parse HEAD)
 
-  _c() { printf '[{"body":"%s"}]' "$1" > "$tmp/c.json"; }
+  # EVERY VERDICT IS POSTED BY SOMEBODY (#65), so every fixture below carries the `[role]` marker
+  # that says who. `_cp` sets the poster explicitly — that is how the disagreement cases are
+  # driven. `_c` is the honest case and derives the marker from the name the block declares, so the
+  # arms that are about something else read as they did before.
+  _cp() { printf '[{"body":"[%s]\\n%s"}]' "$1" "$2" > "$tmp/c.json"; }
+  _c() { _cp "$(printf '%s' "$1" | sed -n 's/.*Reviewed-by:[[:space:]]*\([A-Za-z0-9_-]*\).*/\1/p')" "$1"; }
   _run() { ( cd "$tmp" && bash "$me" "$head" "$tmp/c.json" "$base" ) 2>&1; }
 
   # 1. A MISSING COMMENTS FILE MUST REFUSE — not report that no review exists. Those are different
@@ -240,7 +307,7 @@ Agent: product"
   local shead; shead=$(git -C "$sp" rev-parse HEAD)
   cp "$(dirname "$me")/pr-authors.sh" "$sp/pr-authors.sh" 2>/dev/null || true
   cp "$me" "$sp/check-review.sh"
-  printf '[{"body":"Reviewed-by: qa\\nReviewed-sha: %s\\nVerdict: approve"}]' "$shead" > "$sp/c.json"
+  printf '[{"body":"[qa]\\nReviewed-by: qa\\nReviewed-sha: %s\\nVerdict: approve"}]' "$shead" > "$sp/c.json"
   local src=0
   ( cd "$sp" && bash "$sp/check-review.sh" "$shead" "$sp/c.json" "$sbase" ) >/dev/null 2>&1 || src=$?
   [ "$src" -eq 0 ] || {
@@ -299,7 +366,54 @@ Agent: product"
   _c "Reviewed-by: reviewer-a\\nReviewed-sha: $head\\nVerdict: approve\\nScope: one file, as asked."
   _run >/dev/null || { echo "SELF-TEST FAIL: a short but accurate review was rejected" >&2; rc=1; }
 
-  [ "$rc" -eq 0 ] && echo "self-test passed: a missing file refuses, an author cannot certify its own work, a stale sha does not carry over, and a short accurate review passes"
+  # 7. ISSUE #65: A QUOTED VERDICT IS NOT A VERDICT, AND A VERDICT IS ITS POSTER'S.
+  #    The gate used to take the reviewer's name from the comment TEXT, so any role could mint any
+  #    other role's approval — and product did it by accident on #63, quoting the template to ASK
+  #    for a verdict. `reviewer-a` authored nothing in this range, so each forgery below would have
+  #    come out as a clean independent approve and exited 0.
+
+  #    (a) THE #63 NEAR-MISS. A fenced quote inside somebody else's prose.
+  _cp product "please re-attest:\\n\\n\`\`\`\\nReviewed-by: reviewer-a\\nReviewed-sha: $head\\nVerdict: approve\\n\`\`\`\\n\\nthanks"
+  local qrc=0; _run >/dev/null 2>&1 || qrc=$?
+  [ "$qrc" -eq 1 ] || { echo "SELF-TEST FAIL: a verdict QUOTED inside a code fence exited $qrc, not 1 — a request for a review was counted as one" >&2; rc=1; }
+
+  #    (b) `~~~` IS A FENCE TOO. A fix that only knew about backticks would be a fix for the single
+  #        comment that caused the incident.
+  _cp product "example:\\n~~~\\nReviewed-by: reviewer-a\\nReviewed-sha: $head\\nVerdict: approve\\n~~~"
+  qrc=0; _run >/dev/null 2>&1 || qrc=$?
+  [ "$qrc" -eq 1 ] || { echo "SELF-TEST FAIL: a verdict quoted inside a ~~~ fence exited $qrc, not 1" >&2; rc=1; }
+
+  #    (c) A GENUINE VERDICT MAY STILL CONTAIN A FENCE. Reviewers paste what they ran. Stripping
+  #        the fence must not discard the comment — a fix that refuses everything passes (a) and
+  #        (b) and breaks the workflow entirely.
+  _cp reviewer-a "Reviewed-by: reviewer-a\\nReviewed-sha: $head\\nVerdict: approve\\n\\nI ran it:\\n\`\`\`\\n\$ make ci\\nok\\n\`\`\`"
+  _run >/dev/null || { echo "SELF-TEST FAIL: a genuine verdict that also quotes command output was rejected" >&2; rc=1; }
+
+  #    (d) A NAME THAT DISAGREES WITH ITS POSTER IS REFUSED, NOT RE-ATTRIBUTED. Silent correction
+  #        would hide the attempt, and the attempt is the thing worth seeing. Driven with the
+  #        AUTHOR as poster: `dev-a` built this branch, and typing another role's name was the
+  #        whole of what certifying its own work used to take.
+  _cp dev-a "Reviewed-by: reviewer-a\\nReviewed-sha: $head\\nVerdict: approve"
+  qrc=0; local qout; qout=$(_run) || qrc=$?
+  [ "$qrc" -eq 1 ] || { echo "SELF-TEST FAIL: an author certified its own work by typing another role's name (exit $qrc)" >&2; rc=1; }
+  case "$qout" in
+    *DISAGREE*) : ;;
+    *) echo "SELF-TEST FAIL: a verdict whose declared reviewer differs from its poster was refused without saying they disagree (got: $qout)" >&2; rc=1 ;;
+  esac
+
+  #    (e) AN UNATTRIBUTABLE VERDICT SAYS SO, AND DOES NOT FALL BACK TO THE DECLARED NAME. Reading
+  #        `Reviewed-by:` when there is no poster to check it against is precisely the hole, so a
+  #        comment with no `[role]` marker refuses — as UNDETERMINED, which is a different value
+  #        from "no review exists" and must not be spelled like it.
+  printf '[{"body":"Reviewed-by: reviewer-a\\nReviewed-sha: %s\\nVerdict: approve"}]' "$head" > "$tmp/c.json"
+  qrc=0; qout=$(_run) || qrc=$?
+  [ "$qrc" -eq 1 ] || { echo "SELF-TEST FAIL: a verdict with no [role] marker exited $qrc, not 1 — it was attributed to a name it declared about itself" >&2; rc=1; }
+  case "$qout" in
+    *"COULD NOT BE DETERMINED"*) : ;;
+    *) echo "SELF-TEST FAIL: an unattributable verdict was not distinguished from an absent one (got: $qout)" >&2; rc=1 ;;
+  esac
+
+  [ "$rc" -eq 0 ] && echo "self-test passed: a missing file refuses, an author cannot certify its own work, a stale sha does not carry over, a short accurate review passes, a QUOTED verdict is not a verdict, and a verdict that names somebody other than its poster is refused"
   return "$rc"
 }
 
