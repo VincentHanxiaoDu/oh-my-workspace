@@ -598,3 +598,164 @@ func runBinaryWithEnv(t *testing.T, bin, storePath string, extra []string, args 
 	}
 	return runResult{code: code, stdout: out.String(), stderr: errb.String()}
 }
+
+// ---------------------------------------------------------------------------
+// Every field says what is actually known about it
+// ---------------------------------------------------------------------------
+
+// TestARefusalStatesWhatIsActuallyKnownAboutThePersonAndTheHub is qa's finding on #48, driven.
+//
+// # What shipped, and why no criterion caught it
+//
+// Every refusal printed "no person is configured, so who may read what could not be worked out" —
+// on a machine where a person WAS configured. `establishAuthority` returned through `Refuse`, which
+// carried no `Person`, and the renderer reads an empty `Person` as that sentence. The same path
+// reported the hub state as undetermined in the `--json` payload of a `tickets` refusal on a
+// machine with no hub configured, where the truth is "there is no hub".
+//
+// It failed none of the seventeen criteria as written. It is §4.3 run backwards: a DETERMINED value
+// rendered as UNDETERMINED, with a confident and wrong reason attached. An agent parsing these
+// refusals learned two false things about its own configuration on every one of them.
+//
+// # The discriminator, and why a weaker assertion would pass a broken build
+//
+// The load-bearing assertion is that the SAME refusal with the person set and unset produces
+// DIFFERENT output. A test that only checked "the person's name appears" would pass against a build
+// that hardcoded a name, and a test that only checked "the sentence is absent" would pass against a
+// build that deleted the sentence and left the unset case unsayable. Both conditions are driven,
+// and they are required to differ.
+func TestARefusalStatesWhatIsActuallyKnownAboutThePersonAndTheHub(t *testing.T) {
+	bin := buildOMW(t)
+
+	// refusalUnder runs the same refused request against a daemon started with the given extra
+	// environment, and returns what the person sees.
+	refusalUnder := func(t *testing.T, extra []string) (string, agentapi.Response) {
+		t.Helper()
+		root := storeThatExists(t)
+		start := runBinaryWithEnv(t, bin, root, extra, "daemon", "start")
+		if start.code != 0 {
+			t.Fatalf("`omw daemon start` exited %d: %s", start.code, start.stderr)
+		}
+		t.Cleanup(func() { runBinaryWithEnv(t, bin, root, extra, "daemon", "stop") })
+
+		// A grant that was never issued: refused by establishAuthority, which is the path that
+		// carried no facts at all.
+		text := runBinaryWithEnv(t, bin, root, extra, "agent", "tickets", "--grant", "grant-nope")
+		if text.code == 0 {
+			t.Fatalf("the fixture did not produce a refusal: %s%s", text.stdout, text.stderr)
+		}
+		js := runBinaryWithEnv(t, bin, root, extra, "agent", "tickets", "--grant", "grant-nope", "--json")
+		return text.stdout + text.stderr, decodeAgentJSON(t, js.stdout)
+	}
+
+	withPerson, withPersonJSON := refusalUnder(t, []string{daemon.PersonEnv + "=priya"})
+	noPerson, noPersonJSON := refusalUnder(t, []string{daemon.PersonEnv + "="})
+
+	// --- THE DISCRIMINATOR. -------------------------------------------------
+	if withPerson == noPerson {
+		t.Errorf("the same refusal with a person configured and with none produces byte-identical output, "+
+			"so the two conditions cannot be told apart:\n%s", withPerson)
+	}
+
+	// --- With a person configured, the refusal must not deny it. ------------
+	if strings.Contains(withPerson, "no person is configured") {
+		t.Errorf("a refusal on a machine with OMW_PERSON=priya says no person is configured. That is a "+
+			"determined value rendered as undetermined, with a confident wrong reason:\n%s", withPerson)
+	}
+	if withPersonJSON.Person != "priya" {
+		t.Errorf("the refusal's payload reports the person as %q, want \"priya\"; an agent parsing this "+
+			"learns something false about its own configuration", withPersonJSON.Person)
+	}
+
+	// --- And with none, it must still be able to say so. --------------------
+	// Without this the fix could be "delete the sentence", which loses a true statement.
+	if !strings.Contains(noPerson, "no person is configured") {
+		t.Errorf("with no person configured the refusal no longer says so; the unset case is a real "+
+			"condition and hub.CanRead answers undetermined for it:\n%s", noPerson)
+	}
+	if noPersonJSON.Person != "" {
+		t.Errorf("with no person configured the payload reports %q", noPersonJSON.Person)
+	}
+
+	// --- The hub half of the same finding. ----------------------------------
+	// Neither daemon has a hub configured. "There is no hub" is a determined fact and must not be
+	// reported as unknown just because this request was refused before anything was consulted.
+	for name, r := range map[string]agentapi.Response{"person set": withPersonJSON, "person unset": noPersonJSON} {
+		if r.HubConfigured != tri.No {
+			t.Errorf("%s: a refusal on a machine with no hub configured reports hub_configured=%v; "+
+				"the truth is a determined no (criterion 17), and an agent reading this is told its hub "+
+				"state is unknown when it plainly is not", name, r.HubConfigured)
+		}
+		if r.HubContacted != tri.No {
+			t.Errorf("%s: a refusal reports hub_contacted=%v; nothing was contacted, which is determined",
+				name, r.HubContacted)
+		}
+		// ABSENT, NOT ZERO. Nothing was examined, so there is no count to report. A literal
+		// `"undetermined_notes":0` on a refusal claims the hub was examined and everything in it
+		// was evaluable — a claim about work that was not done, which is the same defect qa found
+		// wearing different clothes.
+		if r.UndeterminedNotes != nil {
+			t.Errorf("%s: a refused request reports undetermined_notes=%d; nothing was examined, so the "+
+				"honest answer is no count at all", name, *r.UndeterminedNotes)
+		}
+	}
+}
+
+// TestEveryRefusingPathCarriesThePerson is the same rule as a property over every refusal this
+// surface can produce, rather than over the one qa happened to run.
+//
+// The defect was one branch out of a dozen not setting a field. Fixing that branch fixes today; this
+// is what fails when the next branch is added without going through the funnel.
+func TestEveryRefusingPathCarriesThePerson(t *testing.T) {
+	const person = hub.PersonID("priya")
+	root := storeThatExists(t)
+	s, err := store.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := agentapi.Sources{
+		Person:        person,
+		PersonScopes:  []hub.Scope{hub.ScopeRead},
+		Grants:        agentapi.NewStoreGrants(s),
+		HubConfigured: func() tri.Value { return tri.No },
+	}
+	issued := agentapi.Answer(agentapi.Request{Op: agentapi.OpGrant, Scopes: []hub.Scope{hub.ScopeRead}}, src)
+	if issued.Outcome != agentapi.OutcomeOK {
+		t.Fatalf("issuing a grant was %s (%s)", issued.Outcome, issued.Code)
+	}
+	readOnly := hub.GrantID(issued.Grant.ID)
+
+	refusals := 0
+	for _, tc := range []struct {
+		name string
+		req  agentapi.Request
+	}{
+		{"no grant presented", agentapi.Request{Op: agentapi.OpTickets}},
+		{"unknown grant", agentapi.Request{Op: agentapi.OpTickets, Grant: "grant-nope"}},
+		{"unknown operation", agentapi.Request{Op: "read-everything", Grant: readOnly}},
+		{"scope not granted", agentapi.Request{Op: agentapi.OpTickets, Grant: readOnly, Scopes: []hub.Scope{hub.ScopeWrite}}},
+		{"publish without the scope", agentapi.Request{Op: agentapi.OpPublish, Grant: readOnly, Title: "t", Body: "b"}},
+		{"write without the scope", agentapi.Request{Op: agentapi.OpDraftWrite, Grant: readOnly, NoteID: "d-1", Body: "b"}},
+		{"hub read with no hub", agentapi.Request{Op: agentapi.OpHub, Grant: readOnly}},
+		{"note read with no hub", agentapi.Request{Op: agentapi.OpNote, Grant: readOnly, NoteID: "n-1"}},
+	} {
+		r := agentapi.Answer(tc.req, src)
+		if r.Outcome == agentapi.OutcomeOK {
+			t.Errorf("%s: expected a refusal or an undetermined answer, got ok", tc.name)
+			continue
+		}
+		refusals++
+		if r.Person != string(person) {
+			t.Errorf("%s: the response reports the person as %q, want %q. Every answer is computed FOR "+
+				"somebody, including the ones that refuse.", tc.name, r.Person, person)
+		}
+		if r.HubConfigured != tri.No {
+			t.Errorf("%s: reports hub_configured=%v on a machine with none; a fact about the machine is "+
+				"knowable whatever this request did", tc.name, r.HubConfigured)
+		}
+	}
+	// THE CONTROL. A sweep that produced no refusals would pass vacuously.
+	if refusals < 8 {
+		t.Fatalf("only %d refusing path(s) were exercised; the sweep is not looking at anything", refusals)
+	}
+}

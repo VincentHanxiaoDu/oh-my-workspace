@@ -595,9 +595,17 @@ func TestNoHubUnreachableHubEmptyHubAndARefusalAreFourDistinguishableAnswers(t *
 	if noHub.Code != hub.ErrNoHubConfigured.Code {
 		t.Errorf("criterion 17: with no hub configured the code is %q, want %q", noHub.Code, hub.ErrNoHubConfigured.Code)
 	}
-	if noHub.HubState != tri.No || down.HubState != tri.Undetermined {
-		t.Errorf("criterion 15: no-hub is %v and unreachable is %v; want a determined no and an undetermined",
-			noHub.HubState, down.HubState)
+	// TWO QUESTIONS, ASSERTED SEPARATELY. "No hub configured" is a determined NO to both; "a hub is
+	// configured and did not answer" is a determined YES to the first and undetermined only to the
+	// second. Collapsing them is what made a refusal report an unknown hub on a machine with none.
+	if noHub.HubConfigured != tri.No || noHub.HubContacted != tri.No {
+		t.Errorf("criterion 17: with no hub configured, configured=%v contacted=%v; both are determined negatives",
+			noHub.HubConfigured, noHub.HubContacted)
+	}
+	if down.HubConfigured != tri.Yes || down.HubContacted != tri.Undetermined {
+		t.Errorf("criterion 7: with a hub configured and unreachable, configured=%v contacted=%v; "+
+			"a hub that could not be reached is still a hub that is configured",
+			down.HubConfigured, down.HubContacted)
 	}
 	if down.Outcome.Exit() != 3 {
 		t.Errorf("an unreachable hub exits %d; `could not determine` and `determined to be nothing` never share a code",
@@ -756,12 +764,17 @@ func TestANoteWhoseReadabilityIsUndeterminedIsNeitherListedNorRuledOut(t *testin
 	src.Person = ""
 
 	r := Answer(Request{Op: OpHub, Grant: g.ID}, src)
-	if r.UndeterminedNotes == 0 {
+	// ABSENT AND ZERO ARE DIFFERENT ANSWERS. Absent means the hub was never examined; this path
+	// examined it, so the count must be present as well as non-zero.
+	if r.UndeterminedNotes == nil {
+		t.Fatalf("the hub was read and the undetermined count is absent, which claims it was never examined: %+v", r)
+	}
+	if *r.UndeterminedNotes == 0 {
 		t.Fatalf("the fixture did not produce an undetermined note, so this test proves nothing: %+v", r)
 	}
 	if r.Outcome != OutcomeUndetermined {
 		t.Errorf("criterion 15: %d note(s) could not be evaluated and the outcome is %s; "+
-			"a list that could not be completed is not a complete list", r.UndeterminedNotes, r.Outcome)
+			"a list that could not be completed is not a complete list", *r.UndeterminedNotes, r.Outcome)
 	}
 	if r.Outcome.Exit() != 3 {
 		t.Errorf("criterion 15: exit code %d; the undetermined answer has its own", r.Outcome.Exit())

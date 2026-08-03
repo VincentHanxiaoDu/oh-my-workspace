@@ -61,6 +61,13 @@ type Sources struct {
 	Drafts func() ([]DraftView, error)
 	// ReviseDraft is the local write path (criterion 4).
 	ReviseDraft func(id, body string) (DraftView, error)
+	// HubConfigured says whether a hub is configured on this machine, WITHOUT contacting one.
+	//
+	// IT IS SEPARATE FROM Hub BECAUSE IT IS A DIFFERENT QUESTION AND A CHEAPER ONE. Whether a hub
+	// is configured is a fact about the machine that is true of a refused request as much as of a
+	// successful one, so it must be answerable without consulting anything — reading configuration
+	// is not reaching out (§4.2). Wiring this to something that dials would break criterion 16.
+	HubConfigured func() tri.Value
 	// Hub reaches the hub. It returns [hub.ErrNoHubConfigured] when there is none (§4.4,
 	// criterion 17) and [hub.ErrHubUnreachable] when there is one that did not answer (§3.11,
 	// criterion 7) — two different errors because they are two different facts.
@@ -87,6 +94,15 @@ type Sources struct {
 // grant paths call [hub.EvaluateGrantRequest] and [hub.Permits]. Nothing in this file compares a
 // [hub.Visibility] to anything or walks a group.
 func Answer(req Request, src Sources) Response {
+	// ONE EXIT, AND EVERY ANSWER GOES THROUGH IT. See [Response.finalise]: the facts that are true
+	// of this request whatever happened in it are stamped in one place, because filling them in per
+	// branch is the shape that shipped a refusal claiming no person was configured.
+	resp := answer(req, src)
+	resp.finalise(src)
+	return resp
+}
+
+func answer(req Request, src Sources) Response {
 	if !KnownOp(req.Op) {
 		return Refuse(req.Op, hub.Refusedf(ErrUnknownOperation, "%q", string(req.Op)))
 	}
@@ -257,7 +273,7 @@ func answerTickets(base Response, src Sources) Response {
 	}
 	// §4.2 AND §4.4: tickets are local. Nothing was dialled, and the hub answer says so rather
 	// than being left blank for a reader to fill in.
-	base.HubState = tri.No
+	base.setHubContacted(tri.No)
 	base.Message = "tickets are held on this machine and are never published; no hub was contacted"
 	return base
 }
@@ -276,7 +292,7 @@ func answerDrafts(base Response, src Sources) Response {
 		return Undetermined(OpDrafts, hub.Refusedf(ErrLocalUndetermined, "%v", err))
 	}
 	base.Drafts = ds
-	base.HubState = tri.No
+	base.setHubContacted(tri.No)
 	base.Message = "every draft here is unpublished; nothing in the outbox has been sent to a hub"
 	return base
 }
@@ -292,20 +308,25 @@ func reachHub(op Op, src Sources) (*hub.Store, hub.Membership, Response, bool) {
 		// A DETERMINED FACT ABOUT THIS MACHINE (criterion 17). Refused, not undetermined, and
 		// emphatically not an empty list of notes.
 		r := Refuse(op, err)
-		r.HubState = tri.No
+		r.HubConfigured = tri.No
+		r.setHubContacted(tri.No)
 		r.Message = "no hub is configured on this machine, so this is not an empty hub and nothing was looked at; " +
 			"tickets and drafts do not need one"
 		return nil, nil, r, false
 	case err != nil:
 		// A FAILURE TO DETERMINE (§3.11, criterion 7). Undetermined, its own exit code.
 		r := Undetermined(op, err)
-		r.HubState = tri.Undetermined
+		// A HUB IS CONFIGURED — that is precisely what makes this "unreachable" rather than "none".
+		// Reporting it as unknown here would lose the one thing this branch has established.
+		r.HubConfigured = tri.Yes
+		r.setHubContacted(tri.Undetermined)
 		r.Message = "a hub is configured and could not be reached; this is not a hub with nothing in it, " +
 			"and it is not a refusal"
 		return nil, nil, r, false
 	case st == nil:
 		r := Undetermined(op, hub.ErrHubUnreachable)
-		r.HubState = tri.Undetermined
+		r.HubConfigured = tri.Yes
+		r.setHubContacted(tri.Undetermined)
 		return nil, nil, r, false
 	}
 	return st, mem, Response{}, true
@@ -323,8 +344,10 @@ func answerHub(base Response, _ hub.Grant, src Sources) Response {
 	for _, n := range readable {
 		base.Notes = append(base.Notes, viewOf(n, false))
 	}
-	base.UndeterminedNotes = len(undetermined)
-	base.HubState = tri.Yes
+	n := len(undetermined)
+	base.UndeterminedNotes = &n
+	base.HubConfigured = tri.Yes
+	base.setHubContacted(tri.Yes)
 	if len(undetermined) > 0 {
 		// NOT DROPPED AND NOT COUNTED AS RESULTS. Saying "and N I could not evaluate" is what keeps
 		// "no results" from absorbing "I could not check".
@@ -364,7 +387,8 @@ func answerNote(base Response, req Request, grant hub.Grant, src Sources) Respon
 	}
 	v := viewOf(n, true)
 	base.Note = &v
-	base.HubState = tri.Yes
+	base.HubConfigured = tri.Yes
+	base.setHubContacted(tri.Yes)
 	return base
 }
 
@@ -383,7 +407,7 @@ func answerDraftWrite(base Response, req Request, src Sources) Response {
 		return Undetermined(OpDraftWrite, hub.Refusedf(ErrLocalUndetermined, "%v", err))
 	}
 	base.Drafts = []DraftView{d}
-	base.HubState = tri.No
+	base.setHubContacted(tri.No)
 	// CRITERION 4, SAID OUT LOUD. Writing a draft is not a publication and does not become one by
 	// the material having been read from the hub. `manual` is the default (§3.3).
 	base.Message = "written to the outbox as an unpublished draft; nothing has been published, and " +
@@ -417,7 +441,8 @@ func answerPublish(base Response, req Request, grant hub.Grant, src Sources) Res
 	}
 	view := viewOf(n, true)
 	base.Note = &view
-	base.HubState = tri.Yes
+	base.HubConfigured = tri.Yes
+	base.setHubContacted(tri.Yes)
 	return base
 }
 
@@ -436,7 +461,7 @@ func answerModel(base Response, src Sources) Response {
 	// nothing to clear; this line states the promise on the wire so a reader meets it.
 	m.CredentialReadable = false
 	base.Model = &m
-	base.HubState = tri.No
+	base.setHubContacted(tri.No)
 	base.Message = "whether a model is configured is readable here; the credential is not, and there is no " +
 		"agent API operation that returns it (PRD §3.13)"
 	if !m.Configured.Determined() {

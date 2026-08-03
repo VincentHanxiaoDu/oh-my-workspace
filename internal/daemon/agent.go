@@ -115,6 +115,15 @@ func agentSources(storeRoot string, getenv func(string) string) agentapi.Sources
 	}
 	src.Drafts = func() ([]agentapi.DraftView, error) { return listDrafts(dir) }
 	src.ReviseDraft = func(id, body string) (agentapi.DraftView, error) { return reviseDraft(dir, id, body) }
+	// READ, NEVER DIALLED. Whether a hub is configured is a fact about this machine, so it is
+	// answerable for a refused request too — which is what stops a refusal reporting the hub as
+	// unknown on a machine that plainly has none (§4.4, criterion 17).
+	src.HubConfigured = func() tri.Value {
+		if strings.TrimSpace(getenv(HubEnv)) == "" {
+			return tri.No
+		}
+		return tri.Yes
+	}
 	src.Hub = func() (*hub.Store, hub.Membership, error) { return agentHubSource(getenv) }
 	src.Model = func() agentapi.ModelView { return modelView(getenv) }
 	return src

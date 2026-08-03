@@ -231,16 +231,51 @@ type Response struct {
 	// whose readability is unknown, so serving its id would be serving something that may turn out
 	// to be unreadable. The count is what criterion 15 needs — the answer is distinguishable from
 	// both a real value and a negative one — without deciding a question the hub has not answered.
-	UndeterminedNotes int `json:"undetermined_notes"`
+	// IT IS A POINTER FOR THE SAME REASON Person AND HubConfigured ARE FILLED IN BY finalise. A
+	// plain int is 0 on every refusal and on every operation that never looks at a hub, and
+	// `"undetermined_notes":0` reads as "I examined the hub and none were undetermined" — a claim
+	// about work that was not done. Absent means not examined; 0 means examined and none were.
+	UndeterminedNotes *int `json:"undetermined_notes,omitempty"`
 
-	// HubState says what happened when the hub was consulted, in three values, for every operation
-	// that consults one. Undetermined for an unreachable hub, No for no hub configured, Yes when it
-	// answered — criterion 7's three outcomes, restated as data rather than as prose.
-	HubState     tri.Value `json:"-"`
-	HubStateText string    `json:"hub,omitempty"`
+	// HubConfigured is whether a hub is configured ON THIS MACHINE, and HubContacted is whether one
+	// was reached DURING THIS REQUEST. They are two fields because they are two questions, and one
+	// field answering both is how this surface came to tell people something false.
+	//
+	// IT WAS ONE FIELD AND THAT WAS THE BUG. A single `HubState` was set only by the paths that
+	// actually consulted a hub, so every refusal — which is refused before anything is consulted —
+	// carried the zero value. The zero tri.Value is Undetermined, which is the right default in
+	// isolation and was wrong here: on a machine with no hub configured, a refused `tickets`
+	// request reported "whether you have a hub could not be determined" when the truth was
+	// criterion 17's "there is no hub". A determined fact rendered as undetermined, with a
+	// confident wrong reason, on every refusal.
+	//
+	// The lesson generalises past this field and is why [Response.finalise] exists: the question is
+	// not "do we say undetermined when we should", it is "does every field say what we actually
+	// know about it".
+	HubConfigured     tri.Value `json:"-"`
+	HubConfiguredText string    `json:"hub_configured,omitempty"`
+	// HubContacted is Yes when the hub answered this request, Undetermined when one is configured
+	// and could not be reached, and No when none was contacted — including every local operation
+	// and every refusal, for which "nothing was contacted" is a determined fact and not a mystery.
+	HubContacted     tri.Value `json:"-"`
+	HubContactedText string    `json:"hub_contacted,omitempty"`
+	// hubContactedSet records whether a path actually decided HubContacted, so that
+	// [Response.finalise] can tell "nobody said" from "somebody said undetermined".
+	//
+	// IT EXISTS BECAUSE THE ZERO VALUE IS NOT THE TRUTH FOR THIS FIELD, and I wrote the opposite in
+	// a comment here before a test corrected me. tri's zero is Undetermined — deliberately, so that
+	// an unset answer never reads as a confident no — but for "was a hub contacted during this
+	// request" the truth when nothing set it is a determined NO: nothing was contacted. This is the
+	// one field where the package-wide default is the wrong default, so it is tracked explicitly
+	// rather than inferred. Unexported, so it never reaches the wire.
+	hubContactedSet bool
 }
 
 // Refuse builds a determined refusal carrying err's code.
+//
+// IT CARRIES NO FACTS ABOUT THE MACHINE, ON PURPOSE. Every response leaves [Answer] through
+// [Response.finalise], which is the one place those are filled in — a constructor that took them
+// would be a second place to forget them, and forgetting them here is exactly what shipped.
 func Refuse(op Op, err error) Response {
 	return Response{Op: op, Outcome: OutcomeRefused, Code: hub.Code(err), Message: err.Error()}
 }
@@ -251,18 +286,73 @@ func Undetermined(op Op, err error) Response {
 	return Response{Op: op, Outcome: OutcomeUndetermined, Code: hub.Code(err), Message: err.Error()}
 }
 
+// finalise stamps onto a response the facts that are true of this request whatever happened in it,
+// and it runs on EVERY response [Answer] produces — successes, refusals and undetermined alike.
+//
+// # Why this is a single funnel and not a line in each branch
+//
+// The defect this exists to prevent was one branch out of a dozen not setting a field, and the
+// field's zero value being a plausible-looking answer. Filling them in per branch is the shape that
+// failed; a funnel every return passes through is the shape that cannot. There are only two rules
+// in it and both are about saying what is known:
+//
+//   - Person is who this answer was computed for. A refusal is still computed FOR somebody, and
+//     reporting nobody made the surface claim, on every refusal, that no person was configured.
+//   - HubConfigured is a fact about the machine, not about this request, so it is knowable even
+//     when the request was refused before anything was consulted. It is asked for cheaply and
+//     WITHOUT DIALLING ANYTHING (§4.2) — reading configuration is not reaching out.
+//
+// A path that already determined a field keeps its answer: finalise fills gaps, it does not
+// overwrite.
+func (r *Response) finalise(src Sources) {
+	if r.Person == "" {
+		r.Person = string(src.Person)
+	}
+	if r.HubConfigured == tri.Undetermined {
+		r.HubConfigured = hubConfiguredState(src)
+	}
+	if !r.hubContactedSet {
+		// NOTHING WAS CONTACTED, WHICH IS A DETERMINED FACT. Leaving the zero value here would
+		// report "whether a hub was contacted could not be determined" for a request that never
+		// went near one — the same shape of false statement this funnel exists to remove.
+		r.HubContacted = tri.No
+	}
+}
+
+// setHubContacted records what a path established about reaching the hub. Every path that consults
+// a hub — or establishes that it cannot — goes through this rather than assigning the field, so
+// that "somebody decided undetermined" is distinguishable from "nobody decided".
+func (r *Response) setHubContacted(v tri.Value) {
+	r.HubContacted = v
+	r.hubContactedSet = true
+}
+
+// hubConfiguredState answers whether a hub is configured, without contacting one.
+//
+// A nil source is genuinely Undetermined — nobody told us — and that is left as the honest answer
+// rather than being turned into a "no". This is the one place the third value is correct for this
+// field, and it is reachable only when the daemon wired no configuration reader at all.
+func hubConfiguredState(src Sources) tri.Value {
+	if src.HubConfigured == nil {
+		return tri.Undetermined
+	}
+	return src.HubConfigured()
+}
+
 // wire fills the text forms of the three-valued fields before serialisation. tri.Value is an int
 // and would go over the wire as 0, 1 or 2 — where 0 is Undetermined and reads, to anything that did
 // not know, as a falsy nothing. The text is what crosses; [Response.unwire] reads it back.
 func (r *Response) wire() {
-	r.HubStateText = r.HubState.String()
+	r.HubConfiguredText = r.HubConfigured.String()
+	r.HubContactedText = r.HubContacted.String()
 	if r.Model != nil {
 		r.Model.ConfiguredText = r.Model.Configured.String()
 	}
 }
 
 func (r *Response) unwire() {
-	r.HubState = triFromText(r.HubStateText)
+	r.HubConfigured = triFromText(r.HubConfiguredText)
+	r.HubContacted = triFromText(r.HubContactedText)
 	if r.Model != nil {
 		r.Model.Configured = triFromText(r.Model.ConfiguredText)
 	}

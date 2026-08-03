@@ -292,12 +292,21 @@ func renderAgentResponse(env cli.Env, resp agentapi.Response, asJSON bool) int {
 	} else {
 		// AN UNIDENTIFIED READER IS SAID, not left blank. hub.CanRead answers undetermined for one,
 		// and a person reading an empty hub list needs to know that is why.
+		//
+		// THIS LINE USED TO BE PRINTED ON EVERY REFUSAL, FALSELY. Refusals did not carry Person at
+		// all, so a machine with OMW_PERSON=priya was told "no person is configured" the moment
+		// anything was refused — and its output was byte-identical to the same refusal on a machine
+		// with no person set, so the two could not be told apart. The response now carries the
+		// person whatever the outcome; this branch means what it says again.
 		fmt.Fprintf(env.Stdout, "as:          %s — no person is configured, so who may read what could not be worked out\n",
 			tri.Undetermined)
 	}
-	if resp.HubStateText != "" {
-		fmt.Fprintf(env.Stdout, "hub:         %s\n", resp.HubState.Render("read", "not contacted"))
-	}
+	// TWO QUESTIONS, TWO LINES. "Is a hub configured" is a fact about this machine and is answerable
+	// even for a request that was refused before anything was consulted; "was one contacted" is
+	// about this request. Reporting them as one field is what made a refusal on a hub-less machine
+	// claim the hub state was unknown.
+	fmt.Fprintf(env.Stdout, "hub:         %s\n", resp.HubConfigured.Render("configured", "none configured"))
+	fmt.Fprintf(env.Stdout, "             %s\n", resp.HubContacted.Render("contacted, and it answered", "not contacted"))
 	if resp.Code != "" {
 		fmt.Fprintf(env.Stdout, "code:        %s\n", resp.Code)
 	}
@@ -323,10 +332,10 @@ func renderAgentResponse(env cli.Env, resp agentapi.Response, asJSON bool) int {
 		for _, n := range resp.Notes {
 			fmt.Fprintf(env.Stdout, "  %s  %s  [%s]\n", n.ID, n.Title, n.Visibility)
 		}
-		if resp.UndeterminedNotes > 0 {
+		if resp.UndeterminedNotes != nil && *resp.UndeterminedNotes > 0 {
 			// NOT DROPPED AND NOT COUNTED IN. "No results" must not absorb "I could not check".
 			fmt.Fprintf(env.Stdout, "could not be determined for %d note(s): they are neither listed nor ruled out\n",
-				resp.UndeterminedNotes)
+				*resp.UndeterminedNotes)
 		}
 	}
 	if resp.Note != nil {
