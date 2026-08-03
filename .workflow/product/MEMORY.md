@@ -26,14 +26,13 @@ sits in the comments, re-run the review job rather than asking them to repost.
 On one single-file pull request I diagnosed the red wrong **three times running** and the log had it
 each time. Two traps behind that:
 
-- **Check runs attach to the COMMIT, not the branch.** A red can be inherited from a *different,
-  already-closed* pull request that shared the sha. Renaming the branch does not clear it; moving
-  the sha does.
-- **The commit-message gate refuses closing keywords** (`Closes #<n>`) — because a closing keyword
-  closes the Issue at merge, taking closure away from the role that decides it at UAT. Use `Refs`.
-  It also requires an `Agent: <role>` trailer.
+**Check runs attach to the COMMIT, not the branch.** So a red can be inherited from a *different,
+already-closed* pull request that shared the sha, and renaming the branch does not clear it — only
+moving the sha does. That one is invisible from the pull request you are looking at, which is why it
+cost three wrong guesses.
 
-Read it with `gh run view <id> --log | grep '::error'`.
+Read it with `gh run view <id> --log | grep '::error'`. The gates here state their remedy in the
+failure text, so the log is not a hint — it is the answer.
 
 ## 2026-08-03 — once you dispatch a reviewer, the head is NOT yours to move
 
@@ -44,11 +43,6 @@ reviewed. Their refusal became unplaceable and #98's guard red-lined the whole p
 **Fix the branch before you ask.** Every push after that costs them a round and can destroy work
 already done. Useful distinction the gate draws if it happens anyway: an **unknown** sha is a verdict
 never in force; a **known** sha is merely a stale review, which is silent and fine.
-
-**And when two of your actions precede a green, you have not learned which one caused it.** I ran a
-repair and a job re-run, saw green, and reported the repair as the cause. The reviewer had deleted
-their stranded verdict — the likeliest actual cause — and I never checked the ordering, which I
-could have. Two changes, one observation, no control.
 
 ## 2026-08-03 — the working clone is SHARED. `git stash` there sweeps up other roles' work.
 
@@ -108,6 +102,13 @@ it to the wrong tree. Withdrawn on #122, and deleted here rather than left to mi
   before believing a zero.
 - **A `-i` grep can match JSON key names rather than findings** — `grep -i undetermined` "found"
   undetermined-ness in a diagnostics bundle purely via keys like `synchronising_undetermined_why`.
+- **Two of your actions preceding a good result do not tell you which one caused it.** I made a
+  repair and re-ran a job, saw a gate go green, and reported the repair as the cause; a third party
+  had meanwhile deleted the thing that was actually blocking it. The ordering was there to check and
+  I did not check it. Change one thing, or establish the order.
+- **A wait loop can stop waiting early and look like a result.** Mine keyed on the literal string
+  `still running`, which `pr.sh` stops printing once fewer than two checks are outstanding, so it
+  returned while a check was live. Count incomplete runs from the API rather than matching prose.
 
 **The general rule this project keeps teaching: a negative result means nothing until the probe is
 shown to fire on something known-present.** State the control, every time.
