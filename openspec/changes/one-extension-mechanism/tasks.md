@@ -147,3 +147,20 @@
 - [x] `FindAs` never matching — red on the CONTROL arm: "a genuine model provider of the same name
       is 3, want SituationReady … the interface check has broken the case it was supposed to
       protect", so the repair is pinned in both directions rather than the lookup merely broken
+
+## Review round 4 — the product never reached `ExtensionFactory`
+
+- [x] Point the DAEMON'S ingestion at `channels.ExtensionFactory`: `LoopFactory` defaults to nil and
+      `IngestPass` builds the factory over the pass's own store, so the load state is resolved per
+      pass rather than once. It had defaulted to `Builtin`, so criterion 9 held only where a test
+      called `ExtensionFactory` directly — one fact, two surfaces, two different reasons, and the
+      wrong layer answering
+- [x] Add `channels.LoopRegistry` so a test can drive the daemon's ingestion and `omw ext list`
+      against ONE machine, which is what makes the two surfaces comparable
+- [x] Drive criterion 9 through the real `omw channels list` with the real daemon ingesting and a
+      registered adapter forced to fail its load, and assert the reason names the FAILED LOAD and
+      not the missing built-in transport
+- [x] Assert the two surfaces give the same reason for the same broken adapter
+- [x] `LoopFactory` back to `= Builtin` — red: "`omw channels list` does not say the registered
+      teams adapter FAILED TO LOAD … last attempt: COULD NOT BE REACHED: this build has no transport
+      for Microsoft Teams", in both new tests
