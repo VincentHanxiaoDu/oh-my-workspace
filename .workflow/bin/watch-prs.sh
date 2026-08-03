@@ -125,7 +125,17 @@ self_test() {
   printf '#!/usr/bin/env bash\necho boom >&2\nexit 1\n' > "$tmp/gh"; chmod +x "$tmp/gh"
   cp "${BASH_SOURCE[0]}" "$tmp/watch-prs.sh"
   ( PATH="$tmp:$PATH" REPO=x/y bash "$tmp/watch-prs.sh" dev 1 >"$tmp/out" 2>&1 & echo $! > "$tmp/pid" )
-  sleep 3
+  # WAITS FOR THE OUTCOME INSTEAD OF SLEEPING FOR A GUESS. Measured: --self-test failed once and
+  # then passed six consecutive times, and the role that hit the red spent a round establishing that
+  # its own guard was flaky rather than that anything was wrong. A poll can outlast a fixed window on
+  # a busy machine; a guard that fails at random is close to no guard at all, because every red it
+  # produces has to be investigated and most of them mean nothing. This still fails in bounded time
+  # when the behaviour is genuinely broken.
+  local fwaited=0
+  while [ "$fwaited" -lt 60 ]; do
+    [ "$(grep -c '^LOOKUP FAILED' "$tmp/out" 2>/dev/null || echo 0)" -ge 2 ] && break
+    sleep 1; fwaited=$((fwaited + 1))
+  done
   kill "$(cat "$tmp/pid")" 2>/dev/null || true
   out=$(cat "$tmp/out" 2>/dev/null || echo "")
   local n; n=$(printf '%s\n' "$out" | grep -c '^LOOKUP FAILED' || true)
@@ -273,7 +283,12 @@ STUB
       nout=$(PATH="$tmp:$PATH" REPO=x/y bash "$tmp/watch-prs.sh" dev --sweep 2>&1 || true)
     else
       ( PATH="$tmp:$PATH" REPO=x/y bash "$tmp/watch-prs.sh" dev 2 >"$tmp/mout" 2>&1 & echo $! > "$tmp/mpid" )
-      sleep 3
+      # Same race as every other arm here: wait for a line rather than for a duration.
+      mwaited=0
+      while [ "$mwaited" -lt 60 ]; do
+        [ -s "$tmp/mout" ] && break
+        sleep 1; mwaited=$((mwaited + 1))
+      done
       kill "$(cat "$tmp/mpid")" 2>/dev/null || true
       nout=$(cat "$tmp/mout" 2>/dev/null || echo "")
     fi
@@ -354,7 +369,14 @@ STUB
   printf '#!/usr/bin/env bash\necho "[]"\n' > "$tmp/gh"; chmod +x "$tmp/gh"
   cp "${BASH_SOURCE[0]}" "$tmp/watch-prs.sh"
   ( PATH="$tmp:$PATH" REPO=x/y bash "$tmp/watch-prs.sh" dev --sweep >"$tmp/sout" 2>&1 & echo $! > "$tmp/spid" )
-  sleep 3
+  # WAITS FOR IT TO EXIT, up to a ceiling. Sleeping a fixed three seconds asserted "a sweep finishes
+  # in three seconds", which is a statement about the machine; what this arm is for is "a sweep
+  # finishes at all". A slow one is not a watch.
+  swaited=0
+  while [ "$swaited" -lt 60 ]; do
+    kill -0 "$(cat "$tmp/spid")" 2>/dev/null || break
+    sleep 1; swaited=$((swaited + 1))
+  done
   if kill -0 "$(cat "$tmp/spid")" 2>/dev/null; then
     kill "$(cat "$tmp/spid")" 2>/dev/null || true
     echo "SELF-TEST FAIL: --sweep did not exit — it is a watch, not a sweep" >&2; rc=1

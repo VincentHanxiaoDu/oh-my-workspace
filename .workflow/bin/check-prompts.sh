@@ -112,6 +112,50 @@ run_check() {
   grep -qi 'AskUserQuestion' "$dir/product-workflow.md" 2>/dev/null \
     || { echo "::error::product-workflow.md does not tell product to ask the owner — a decision they were never asked for is not one they made" >&2; rc=1; }
 
+  # ONE DOOR TO THE OWNER, AND IT IS PRODUCT'S.
+  #
+  # `AskUserQuestion` is the only channel to a human here, and a process with several of them has
+  # none: the owner is asked the same thing twice by two roles, or — the measured failure — a
+  # question is "raised" in a comment nobody was watching and nothing ever comes of it. A release
+  # verdict once reached the owner only because they happened to be reading that window.
+  #
+  # So the tool itself is the enforcement point: product's frontmatter carries it and no other
+  # working role's does. A prompt that hands it to dev has not added a convenience, it has removed
+  # the property that makes the single door meaningful.
+  for role in dev-workflow qa-workflow review-pr; do
+    f="$dir/$role.md"; [ -f "$f" ] || continue
+    sed -n '/^---$/,/^---$/p' "$f" | grep -qi 'AskUserQuestion'       && { echo "::error::$role.md may use AskUserQuestion. Product is the single door to the owner; a second one means a question asked twice or a question asked by nobody" >&2; rc=1; }
+    grep -qi 'never ask the owner\|single door' "$f"       || { echo "::error::$role.md does not tell the role that it never asks the owner directly — without that it will address a question to them in a comment and consider it asked" >&2; rc=1; }
+  done
+
+  # THE AUTHOR GETS ITS OWN WORK REVIEWED, AND HOLDS ONE REVIEWER ACROSS ROUNDS.
+  #
+  # Measured on one pull request: eleven verdicts in eighteen hours, seven changes-requested and
+  # four approve, alternating between two roles, still unmerged with every check green. A
+  # changes-requested costs a push, a push moves the head, and a moved head re-opened the review to
+  # every independent role — so each round was judged by a different agent against a different
+  # standard. The instruction that prevents that is in the prompts or it is nowhere.
+  grep -q 'review-pr\.md' "$dir/dev-workflow.md" 2>/dev/null     || { echo "::error::dev-workflow.md never tells dev to dispatch a reviewer, so a pull request waits for a role that is no longer looking for one" >&2; rc=1; }
+  grep -qi 'same reviewer\|THE SAME reviewer' "$dir/dev-workflow.md" 2>/dev/null     || { echo "::error::dev-workflow.md does not say to go back to the SAME reviewer — a fresh one re-opens findings the first settled, which is the ping-pong" >&2; rc=1; }
+  grep -qi 'prior findings' "$dir/review-pr.md" 2>/dev/null     || { echo "::error::review-pr.md does not scope a re-review to the reviewer's prior findings plus what changed, so every round is a fresh review and none of them converge" >&2; rc=1; }
+  for role in dev-workflow qa-workflow product-workflow review-pr; do
+    f="$dir/$role.md"; [ -f "$f" ] || continue
+    grep -qi 'three rounds\|three times' "$f"       || { echo "::error::$role.md names no limit on review rounds. One pull request reached seven and was still going; a disagreement that survives three reviews is a decision, and only product may put it to the owner" >&2; rc=1; }
+  done
+
+  # A ROLE MUST BE HANDED THIS PROJECT'S FACTS AND ITS OWN MEMORY.
+  #
+  # Measured on a repository two days in: every `.workflow/<role>/AGENT.md` still read "(empty —
+  # nothing project-specific yet)", so each role rediscovered the same things separately, several
+  # times over. One established that the test runner caches results and needs a flag, and wrote it
+  # nowhere. A prompt that references neither file has told the role to work it out again.
+  for role in dev-workflow qa-workflow product-workflow; do
+    f="$dir/$role.md"; [ -f "$f" ] || continue
+    grep -q '@\.workflow/PROJECT\.md' "$f"       || { echo "::error::$role.md does not load .workflow/PROJECT.md, so the role does not know how this project is built, tested or accepted" >&2; rc=1; }
+    grep -q '@\.workflow/.*/MEMORY\.md' "$f"       || { echo "::error::$role.md loads no memory, so everything the role learns dies with the session and the next round pays for it again" >&2; rc=1; }
+    grep -qi 'MEMORY\.md. is yours\|Your memory' "$f"       || { echo "::error::$role.md loads a memory file but never tells the role to write to it — a memory nothing writes to stays empty forever" >&2; rc=1; }
+  done
+
   # R4 — CLOSURE AUTHORITY LIVES IN THE PROMPT OF THE ROLE THAT CLOSES, and nowhere else.
   grep -qi 'you close bugs and chores' "$dir/qa-workflow.md" 2>/dev/null \
     || { echo "::error::qa.md does not state that qa closes bugs and chores" >&2; rc=1; }
