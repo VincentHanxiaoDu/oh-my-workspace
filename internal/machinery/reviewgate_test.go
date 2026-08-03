@@ -498,8 +498,13 @@ func TestRefusedReviewDoesNotReadAsNoReview(t *testing.T) {
 		},
 		{
 			// Criterion 3. A push invalidates a review; a stale refusal is not a live one.
+			//
+			// IT NAMES `f.base`, A REAL EARLIER COMMIT, NOT FORTY ZEROS. That is what a stale
+			// review actually is, and since Issue #84 the two are different facts: a sha this
+			// repository knows is silently stale, a sha naming no object at all is reported rather
+			// than dropped. `TestAVerdictNamingAnUnknownShaIsReported` covers the other one.
 			name:     "a refusal naming another sha reads as no current review",
-			comments: []string{posted("product", "product", strings.Repeat("0", 40), "changes-requested")},
+			comments: []string{posted("product", "product", f.base, "changes-requested")},
 			wantRC:   1,
 			want:     absentPhrase,
 			notWant:  refusedPhrase,
@@ -763,4 +768,316 @@ func TestASelfApproveDoesNotEraseARefusal(t *testing.T) {
 				"code that answered it, so a refused branch can never be fixed\n%s", rc, out)
 		}
 	})
+}
+
+// ghostSha returns a 40-hex string that SHARES ITS FIRST EIGHT CHARACTERS with real and names no
+// object in the fixture. The prefix collision is the point and not decoration: on #38 the posted
+// sha and the head agreed for eight hex characters, which is not chance, and every human and agent
+// that skim-read them side by side — including the reviewer that filed the Issue — read them as
+// equal. A fixture whose two shas differ obviously would not represent the case that bit.
+func ghostSha(t *testing.T, dir, real string) string {
+	t.Helper()
+	if len(real) != 40 {
+		t.Fatalf("the fixture head %q is not a 40-character sha", real)
+	}
+	rot := strings.NewReplacer(
+		"0", "5", "1", "6", "2", "7", "3", "8", "4", "9",
+		"5", "0", "6", "1", "7", "2", "8", "3", "9", "4",
+		"a", "f", "b", "e", "c", "d", "d", "c", "e", "b", "f", "a")
+	ghost := real[:8] + rot.Replace(real[8:])
+	if ghost == real {
+		t.Fatalf("the ghost sha is identical to the head %q, so the fixture proves nothing", real)
+	}
+	if ghost[:8] != real[:8] {
+		t.Fatalf("the ghost sha %q does not share the head's eight-character prefix", ghost)
+	}
+
+	// THE ISSUE'S OWN CONTROL, RUN AS A CONTROL. `git cat-file` must fail on the ghost and succeed
+	// on the head. If either half does not hold, the fixture is not the case under test and this
+	// SKIPS WITH A REASON rather than passing — a 40-hex string colliding with a real object is
+	// vanishingly unlikely, but "vanishingly unlikely" is not "checked".
+	resolves := func(sha string) bool {
+		cmd := exec.Command("git", "cat-file", "-e", sha+"^{commit}")
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+		return cmd.Run() == nil
+	}
+	if !resolves(real) {
+		t.Skipf("the fixture head %s does not resolve in %s, so nothing here could be determined "+
+			"and this test is NOT passing", real, dir)
+	}
+	if resolves(ghost) {
+		t.Skipf("the constructed ghost sha %s unexpectedly resolves, so this fixture is not the "+
+			"case under test — nothing was determined and this test is NOT passing", ghost)
+	}
+	return ghost
+}
+
+// TestAVerdictNamingAnUnknownShaIsReported is Issue #84, the third defect in this gate and the
+// quietest. A verdict whose `Reviewed-sha:` names no git object was discarded in silence: the gate
+// correctly declined to apply it, and then told nobody. On #38 a role's UAT refusal named
+// `e7e1368a7f…` while the head was `e7e1368a36…`; the gate ran 28 seconds later and published
+// `success`, so the board read green while a role believed it had blocked the pull request.
+//
+// THE EXACT-SHA MATCHING IS CORRECT AND IS NOT TOUCHED. It is what makes a verdict stale when
+// somebody pushes, and loosening it would let a stale review certify new code. Two cases are
+// distinguished instead:
+//
+//	a sha this repository KNOWS but is not the head -> an ordinary stale review, silent, unchanged
+//	a sha naming NO OBJECT AT ALL                   -> nothing was ever reviewed there; reported
+func TestAVerdictNamingAnUnknownShaIsReported(t *testing.T) {
+	f := newReviewFixture(t)
+	ghost := ghostSha(t, f.dir, f.head)
+	genuine := posted("qa", "qa", f.head, "approve")
+
+	cases := []struct {
+		name     string
+		comments []string
+		wantRC   int
+		want     []string
+		notWant  []string
+	}{
+		{
+			// THE #38 SHAPE. A refusal that cannot be placed, and a genuine approve that can. This
+			// is the configuration that published `success` while a refusal lay unread.
+			name:     "an unplaceable refusal is not swallowed by a genuine approve",
+			comments: []string{posted("product", "product", ghost, "changes-requested"), genuine},
+			wantRC:   4,
+			want:     []string{ghost, f.head, "COULD NOT BE PLACED"},
+		},
+		{
+			// CASE 1, AND IT MUST STAY SILENT. The base commit is a sha this repository knows and
+			// is not the head — an ordinary stale review, which a push is expected to produce.
+			// Reporting these would make every pushed-to branch noisy and teach everyone to ignore
+			// the message that matters.
+			name:     "a verdict naming a known commit that is not the head stays silent",
+			comments: []string{posted("product", "product", f.base, "changes-requested"), genuine},
+			wantRC:   0,
+			want:     []string{"review ok"},
+			notWant:  []string{"COULD NOT BE PLACED"},
+		},
+		{
+			// A QUOTED unplaceable verdict is not a verdict, so it is not an unplaceable one
+			// either. #65 strips fences before parsing and that must hold here too, or every
+			// postmortem quoting a bad sha turns a pull request red.
+			name: "a fenced quotation naming an unknown sha is not reported",
+			comments: []string{
+				"[product]\nfor the record this is what went wrong:\n" +
+					fenced("```", review("product", ghost, "changes-requested")),
+				genuine,
+			},
+			wantRC:  0,
+			want:    []string{"review ok"},
+			notWant: []string{"COULD NOT BE PLACED"},
+		},
+		{
+			// WITH NO OTHER VERDICT AT ALL, the unplaceable one is still the more actionable fact.
+			// "no review exists" would be true and would send the reader looking for a missing
+			// comment that is in fact sitting right there, naming a sha nobody can find.
+			name:     "an unplaceable verdict is reported even when no other review exists",
+			comments: []string{posted("product", "product", ghost, "changes-requested")},
+			wantRC:   4,
+			want:     []string{ghost, "COULD NOT BE PLACED"},
+		},
+		{
+			// AN UNPLACEABLE APPROVE COUNTS TOO. The Issue is about a refusal because that is what
+			// it cost, but the defect is the silence and it does not know what the verdict said.
+			name:     "an unplaceable approve is reported as well",
+			comments: []string{posted("product", "product", ghost, "approve")},
+			wantRC:   4,
+			want:     []string{ghost, "COULD NOT BE PLACED"},
+		},
+		{
+			// PRECEDENCE, PINNED. A landed refusal outranks an unplaceable verdict: it is concrete,
+			// it is already red, and it already tells the author what to do. The unplaceable notice
+			// still prints, so nothing is lost by its not owning the exit code — and this arm is
+			// here so that ordering is a decision rather than a consequence of line order.
+			name: "a landed refusal outranks an unplaceable verdict, and both are said",
+			comments: []string{
+				posted("product", "product", ghost, "approve"),
+				posted("qa", "qa", f.head, "changes-requested"),
+			},
+			wantRC: 2,
+			want:   []string{"COULD NOT BE PLACED", "requests changes"},
+		},
+		{
+			// AND THE ORDINARY PATH IS UNTOUCHED. A fix that reports something on every pull
+			// request satisfies every arm above and makes the gate useless.
+			name:     "a clean independent approve is unaffected",
+			comments: []string{genuine},
+			wantRC:   0,
+			want:     []string{"review ok"},
+			notWant:  []string{"COULD NOT BE PLACED"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rc, out := f.checkOut(t, tc.comments...)
+			if rc != tc.wantRC {
+				t.Errorf("check-review.sh exited %d, want %d", rc, tc.wantRC)
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(out, w) {
+					t.Errorf("the gate said %q, which does not carry %q", strings.TrimSpace(out), w)
+				}
+			}
+			for _, w := range tc.notWant {
+				if strings.Contains(out, w) {
+					t.Errorf("the gate said %q, which carries %q and should not",
+						strings.TrimSpace(out), w)
+				}
+			}
+		})
+	}
+
+	// A SHALLOW CLONE CANNOT ANSWER THIS, AND MUST SAY SO RATHER THAN ACCUSE. `git cat-file` fails
+	// on an object that exists but was never fetched, so in a shallow checkout "unplaceable" and
+	// "not downloaded" are the same observation — and reporting the first would be a false alarm of
+	// exactly the shape this Issue is about, pointed the other way. The review job checks out with
+	// fetch-depth: 0 today, but that is a framework-owned workflow file the installer replaces, so
+	// the script probes rather than trusting it.
+	t.Run("a shallow clone reports that it could not determine, and does not accuse", func(t *testing.T) {
+		needTool(t, "git")
+		dst := filepath.Join(t.TempDir(), "shallow")
+		// Depth 2 so the base commit is present — the gate refuses earlier without it, and this
+		// arm is about the sha scan and not about the checkout guard.
+		clone := exec.Command("git", "clone", "--quiet", "--depth", "2", "file://"+f.dir, dst)
+		clone.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+		if out, err := clone.CombinedOutput(); err != nil {
+			t.Skipf("could not make a shallow clone here, so nothing was determined and this is "+
+				"NOT passing: %v\n%s", err, out)
+		}
+		isShallow := exec.Command("git", "rev-parse", "--is-shallow-repository")
+		isShallow.Dir = dst
+		if out, err := isShallow.Output(); err != nil || strings.TrimSpace(string(out)) != "true" {
+			t.Skipf("the clone did not come out shallow (%q, %v), so this arm is not the case "+
+				"under test and is NOT passing", strings.TrimSpace(string(out)), err)
+		}
+
+		g := reviewFixture{dir: dst, head: f.head, base: f.base}
+		rc, out := g.checkOut(t, posted("product", "product", ghost, "changes-requested"), genuine)
+		if rc == 4 {
+			t.Errorf("check-review.sh exited 4 in a SHALLOW clone — it cannot tell an unknown "+
+				"object from an unfetched one there, so this is an accusation it has no basis "+
+				"for\n%s", out)
+		}
+		if !strings.Contains(out, "COULD NOT BE DETERMINED") {
+			t.Errorf("a shallow clone published %q, which does not say the question could not be "+
+				"answered — silence here reads as 'every verdict is fine'", strings.TrimSpace(out))
+		}
+	})
+}
+
+// TestPublishDistinguishesTheUnplaceableVerdict is Issue #84 at the wiring. The exit code the
+// checker goes to the trouble of splitting reaches nobody unless the publish step renders it, and
+// this repository has already shipped one defect of exactly that shape — #52, where a landed
+// refusal and an absent review shared a sentence.
+func TestPublishDistinguishesTheUnplaceableVerdict(t *testing.T) {
+	needTool(t, "bash")
+	dir := t.TempDir()
+
+	state, four := publish(t, dir, "success", "failure", "4")
+	if state != "failure" {
+		t.Errorf("rc=4 publishes state %q, want failure — a verdict nobody can place must not pass", state)
+	}
+	if strings.Contains(four, absentPhrase) {
+		t.Errorf("rc=4 publishes %q, which claims no review exists. One does; it names a sha this "+
+			"repository cannot find, and that is what the reader has to be told", four)
+	}
+	if strings.Contains(four, refusedPhrase) {
+		t.Errorf("rc=4 publishes %q, which says changes were requested — that is a different fact", four)
+	}
+	for _, other := range []string{"1", "2"} {
+		if _, d := publish(t, dir, "success", "failure", other); d == four {
+			t.Errorf("rc=%s and rc=4 both publish %q", other, d)
+		}
+	}
+}
+
+// TestAStaleVerdictIsNotAnAbsentOne is the refusal on #98. Issue #84 left the gate with THREE
+// outputs for FOUR states: a verdict naming a real ancestor that is not the head, and no verdict at
+// all, both emitted `no review found for head <X>` and exited 1 — byte-identical.
+//
+// They are different facts and they need opposite responses. "Your verdict raced a push, re-post it"
+// is addressed to a reviewer who has already looked; "nobody has looked" is addressed to the board.
+// Rendering the first as the second is a determined-but-other state reported as an absence, which is
+// the rule this whole gate exists to enforce, broken inside it.
+//
+// THE REMEDY IS DELIBERATELY SMALL, and the size is the point: a `::notice::` on a path that already
+// computes the shas. No exit code moves, and nothing that was mergeable stops being mergeable.
+// Announcing a stale verdict the way an unplaceable one is announced would bury the unplaceable one;
+// a notice does not.
+func TestAStaleVerdictIsNotAnAbsentOne(t *testing.T) {
+	f := newReviewFixture(t)
+	ghost := ghostSha(t, f.dir, f.head)
+
+	// The four states, each driven through the installed gate.
+	staleRC, stale := f.checkOut(t, posted("qa", "qa", f.base, "changes-requested"))
+	absentRC, absent := f.checkOut(t)
+	unplaceableRC, unplaceable := f.checkOut(t, posted("qa", "qa", ghost, "changes-requested"))
+	currentRC, current := f.checkOut(t, posted("qa", "qa", f.head, "approve"))
+
+	// THE BLOCKER. Same exit code, and that is deliberate — neither is a certified head — so the
+	// distinction has to live in what is said.
+	if staleRC != 1 {
+		t.Errorf("a stale verdict exited %d, want 1 — this change must not move any exit code", staleRC)
+	}
+	if absentRC != 1 {
+		t.Errorf("an absent review exited %d, want 1", absentRC)
+	}
+	if stale == absent {
+		t.Errorf("a stale verdict and an absent review both say %q. One means 'your verdict raced a "+
+			"push, re-post it' and the other means 'nobody has looked'; a reader cannot act on the "+
+			"right one", strings.TrimSpace(stale))
+	}
+
+	// The notice has to be usable: whose verdict, which sha, and which head it should have named.
+	for _, want := range []string{"qa", f.base, f.head} {
+		if !strings.Contains(stale, want) {
+			t.Errorf("the stale-verdict notice %q does not carry %q, so the reviewer cannot tell "+
+				"which of its verdicts went stale or what to re-post it against",
+				strings.TrimSpace(stale), want)
+		}
+	}
+	if !strings.Contains(stale, "::notice::") {
+		t.Errorf("the stale-verdict report %q is not a ::notice:: — an ::error:: here would be the "+
+			"loud treatment the unplaceable case needs, and using it for both buries that one",
+			strings.TrimSpace(stale))
+	}
+
+	// AND THE OTHER TWO STATES KEEP THEIR OWN VOICES. Four states, four outputs.
+	if unplaceableRC != 4 {
+		t.Errorf("an unplaceable verdict exited %d, want 4 — unchanged by this fix", unplaceableRC)
+	}
+	if unplaceable == stale || unplaceable == absent {
+		t.Errorf("the unplaceable verdict says %q, which collides with the stale or absent case",
+			strings.TrimSpace(unplaceable))
+	}
+	if !strings.Contains(unplaceable, "COULD NOT BE PLACED") {
+		t.Errorf("the unplaceable verdict lost its own wording: %q", strings.TrimSpace(unplaceable))
+	}
+
+	// CASE 3 STAYS QUIET. A verdict naming the correct head must not be reported as anything; this
+	// is the direction the reviewer called the one that mattered most, and it is cheap to keep.
+	if currentRC != 0 {
+		t.Errorf("a verdict naming the correct head exited %d, want 0", currentRC)
+	}
+	if strings.Contains(current, "::notice::") || strings.Contains(current, "::error::") {
+		t.Errorf("a verdict naming the correct head produced %q — the ordinary path must stay silent",
+			strings.TrimSpace(current))
+	}
+
+	// A STALE VERDICT ALONGSIDE A GOOD ONE STILL PASSES, and still says the stale one went stale.
+	// Without this, the notice could have been wired only into the failing path.
+	rc, both := f.checkOut(t,
+		posted("qa", "qa", f.base, "changes-requested"),
+		posted("product", "product", f.head, "approve"))
+	if rc != 0 {
+		t.Errorf("a stale verdict alongside a current approve exited %d, want 0\n%s", rc, both)
+	}
+	if !strings.Contains(both, f.base) {
+		t.Errorf("a stale verdict went unmentioned because the head was certified anyway: %q",
+			strings.TrimSpace(both))
+	}
 }
