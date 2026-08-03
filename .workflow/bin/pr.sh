@@ -14,8 +14,8 @@
 #     entirely. An agent that does not read back reports an armed pull request that is not armed.
 #
 # Usage: pr.sh open <branch> <title> <body-file>
-#        pr.sh state <number> [--brief]     exits 1 on red, 2 on no answer yet — so it kills an
-#                                            `&&` chain by design; use `;` or check $? .
+#        pr.sh state <number> [--brief]     exits 1 on red, 2 on no answer yet, 3 on a conflict —
+#                                            so it kills an `&&` chain by design; use `;` or check $? .
 #        pr.sh arm <number>
 #        pr.sh rereview <number>
 #        pr.sh --self-test
@@ -61,10 +61,40 @@ do_open() {
 # BOTH ENDPOINTS, ALWAYS, IN ONE PLACE. Reading one of them is how an unreviewed pull request looks
 # reviewed, and how a blocking red stays invisible.
 do_state() {
-  local num=$1 brief=${2:-} sha runs st rc=0
+  local num=$1 brief=${2:-} sha runs st rc=0 prjson mergeable
   resolve_repo
-  sha=$(gh api "repos/$REPO/pulls/$num" --jq .head.sha 2>/dev/null) || {
+  # ONE READ, THREE FACTS. The head sha, whether it merges, and who to send it back to all come
+  # from the same object; asking three times spends three calls out of a budget three roles and
+  # four watches share.
+  prjson=$(gh api "repos/$REPO/pulls/$num" 2>/dev/null) || {
     echo "::error::could not read pull request #$num. This is a LOOKUP FAILURE and NOT a statement about its state." >&2; exit 1; }
+  sha=$(printf '%s' "$prjson" | jq -r .head.sha)
+  mergeable=$(printf '%s' "$prjson" | jq -r '.mergeable | if . == null then "unknown" else tostring end')
+
+  # A CONFLICT IS A STATE, AND UNTIL NOW IT WAS SILENCE. Measured: #38 and #46 sat open for a day
+  # and a half at `mergeable=false`. GitHub cannot build a merge ref for such a pull request, so
+  # `gates.yml` — which runs `on: pull_request` — NEVER SCHEDULES. No check ever reports, so this
+  # command said `NO ANSWER YET`, which is the string for "CI has not got there yet" and reads as
+  # "wait". Nobody was waiting. Both branches also held their Issues claimed (an open pull request
+  # IS the claim), so #9 and #10 — two release blockers — were locked behind a state no queue could
+  # name and no gate could report.
+  #
+  # `mergeable` IS COMPUTED ASYNCHRONOUSLY AND NULL MEANS NOT YET COMPUTED. Rendering null as false
+  # would be this project's own defect: `could not determine` becoming `determined to be no`. Null
+  # is reported as its own third value, and the caller is told to ask again rather than to rebase.
+  if [ "$mergeable" = "false" ]; then
+    if [ -n "$brief" ]; then
+      printf 'CONFLICT — will not merge into the base; no gate can run until it is rebased\n'
+    else
+      echo "PR #$num  head $(printf '%s' "$sha" | cut -c1-8)"
+      echo
+      echo "  CONFLICT with the base branch."
+      echo "  GitHub cannot build a merge ref, so the gates never schedule and NOTHING will ever"
+      echo "  report on this head. This is not 'no answer yet' — waiting cannot resolve it."
+      echo "  The author rebases; no review and no verdict is worth anything until they have."
+    fi
+    return 3
+  fi
   # A HEAD THAT IS NOT YOUR HEAD MUST SAY SO. For about a minute after a force-push this reported
   # the PREVIOUS commit and its verdicts, with nothing marking them as another commit's. An agent
   # that trusts the first reading acts on the result of work it has already replaced.
@@ -241,12 +271,40 @@ self_test() {
   esac
   case "$out" in *"all green"*) echo "SELF-TEST FAIL: an unreadable repository reported green" >&2; rc=1 ;; esac
 
+  # A CONFLICT MUST BE REPORTED AS A CONFLICT, AND `null` MUST NOT BECOME ONE. Driven against a
+  # stub, both directions in one arm: reporting nothing is the outage (#38 and #46 sat a day and a
+  # half), and reporting a conflict from an uncomputed `mergeable` would send an author to rebase a
+  # branch that merges cleanly.
+  local tmpc
+  tmpc=$(mktemp -d)
+  cat > "$tmpc/gh" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *"pulls/1"*) printf '{"head":{"sha":"cafe"},"mergeable":%s}\n' "${STUB_MERGEABLE:-null}" ;;
+  *"check-runs"*) echo '{"check_runs":[]}' ;;
+  *"/status"*)    echo '{"statuses":[]}' ;;
+  *) echo '{}' ;;
+esac
+STUB
+  chmod +x "$tmpc/gh"
+  out=$( PATH="$tmpc:$PATH" REPO=x/y STUB_MERGEABLE=false bash "${BASH_SOURCE[0]}" state 1 --brief 2>&1 || true )
+  case "$out" in
+    *CONFLICT*) : ;;
+    *) echo "SELF-TEST FAIL: a pull request that will not merge into its base reported '$out' — the gates never schedule on such a head, so 'NO ANSWER YET' tells a role to wait for a check that will never run" >&2; rc=1 ;;
+  esac
+  out=$( PATH="$tmpc:$PATH" REPO=x/y STUB_MERGEABLE=null bash "${BASH_SOURCE[0]}" state 1 --brief 2>&1 || true )
+  case "$out" in
+    *CONFLICT*) echo "SELF-TEST FAIL: mergeable=null — not yet computed — was reported as a conflict, which is 'could not determine' rendered as 'determined to be no'" >&2; rc=1 ;;
+    *) : ;;
+  esac
+  rm -rf "$tmpc"
+
   # `open` MUST REFUSE AN ABSENT BODY FILE rather than open an empty pull request.
   out=$( REPO=x/y bash "${BASH_SOURCE[0]}" open some-branch "a title" /nonexistent/body.md 2>&1 ) \
     && { echo "SELF-TEST FAIL: open accepted a missing body file" >&2; rc=1; }
   case "$out" in *"does not exist"*) : ;; *) echo "SELF-TEST FAIL: a missing body file gave no explanation" >&2; rc=1 ;; esac
 
-  [ "$rc" -eq 0 ] && echo "self-test passed: unknown input refuses, state reads both endpoints, arm reads back, and an unreadable repository never reports green"
+  [ "$rc" -eq 0 ] && echo "self-test passed: unknown input refuses, state reads both endpoints, arm reads back, an unreadable repository never reports green, a conflict is reported as a conflict, and an uncomputed mergeable is not"
   return $rc
 }
 

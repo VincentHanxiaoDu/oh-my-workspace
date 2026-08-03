@@ -208,102 +208,228 @@ my_prs() {
 # The tail anchor also stops `qa` matching a longer name and a short sha matching a longer one. It
 # errs toward "not reviewed", i.e. toward offering the work again — the failure this replaces, and
 # the safe direction to be wrong in.
-reviewed_by() { # reviewed_by <pr-number> <role> <head-sha>
-  local num=$1 role=$2 sha=$3 found raw
-  # `api`'s OWN `exit 1` IS NOT ENOUGH HERE, AND THAT IS THE TRAP. A command substitution is a
-  # subshell: `found=$(api ...)` catches the exit, `found` becomes empty, `${found:-0}` becomes 0,
-  # and the outage renders as "nobody has reviewed this" — the exact collapse every other query on
-  # this page goes out of its way to prevent, reintroduced by the shape of the call rather than by
-  # the logic. The lookup-failure test caught it on the first run; reading the code did not.
-  raw=$(api --paginate "repos/$REPO/issues/$num/comments?per_page=100") || exit 1
-  found=$(printf '%s' "$raw" \
-    | jq -r --arg r "$role" --arg h "$sha" '
-        [ .[] | .body
-          | select(test("(^|\n)Reviewed-by:[ \t]*" + $r + "[ \t]*(\r?\n|$)"))
-          | select(test("(^|\n)Reviewed-sha:[ \t]*" + $h + "[ \t]*(\r?\n|$)")) ] | length' 2>/dev/null || echo 0)
-  [ "${found:-0}" -gt 0 ]
+# --- the review history of one pull request, read once --------------------------------------
+#
+# ONE FETCH PER PULL REQUEST PER RUN. Every question below — who owns the review, how many rounds it
+# has been through, whether YOU have ruled on THIS head — is answered from the same comments. Asking
+# separately cost one paginated call per question per pull request per role, and the budget is
+# shared with three roles and four watches: measured 114 rate-limit refusals against `qa` in one
+# day, on a board of six pull requests. A queue that exhausts the budget reports `LOOKUP FAILED` for
+# polls its own polling made impossible.
+CACHE=$(mktemp -d 2>/dev/null || echo "")
+cleanup_cache() { [ -n "${CACHE:-}" ] && rm -rf "$CACHE"; }
+trap cleanup_cache EXIT
+
+# CALLED OUTSIDE A COMMAND SUBSTITUTION, ON PURPOSE. `api` exits the shell on a failed lookup, and
+# that exit is swallowed by a subshell — the documented trap two functions down. Fetching here and
+# reading the file there keeps the outage fatal instead of turning it into "nobody has reviewed it".
+ensure_pr_comments() { # ensure_pr_comments <pr-number>
+  local num=$1
+  [ -n "$CACHE" ] || { echo "::error::no writable temporary directory; refusing to guess at review state." >&2; exit 1; }
+  [ -f "$CACHE/pr-$num.json" ] && return 0
+  api --paginate "repos/$REPO/issues/$num/comments?per_page=100" > "$CACHE/pr-$num.json.part"
+  mv "$CACHE/pr-$num.json.part" "$CACHE/pr-$num.json"
 }
 
-reviews_waiting() {
-  local role=$1 num sha title authors rst prs any=0
+# THE SAME RULES THE GATE USES, AND FOR THE SAME REASONS — see check-review.sh, which argues both at
+# length. Fenced text is stripped before anything is parsed, because a comment QUOTING the verdict
+# template read as a verdict and did so under whoever the quote happened to name. And the reviewer is
+# the `[role]` marker on the first line, not the name inside the text: every role here posts through
+# one GitHub account, so `.user.login` would make all of them one reviewer and switch independence
+# off entirely.
+#
+# Emits one line per verdict, oldest first:  <role>\t<sha>\t<approve|changes>
+pr_verdicts() { # pr_verdicts <pr-number>   — ensure_pr_comments must have run
+  local num=$1
+  jq -r '
+    def strip_fences:
+      split("\n")
+      | reduce .[] as $l ({inb:false, out:[]};
+          if ($l | test("^[[:space:]]{0,3}(```|~~~)")) then .inb = (.inb | not)
+          elif .inb then .
+          else .out += [$l] end)
+      | .out | join("\n");
+    .[]
+    | ((.body // "") | gsub("\r"; "")) as $raw
+    | ($raw | strip_fences | split("\n")) as $lines
+    | select($lines | any(test("^Reviewed-by:")))
+    | select($lines | any(test("^Verdict:")))
+    | (($raw | split("\n")[0] | capture("^\\[(?<r>[A-Za-z][A-Za-z0-9_-]*)\\][[:space:]]*$") | .r) // "") as $role
+    | ($lines | map(select(test("^Reviewed-sha:"))) | .[0] // "" | sub("^Reviewed-sha:[[:space:]]*"; "") | sub("[[:space:]]*$"; "")) as $sha
+    | ($lines | map(select(test("^Verdict:")))     | .[0] // "" | sub("^Verdict:[[:space:]]*"; "")     | sub("[[:space:]]*$"; "")) as $v
+    | select($role != "")
+    | [$role, $sha, (if ($v | test("^changes")) then "changes" else "approve" end)]
+    | @tsv
+  ' < "$CACHE/pr-$num.json" 2>/dev/null || true
+}
+
+# HAS THIS ROLE ALREADY RULED ON THIS EXACT HEAD?
+reviewed_by() { # reviewed_by <pr-number> <role> <head-sha>
+  local num=$1 role=$2 sha=$3
+  # THE SHA IS PART OF THE ANSWER, which is what makes this release itself: a push moves the head,
+  # every prior verdict stops matching, and the work reappears. It errs toward "not reviewed" —
+  # toward offering the work again, which is the safe direction to be wrong in.
+  pr_verdicts "$num" | awk -F'\t' -v r="$role" -v s="$sha" '$1==r && $2==s {found=1} END{exit !found}'
+}
+
+# WHOSE REVIEW IS THIS? THE ROLE THAT TOOK IT FIRST, AND IT KEEPS IT.
+#
+# THIS IS THE PING-PONG, AND IT IS THE MOST EXPENSIVE DEFECT ON THE BOARD. Measured on #53:
+# **eleven verdicts over eighteen hours — seven `changes-requested` and four `approve`, alternating
+# between qa and product — 32 comments, and it was still open and unmerged with every check green.**
+#
+# No function was wrong. The mechanism was: a `changes-requested` costs a push, a push moves the
+# head, and a moved head makes every prior verdict stale and re-opens the pull request to EVERY
+# independent role. So the next round was reviewed by a DIFFERENT agent, against a different
+# standard, which raised findings the first one had already considered and passed. Each side was
+# individually reasonable and the pair of them did not converge, because nothing in the process
+# made the second reviewer answerable to the first one's judgement.
+#
+# THE FIX IS THAT A REVIEW HAS AN OWNER. Whoever posts the first verdict owns every later round of
+# that pull request. They see their own findings, they know what they already cleared, and a
+# re-review is scoped to what changed — which is a question that terminates.
+#
+# DERIVED, NOT STORED. It is the first verdict in the comment history; there is no label to set and
+# nothing to expire. And it CANNOT STRAND ANYTHING, which is the failure this must not reintroduce
+# (#32: a single eligible reviewer died and the board stopped):
+#   - it holds only while the owner is still independent of the head. A pull request that grows a
+#     commit authored by its reviewer releases the ownership automatically, because the same
+#     independence test that offers the work withdraws it.
+#   - it is visible to everybody. Other roles see the pull request under `REVIEW OWNED BY <role>`
+#     rather than not at all, so a stalled review is something a role can see and say so about,
+#     not something that has silently vanished from every queue.
+#   - it lapses entirely at the escalation limit below, at which point the pull request stops being
+#     a review problem.
+review_owner() { # review_owner <pr-number>
+  pr_verdicts "$1" | awk -F'\t' 'NR==1 {print $1; exit}'
+}
+
+# HOW MANY TIMES HAS THIS BEEN SENT BACK? A number, because three is not a review and it is not a
+# disagreement either — it is a question the process cannot answer, and the process must say so
+# rather than spend another round finding out again.
+changes_rounds() { # changes_rounds <pr-number>
+  pr_verdicts "$1" | awk -F'\t' '$3=="changes" {n++} END{print n+0}'
+}
+
+# THE POINT AT WHICH REVIEWING AGAIN IS NOT THE ANSWER. Configurable because a project may know its
+# own tolerance; three because #53 was still not converging at seven.
+REVIEW_MAX_ROUNDS=${ADF_REVIEW_MAX_ROUNDS:-3}
+
+# REVIEW IS NO LONGER SOMETHING ANOTHER ROLE DISCOVERS. IT HAPPENS BEFORE THE WORK IS HANDED OVER.
+#
+# WHAT THIS FUNCTION USED TO DO, AND WHY IT IS GONE. It offered every open pull request to every
+# role independent of its commits, so that a review nobody had been assigned would still reach
+# somebody. It worked — it ended the deadlock where eight red pull requests sat in nobody's queue —
+# and it brought its own failure, which was worse:
+#
+#   Measured on #53: eleven verdicts in eighteen hours, seven `changes-requested` and four
+#   `approve`, alternating between qa and product, 32 comments, still open and unmerged with every
+#   check green. A `changes-requested` costs a push; a push moves the head; a moved head makes
+#   every verdict stale and re-opens the pull request to EVERY independent role — so the next round
+#   was judged by a different agent against a different standard, raising findings the previous one
+#   had considered and passed. Nobody was wrong and it did not converge.
+#
+# THE REVIEW IS NOW SYNCHRONOUS AND LOCAL. The author dispatches an independent reviewer as a
+# sub-agent the moment the branch is ready, in the author's own session: it reviews in a worktree,
+# posts its verdict, and hands its findings back in the same turn. The author fixes and goes back to
+# THE SAME reviewer, which still has its own findings in context. One reviewer, one standard, and a
+# loop that terminates because both halves are in one conversation.
+#
+# WHAT THAT BUYS, BEYOND CONVERGENCE. The old design's every question — has anyone reviewed this,
+# has this role reviewed this head, is this role independent of it — was a poll against a shared API
+# budget, by three roles and four watches. Measured in one day: 246 rate-limit refusals, and the
+# watches spending the budget the roles needed to work. A review that happens in the session that
+# produced the work asks nobody anything.
+#
+# AND IT COSTS NOTHING IN INDEPENDENCE, WHICH IS THE PART THAT LOOKS LIKE A LOSS AND IS NOT. Every
+# role here posts through ONE GitHub account: `check-review.sh` says so at length, and independence
+# has always been the `[role]` marker, a convention rather than an authenticated fact. A sub-agent
+# with its own context that authored none of the commits is exactly as independent as a separate
+# session was, and it is the same reviewer prompt doing the same work.
+#
+# THE GATE IS UNCHANGED AND IS STILL THE BACKSTOP. `check-review.sh` still refuses any head with no
+# independent verdict on it, so a pull request whose review was skipped cannot merge. This function
+# is now the PULL channel for the one case that leaves: the author opened a pull request and never
+# ran the review. That is the author's own work, in the author's own queue, and in nobody else's.
+unreviewed_own_prs() {
+  local role=$1 num sha branch title prs any=0 owner rounds
   resolve_repo
   prs=$(api --paginate "repos/$REPO/pulls?state=open&per_page=100")
-  printf '\nPULL REQUESTS AWAITING AN INDEPENDENT VERDICT — you authored none of their commits, so the gate will accept yours:\n'
+  printf '\nYOUR PULL REQUESTS WITH NO VERDICT ON THE CURRENT HEAD — dispatch a reviewer before anything else:\n'
+  while IFS=$'\t' read -r num sha branch title; do
+    [ -n "$num" ] || continue
+
+    # WHOSE PULL REQUEST THIS IS COMES FROM ITS BRANCH NAME — `<role>/<type>/<issue>-<slug>`, which
+    # the naming gate already enforces and which `my_prs` already routes merges on. It costs nothing.
+    #
+    # THE ALTERNATIVE WAS MEASURED AND IT WAS WORSE. Deriving it from the `Agent:` trailers means one
+    # API call per open pull request per role per round, to answer a question the branch name already
+    # answers: on a six-pull-request board that made dev's queue MORE expensive than the design it
+    # replaced, in a change whose point was to spend less.
+    #
+    # AND IT IS NOT THE INDEPENDENCE TEST. Nothing here decides who may certify anything — that is
+    # `check-review.sh`, which re-derives authorship from the trailers at verdict time and refuses an
+    # author's own verdict. This only decides whose queue a pull request appears in. The two were the
+    # same question when any independent role might be sent to review; they are not any more.
+    case "$branch" in
+      "$role"/*) : ;;
+      *) continue ;;
+    esac
+
+    # FETCHED OUTSIDE EVERY SUBSTITUTION — for the pull requests that are yours, and no others — so a
+    # failed lookup exits rather than becoming "no verdict exists", which reads as "go and review it"
+    # on work already reviewed.
+    ensure_pr_comments "$num"
+
+    # THREE ROUNDS AND IT IS NOT A REVIEW PROBLEM ANY MORE. Below the limit this says nothing: a
+    # second round is an ordinary review doing its job. At the limit it stops asking for another one.
+    rounds=$(changes_rounds "$num")
+    if [ "$rounds" -ge "$REVIEW_MAX_ROUNDS" ]; then
+      any=1
+      printf '  #%-4s %-46s  ESCALATED — %s rounds of changes; do NOT push again\n' \
+        "$num" "$(printf '%s' "$title" | cut -c1-46)" "$rounds"
+      printf '        %s\n' "Say so on the pull request and hand it to product, which is the only role that may put it to the owner."
+      continue
+    fi
+
+    # A VERDICT ON THIS EXACT HEAD IS THE ANSWER. The sha is part of it, so a push releases it and
+    # the work reappears here — which is what makes the fix loop visible without storing anything.
+    owner=$(review_owner "$num")
+    if [ -n "$owner" ] && reviewed_by "$num" "$owner" "$sha"; then continue; fi
+    any=1
+    if [ -n "$owner" ]; then
+      # GO BACK TO THE ONE THAT ALREADY LOOKED. Naming it is the whole of the anti-ping-pong rule at
+      # this layer: a fresh reviewer re-opens findings the first one settled.
+      printf '  #%-4s %-46s  re-review by %s (round %s)\n' \
+        "$num" "$(printf '%s' "$title" | cut -c1-46)" "$owner" "$((rounds + 1))"
+    else
+      printf '  #%-4s %-46s  NO REVIEW HAS HAPPENED — dispatch one now\n' \
+        "$num" "$(printf '%s' "$title" | cut -c1-46)"
+    fi
+  done < <(printf '%s' "$prs" | jq -r '.[] | [.number, .head.sha, .head.ref, .title] | @tsv' 2>/dev/null || true)
+  [ "$any" -eq 1 ] || printf '  (none)\n'
+}
+
+# WHAT THE REVIEW LOOP COULD NOT SETTLE. Product's section, and product's alone, because product is
+# the only role that may put anything to the owner.
+#
+# THIS EXISTS BECAUSE THE ALTERNATIVE WAS MEASURED. #53 went seven rounds and stopped being a review
+# long before that; there was nowhere for it to go, so it went round again. A disagreement two
+# competent agents cannot settle is a question about what the project wants, and that is a decision,
+# not a defect.
+escalated_reviews() {
+  local num sha title prs any=0 rounds
+  resolve_repo
+  prs=$(api --paginate "repos/$REPO/pulls?state=open&per_page=100")
+  printf '\nREVIEWS THAT DID NOT CONVERGE — yours to put to the owner, and nobody else may:\n'
   while IFS=$'\t' read -r num sha title; do
     [ -n "$num" ] || continue
-    # THE SAME DERIVATION THE GATE USES, from the same file — see pr-authors.sh. If this queue
-    # offers you a pull request, the gate will accept your verdict on it; that promise is only
-    # keepable while there is one implementation of independence.
-    #
-    # AND `2>/dev/null || echo ""` IS HOW THAT PROMISE BROKE (Issue #79). It converted a FAILED
-    # lookup into an empty author set — stderr discarded, non-zero exit swallowed. An empty set has
-    # two documented meanings below and both are answers; this was a third and it is not. Under a
-    # SECONDARY rate limit, which fails intermittently, `--pr` failed while the `--all-trailers`
-    # follow-up succeeded, so the both-empty guard did not fire, `grep -qx "$role"` matched nothing
-    # against the empty string, and the pull request was offered to EVERY role including its author.
-    # Observed: `#46 ... run /review-pr 46   (built by )` on a branch carrying nine `Agent: dev`
-    # trailers. The gate does not fail there — it re-derives from git — so it refused the verdict
-    # after the review had been done.
-    #
-    # EXIT, DO NOT SKIP THE PULL REQUEST. Silently dropping it is the other half of the same defect:
-    # the role reads `(none)` and concludes it has no reviews waiting, which is a wrong answer with a
-    # zero exit code, and this whole file exists to prevent that.
-    authors=$("$(dirname "${BASH_SOURCE[0]}")/pr-authors.sh" --pr "$num") || {
-      echo "::error::who built pull request #$num could not be determined, so the queue cannot say" >&2
-      echo "  whether you are independent of it. This is a LOOKUP FAILURE and NOT a statement that" >&2
-      echo "  nobody authored it, and NOT a statement that you have no reviews waiting. Retry, or" >&2
-      echo "  report the outage — a secondary rate limit clears on its own; retrying in a loop" >&2
-      echo "  deepens it." >&2
-      exit 1
-    }
-    # NO TRAILER MEANS INDEPENDENCE CANNOT BE ESTABLISHED, WHICH IS NOT THE SAME AS "YOURS TO DO".
-    # The naming gate reports that defect with its remedy and it is not this queue's to duplicate.
-    # EMPTY MEANS ONE OF TWO THINGS. No trailers at all is a commit defect the naming gate reports
-    # and not work to offer; trailers with every commit spec-only means nobody authored product
-    # judgement, so every role is independent and this pull request is waiting on ALL of them.
-    if [ -z "$authors" ]; then
-      # THE SECOND CALL SWALLOWED IT TOO, and a fix applied to one of a pair is how this project's
-      # defects come back. Same rule: a failure here means the distinction between "no trailers at
-      # all" and "all spec-only" was not made, and neither branch below may be taken on it.
-      local trailers
-      trailers=$("$(dirname "${BASH_SOURCE[0]}")/pr-authors.sh" --pr "$num" --all-trailers) || {
-        echo "::error::the commit trailers of pull request #$num could not be read, so the queue" >&2
-        echo "  cannot tell 'no commit carries an Agent: trailer' from 'every commit was spec-only'." >&2
-        echo "  This is a LOOKUP FAILURE and NOT a statement that you have no reviews waiting." >&2
-        exit 1
-      }
-      [ -n "$trailers" ] || continue
-    fi
-    if printf '%s\n' "$authors" | grep -qx "$role"; then continue; fi
-    rst=$(api "repos/$REPO/commits/$sha/status" \
-          | jq -r '[.statuses[]?|select(.context|test("Reviewed by an agent"))][0].state // ""' 2>/dev/null || echo "")
-    # ALREADY GREEN MEANS ALREADY REVIEWED FOR THIS HEAD. Anything else — red, pending, or absent —
-    # is waiting, and a red one is waiting on a fresh verdict just as much as a missing one is.
-    if [ "$rst" = success ]; then continue; fi
-    # A VERDICT YOU HAVE ALREADY POSTED ON THIS HEAD IS NOT WORK WAITING FOR YOU (Issue #59).
-    #
-    # `success` was the ONLY suppressor here, and a `changes-requested` verdict does not produce
-    # one — it publishes `failure`. So the role that had just refused a pull request was handed it
-    # again the next round, with nothing anywhere recording that it had already looked. Measured by
-    # driving this script against a stub: a role with a landed refusal on head `cafe` was offered
-    # `cafe` again, indefinitely, until somebody else approved it or the author pushed.
-    #
-    # NO NEW STATE. The attestation `check-review.sh` already reads is the record — `Reviewed-by:`
-    # names the role and `Reviewed-sha:` names the head, in a comment on the pull request. Derived
-    # from the same place the gate derives its answer, so the queue and the gate cannot disagree.
-    #
-    # AND IT IS NOT A CLAIM, WHICH IS WHY IT CANNOT STRAND ANYTHING (criterion 3). It is posted
-    # AFTER the review, never before, so a role that dies mid-review holds nothing and the pull
-    # request stays offered to everyone. It releases itself: the sha is part of the attestation, so
-    # a push makes every prior verdict stale and the work reappears in every queue.
-    #
-    # AND IT NEVER NARROWS THE ELIGIBLE SET (criterion 2). It suppresses a head for the ONE role
-    # that already ruled on it. Every other independent role still sees it, which is the property
-    # whose absence caused #32's outage.
-    if reviewed_by "$num" "$role" "$sha"; then continue; fi
+    ensure_pr_comments "$num"
+    rounds=$(changes_rounds "$num")
+    [ "$rounds" -ge "$REVIEW_MAX_ROUNDS" ] || continue
     any=1
-    printf '  #%-4s %-46s  run /review-pr %-4s (built by %s)\n' \
-      "$num" "$(printf '%s' "$title" | cut -c1-46)" "$num" "$(printf '%s' "$authors" | tr '\n' ',' | sed 's/,$//')"
+    printf '  #%-4s %-46s  %s rounds of changes-requested\n' \
+      "$num" "$(printf '%s' "$title" | cut -c1-46)" "$rounds"
   done < <(printf '%s' "$prs" | jq -r '.[] | [.number, .head.sha, .title] | @tsv' 2>/dev/null || true)
   [ "$any" -eq 1 ] || printf '  (none)\n'
 }
@@ -345,11 +471,20 @@ role_queue() {
   # so a ruling posted underneath left the Issue sitting in "waiting on a decision" with the
   # decision made. And the ruling means the build is now INCOMPLETE against it, so the Issue goes
   # back to dev even though it has been built once.
-  RULED=$(api --paginate "repos/$REPO/issues/comments?per_page=100" \
-    | jq -r '.[] | select(.body | startswith("**[owner-ruling]") or startswith("[owner-ruling]")) | .issue_url' 2>/dev/null \
+  # ONE FETCH, THREE QUESTIONS. This endpoint is every comment in the repository, paginated, and it
+  # was being pulled THREE times in one run of one role's queue — twice here and once more for the
+  # release count. Three roles and four watches share a 5,000/hour budget; measured in one day, 246
+  # rate-limit refusals, with the queue reporting LOOKUP FAILED for polls its own polling had made
+  # impossible. The three questions differ only in the jq that reads the answer.
+  #
+  # WRITTEN TO A FILE OUTSIDE A SUBSTITUTION, for the reason documented on `ensure_pr_comments`: a
+  # command substitution is a subshell and swallows `api`'s exit, which would turn an outage into
+  # "nobody has ruled on anything" — an answer, and the wrong one.
+  ALL_COMMENTS="$CACHE/all-comments.json"
+  [ -f "$ALL_COMMENTS" ] || api --paginate "repos/$REPO/issues/comments?per_page=100" > "$ALL_COMMENTS"
+  RULED=$(jq -r '.[] | select(.body | startswith("**[owner-ruling]") or startswith("[owner-ruling]")) | .issue_url' < "$ALL_COMMENTS" 2>/dev/null \
     | sed -n 's#.*/issues/##p' | sort -u)
-  VERIFIED=$(api --paginate "repos/$REPO/issues/comments?per_page=100" \
-    | jq -r --arg r "[$role]" '.[] | select(.body | startswith($r)) | .issue_url' 2>/dev/null \
+  VERIFIED=$(jq -r --arg r "[$role]" '.[] | select(.body | startswith($r)) | .issue_url' < "$ALL_COMMENTS" 2>/dev/null \
     | sed -n 's#.*/issues/##p' | sort -u)
   # MERGED, NOT MERELY OPENED. `state=all` counted a pull request that was CLOSED without merging,
   # so an abandoned attempt removed its Issue from dev's queue permanently — deleting the branch did
@@ -367,7 +502,7 @@ role_queue() {
              | select([.labels[].name] | index("blocked") | not)
              | "  #\(.number)  \(.title)"' --unbuilt
       my_prs "dev/*"
-      reviews_waiting dev ;;
+      unreviewed_own_prs dev ;;
     qa)
       # NOT EVERY BUG IS YOURS YET. An Issue with no branch has nothing to verify — it is dev's to
       # build first. Listing it under "to verify" is the same defect as the product arm one layer
@@ -378,14 +513,15 @@ role_queue() {
              | select([.labels[].name] | index("type:bug") or index("type:chore"))
              | "  #\(.number)  \(.title)"' --landed 
       my_prs "*/fix/*|*/bug/*|*/chore/*|*/docs/*|*/test/*|*/ci/*|*/build/*|*/refactor/*|*/perf/*" "PULL REQUESTS TO VERIFY, MERGE AND CLOSE — whoever wrote them"
-      reviews_waiting qa ;;
+      unreviewed_own_prs qa ;;
     product)
       emit "FEATURES WHOSE WORK HAS LANDED — UAT on main and CLOSE (already verified ones are dropped):" \
         '.[] | select(.pull_request==null)
              | select([.labels[].name] | index("type:feature"))
              | "  #\(.number)  \(.title)"' --landed 
       my_prs "*/feat/*|*/spec/*" "PULL REQUESTS TO UAT, MERGE AND CLOSE — whoever wrote them"
-      reviews_waiting product ;;
+      unreviewed_own_prs product
+      escalated_reviews ;;
     owner)
       # THE OWNER HAD NO QUEUE, AND EVERY ROLE HAD ONE.
       #
@@ -416,8 +552,7 @@ role_queue() {
       # one means ship, the other means you have been told nothing.
       local nb rel
       nb=$(printf '%s' "$ALL" | jq '[.[]|select(.pull_request==null)|select([.labels[].name]|index("blocks:release"))]|length')
-      rel=$(api --paginate "repos/$REPO/issues/comments?per_page=100" \
-            | jq -r '[.[] | select(.body | test("^\\[product\\][\\s\\S]*RELEASE"))] | length' 2>/dev/null || echo 0)
+      rel=$(jq -r '[.[] | select(.body | test("^\\[product\\][\\s\\S]*RELEASE"))] | length' < "$ALL_COMMENTS" 2>/dev/null || echo 0)
       printf '\nRELEASE\n'
       if [ "${nb:-0}" -gt 0 ]; then
         printf '  BLOCKED — %s Issue(s) labelled blocks:release are open, listed above.\n' "$nb"
@@ -485,15 +620,18 @@ self_test() {
   grep -q 'LOOKUP FAILURE and NOT a statement' "${BASH_SOURCE[0]}" \
     || { echo "SELF-TEST FAIL: a failed lookup is not distinguished from an empty queue" >&2; rc=1; }
 
-  # A PULL REQUEST WAITING ON A VERDICT MUST APPEAR IN THE QUEUE OF A ROLE THAT CAN GIVE IT, AND IN
-  # NO OTHER. This is the deadlock arm. Driven end to end against a stub `gh`, because the version
-  # of this defect that actually occurred was not "the code is wrong" — every function did exactly
-  # what it said — it was that no arm of this script asked the question at all, and eight pull
-  # requests were therefore in nobody's queue while every role's exit code was 0.
+  # AN UNREVIEWED PULL REQUEST MUST APPEAR IN ITS AUTHOR'S QUEUE, AND IN NO OTHER ROLE'S.
   #
-  # BOTH DIRECTIONS ARE ASSERTED. Offering it to the role that built it is the same defect wearing
-  # the opposite sign: the gate would refuse that verdict, so the role would do the work twice and
-  # still be blocked. A one-directional check passes on a function that returns everything.
+  # THIS ARM REPLACES THE DEADLOCK ARM AND INHERITS ITS REASON. The defect it guarded — eight red
+  # pull requests in nobody's queue, every role's exit code 0 — was not "the code is wrong": every
+  # function did what it said, and no arm of this script asked the question at all. That is still the
+  # failure mode. What changed is who the question is for: the author gets its own work reviewed
+  # before handing it on, so an unreviewed pull request is the author's outstanding work and nobody
+  # else's.
+  #
+  # BOTH DIRECTIONS, because either alone is passed by a wrong fix. Missing from the author's queue
+  # is the old outage wearing a new name; present in everyone else's is the ping-pong that cost #53
+  # eleven verdicts.
   local tmp out
   tmp=$(mktemp -d)
   cat > "$tmp/gh" <<'STUB'
@@ -511,54 +649,102 @@ STUB
   # THE STUB RETURNS WHAT `gh --jq` WOULD RETURN, NOT RAW JSON. It does not implement `--jq`, so a
   # fixture that hands back the unextracted object silently feeds every caller a blob that parses as
   # nothing — the arm then fails for a reason that has nothing to do with what it is testing.
-  out=$( PATH="$tmp:$PATH" REPO=x/y bash "${BASH_SOURCE[0]}" qa 2>&1 || true )
-  case "$out" in
-    *"/review-pr 9"*) : ;;
-    *) echo "SELF-TEST FAIL: a pull request awaiting an independent verdict was in NOBODY's queue — this is the deadlock: qa was the only role that could review, its queue said (none), and it stopped (got: $out)" >&2; rc=1 ;;
-  esac
   out=$( PATH="$tmp:$PATH" REPO=x/y bash "${BASH_SOURCE[0]}" dev 2>&1 || true )
   case "$out" in
-    *"/review-pr 9"*) echo "SELF-TEST FAIL: a pull request was offered for review to a role that authored it — the gate refuses that verdict, so the work would be done twice and stay blocked" >&2; rc=1 ;;
+    *"NO REVIEW HAS HAPPENED"*) : ;;
+    *) echo "SELF-TEST FAIL: dev built #9, no verdict exists on its head, and dev's queue did not say so — an unreviewed pull request is now in NOBODY's queue, which is the outage this arm inherited (got: $out)" >&2; rc=1 ;;
+  esac
+  out=$( PATH="$tmp:$PATH" REPO=x/y bash "${BASH_SOURCE[0]}" qa 2>&1 || true )
+  case "$out" in
+    *"NO REVIEW HAS HAPPENED"*) echo "SELF-TEST FAIL: a pull request dev built and must get reviewed was listed as qa's work too. That is the ping-pong: two roles reviewing one branch against two standards, which on #53 ran to eleven verdicts without converging (got: $out)" >&2; rc=1 ;;
     *) : ;;
   esac
-  # AND A VERDICT YOU HAVE ALREADY POSTED MUST NOT COME BACK TO YOU — WITHOUT REMOVING IT FROM
-  # ANYONE ELSE. Both halves, in one arm, because either alone is passed by a wrong fix: suppressing
-  # for nobody is the duplication (Issue #59), and suppressing for everybody is the single eligible
-  # reviewer whose failure stopped the board (#32).
-  local att='[{"body":"Reviewed-by: qa\nReviewed-sha: cafe\nVerdict: changes-requested"}]'
-  out=$( PATH="$tmp:$PATH" REPO=x/y STUB_COMMENTS="$att" bash "${BASH_SOURCE[0]}" qa 2>&1 || true )
+
+  # A VERDICT ON THIS HEAD BY THE ROLE THAT OWNS THE REVIEW SETTLES IT.
+  local att='[{"body":"[qa]\nReviewed-by: qa\nReviewed-sha: cafe\nVerdict: approve"}]'
+  out=$( PATH="$tmp:$PATH" REPO=x/y STUB_COMMENTS="$att" bash "${BASH_SOURCE[0]}" dev 2>&1 || true )
   case "$out" in
-    *"/review-pr 9"*) echo "SELF-TEST FAIL: qa had already posted a verdict on head 'cafe' and the queue offered that head to qa again — a changes-requested verdict leaves the status red, so this repeats every round and the same role reviews the same head forever (got: $out)" >&2; rc=1 ;;
+    *"NO REVIEW HAS HAPPENED"*|*"re-review by"*) echo "SELF-TEST FAIL: #9 carries a verdict on its current head and the queue still asked for a review — that is a second review of work already reviewed (got: $out)" >&2; rc=1 ;;
+    *) : ;;
   esac
-  out=$( PATH="$tmp:$PATH" REPO=x/y STUB_COMMENTS="$att" bash "${BASH_SOURCE[0]}" product 2>&1 || true )
+
+  # AND IT RELEASES ITSELF ON A PUSH. The sha is part of the verdict, so one naming another head
+  # holds nothing — which is why a review cannot strand the head it does not describe.
+  out=$( PATH="$tmp:$PATH" REPO=x/y STUB_COMMENTS='[{"body":"[qa]\nReviewed-by: qa\nReviewed-sha: 0000\nVerdict: approve"}]' bash "${BASH_SOURCE[0]}" dev 2>&1 || true )
   case "$out" in
-    *"/review-pr 9"*) : ;;
-    *) echo "SELF-TEST FAIL: qa's verdict removed this pull request from PRODUCT's queue too — one role's review now decides the work for every role, which is a single eligible reviewer and the outage this redundancy exists to prevent (got: $out)" >&2; rc=1 ;;
-  esac
-  # AND IT RELEASES ITSELF ON A PUSH. The sha is part of the attestation, so a verdict naming another
-  # head holds nothing — which is why this cannot strand a pull request behind a role that died.
-  out=$( PATH="$tmp:$PATH" REPO=x/y STUB_COMMENTS='[{"body":"Reviewed-by: qa\nReviewed-sha: 0000\nVerdict: approve"}]' bash "${BASH_SOURCE[0]}" qa 2>&1 || true )
-  case "$out" in
-    *"/review-pr 9"*) : ;;
+    *"re-review by qa"*) : ;;
     *) echo "SELF-TEST FAIL: a verdict naming a DIFFERENT head suppressed this one — a stale review strands the head it does not describe (got: $out)" >&2; rc=1 ;;
   esac
-  # AND A FAILED AUTHOR LOOKUP MUST OFFER NOTHING AND SAY SO (Issue #79). Narrowed to ONE endpoint
-  # on purpose: a stub that fails everything cannot test this, because the queue dies on the first
-  # failed call and the arm goes green whether or not this path handles anything. Here the commit
-  # list of #9 fails on its FIRST call and succeeds after — which is what a SECONDARY rate limit
-  # does — so `--pr` comes back empty, `--all-trailers` succeeds, the both-empty guard does not
-  # fire, and the empty set matches no role. Measured before the fix: `dev` was offered its own
-  # pull request with `(built by )`.
+
+  # THE RE-REVIEW GOES BACK TO THE ROLE THAT ALREADY LOOKED, AND THE QUEUE NAMES IT. A fresh
+  # reviewer re-opens findings the first one settled; naming the owner is the whole of the rule.
+  case "$out" in
+    *"re-review by qa"*) : ;;
+    *) echo "SELF-TEST FAIL: the queue did not name the reviewer that already looked at #9, so the next round could go to a different one (got: $out)" >&2; rc=1 ;;
+  esac
+
+  # A QUOTED VERDICT IS NOT A VERDICT. The gate learned this the expensive way — a comment quoting
+  # the template read as a real verdict, attributed to whoever the quote happened to name — and this
+  # script now parses the same comments, so it must honour the same fences or the two disagree.
+  out=$( PATH="$tmp:$PATH" REPO=x/y STUB_COMMENTS='[{"body":"[qa]\nfor reference:\n```\nReviewed-by: qa\nReviewed-sha: cafe\nVerdict: approve\n```"}]' bash "${BASH_SOURCE[0]}" dev 2>&1 || true )
+  case "$out" in
+    *"NO REVIEW HAS HAPPENED"*) : ;;
+    *) echo "SELF-TEST FAIL: a verdict inside a code fence was counted as a review of head 'cafe', so quoting the template certifies a pull request (got: $out)" >&2; rc=1 ;;
+  esac
+
+  # THREE ROUNDS OF CHANGES AND IT STOPS BEING A REVIEW PROBLEM. Below the limit the queue asks for
+  # another round; at the limit it refuses to and says who may take it. Both directions, because a
+  # cap that never fires and a cap that always fires are both silent about the thing they measure.
+  local thrash='[{"body":"[qa]\nReviewed-by: qa\nReviewed-sha: a1\nVerdict: changes-requested"},{"body":"[qa]\nReviewed-by: qa\nReviewed-sha: a2\nVerdict: changes-requested"},{"body":"[qa]\nReviewed-by: qa\nReviewed-sha: a3\nVerdict: changes-requested"}]'
+  out=$( PATH="$tmp:$PATH" REPO=x/y STUB_COMMENTS="$thrash" bash "${BASH_SOURCE[0]}" dev 2>&1 || true )
+  case "$out" in
+    *ESCALATED*) : ;;
+    *) echo "SELF-TEST FAIL: #9 has been sent back three times and the queue asked for a fourth round. #53 ran to seven and never converged; a disagreement that survives three reviews is a decision, and asking the same question again cannot produce one (got: $out)" >&2; rc=1 ;;
+  esac
+  case "$out" in
+    *"do NOT push again"*) : ;;
+    *) echo "SELF-TEST FAIL: the escalation named no next step, so the author's only visible option is still to push again (got: $out)" >&2; rc=1 ;;
+  esac
+  local twice='[{"body":"[qa]\nReviewed-by: qa\nReviewed-sha: a1\nVerdict: changes-requested"},{"body":"[qa]\nReviewed-by: qa\nReviewed-sha: a2\nVerdict: changes-requested"}]'
+  out=$( PATH="$tmp:$PATH" REPO=x/y STUB_COMMENTS="$twice" bash "${BASH_SOURCE[0]}" dev 2>&1 || true )
+  case "$out" in
+    *ESCALATED*) echo "SELF-TEST FAIL: two rounds of review escalated to the owner. A second round is an ordinary review working; escalating it spends the owner on what the process is for (got: $out)" >&2; rc=1 ;;
+    *) : ;;
+  esac
+
+  # AND THE ESCALATION REACHES PRODUCT, WHICH IS THE ONLY ROLE THAT MAY PUT IT TO THE OWNER. An
+  # escalation nobody is holding is the orphan defect one level up: measured on a release verdict
+  # that existed in one terminal window and reached the owner by luck.
+  out=$( PATH="$tmp:$PATH" REPO=x/y STUB_COMMENTS="$thrash" bash "${BASH_SOURCE[0]}" product 2>&1 || true )
+  case "$out" in
+    *"DID NOT CONVERGE"*) : ;;
+    *) echo "SELF-TEST FAIL: a review that ran out of rounds was in nobody's queue — dev was told to stop and product was never told to pick it up, so it stops there (got: $out)" >&2; rc=1 ;;
+  esac
+
+  # AND A FAILED COMMENT LOOKUP MUST OFFER NOTHING AND SAY SO.
+  #
+  # THIS ARM INHERITS ISSUE #79 AND ITS SUBJECT HAS MOVED. That defect was `2>/dev/null || echo ""`
+  # around the AUTHOR lookup: it turned a failed call into an empty author set, and a pull request
+  # was offered for review to the role that had written every commit in it, `(built by )`. This
+  # script no longer asks who authored anything — the branch name answers it, and the independence
+  # test that does still need the trailers lives in `check-review.sh`, which has its own arm for
+  # exactly this and re-derives from git besides.
+  #
+  # WHAT REMAINS IS THE SAME SHAPE ON A DIFFERENT CALL. The review history of a pull request is read
+  # over the API, and if THAT collapses to "no verdicts" the queue says `NO REVIEW HAS HAPPENED`
+  # about work that has been reviewed — sending a role to review it again — or silently omits it,
+  # which is the same wrong answer with a zero exit code.
+  #
+  # Narrowed to ONE endpoint on purpose: a stub that fails everything cannot test this, because the
+  # queue dies on the first failed call and the arm goes green whether or not this path handles
+  # anything.
   local tmp3
   tmp3=$(mktemp -d)
   cat > "$tmp3/gh" <<'STUB'
 #!/usr/bin/env bash
 case "$*" in
-  *"pulls/9/commits"*)
-    n=0; [ -f "$TMP3/calls" ] && n=$(cat "$TMP3/calls"); n=$((n+1)); printf '%s' "$n" > "$TMP3/calls"
-    [ "$n" = 1 ] && { echo 'You have exceeded a secondary rate limit' >&2; exit 1; }
-    printf 'c9\tAgent: dev\n' ;;
-  *"/commits/c9"*)      echo 'internal/a.go' ;;
+  *"issues/9/comments"*)
+    echo 'You have exceeded a secondary rate limit' >&2; exit 1 ;;
   *"pulls?state=open"*) echo '[{"number":9,"head":{"ref":"dev/feat/9-x","sha":"cafe"},"title":"feat(x): y"}]' ;;
   *"/status"*)          echo '{"statuses":[]}' ;;
   *)                    echo '[]' ;;
@@ -566,15 +752,15 @@ esac
 STUB
   chmod +x "$tmp3/gh"
   local arc=0
-  out=$( PATH="$tmp3:$PATH" TMP3="$tmp3" REPO=x/y bash "${BASH_SOURCE[0]}" dev 2>&1 ) || arc=$?
+  out=$( PATH="$tmp3:$PATH" REPO=x/y bash "${BASH_SOURCE[0]}" dev 2>&1 ) || arc=$?
   [ "$arc" -ne 0 ] || {
-    echo "SELF-TEST FAIL: the author lookup failed and the queue exited 0 — 'could not determine who built this' and 'determined that nobody did' have collapsed, and an agent reads a zero exit as an answer" >&2; rc=1; }
+    echo "SELF-TEST FAIL: the review history could not be read and the queue exited 0 — 'could not determine whether this was reviewed' and 'determined that it was not' have collapsed, and an agent reads a zero exit as an answer" >&2; rc=1; }
   case "$out" in
-    *"/review-pr 9"*) echo "SELF-TEST FAIL: a failed author lookup offered this pull request to dev, which authored every commit in it. The gate re-derives authorship from git at verdict time, where the lookup does not fail, so it refuses the verdict the role did the whole review to produce (got: $out)" >&2; rc=1 ;;
+    *"NO REVIEW HAS HAPPENED"*) echo "SELF-TEST FAIL: a failed lookup was rendered as 'no review has happened', which sends a role to review work that may already have been reviewed (got: $out)" >&2; rc=1 ;;
   esac
   case "$out" in
     *"::error::"*) : ;;
-    *) echo "SELF-TEST FAIL: the author lookup failed and nothing was printed — a non-zero exit with no reason reads as a bug in the queue rather than an outage (got: $out)" >&2; rc=1 ;;
+    *) echo "SELF-TEST FAIL: the lookup failed and nothing was printed — a non-zero exit with no reason reads as a bug in the queue rather than an outage (got: $out)" >&2; rc=1 ;;
   esac
   rm -rf "$tmp3"
   rm -rf "$tmp"
@@ -628,7 +814,7 @@ STUB
   esac
   rm -rf "$otmp"
 
-  [ "$rc" -eq 0 ] && echo "self-test passed: unknown roles refuse, every role has a queue, a failed lookup is not an empty queue, a pull request awaiting a verdict reaches a role that can give it and no role that cannot, and a verdict already posted does not come back to its author while remaining open to every other role, a failed author lookup offers nothing and says why, and the owner is told UNDETERMINED rather than being handed silence as a green light"
+  [ "$rc" -eq 0 ] && echo "self-test passed: unknown roles refuse, every role has a queue, a failed lookup is not an empty queue, an unreviewed pull request is its author's work and nobody else's, a verdict on the current head settles it and one naming another head does not, a re-review goes back to the reviewer that already looked, a quoted verdict is not a verdict, three rounds of changes escalate to product and two do not, a failed review-history lookup offers nothing and says why, and the owner is told UNDETERMINED rather than being handed silence as a green light"
   return $rc
 }
 
