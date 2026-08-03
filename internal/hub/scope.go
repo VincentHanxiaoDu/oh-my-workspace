@@ -214,7 +214,11 @@ func PublishThrough(s *Store, g Grant, p Publication) (*Note, error) {
 		return nil, Refusedf(ErrRefused, "grant %q acts as %q and cannot publish as %q",
 			string(g.ID), string(g.Holder), string(p.Author))
 	}
-	return s.Publish(p)
+	// ISSUE #14 CHANGED THIS ONE LINE, from s.Publish. Criterion 4 refuses a note whose body
+	// references a target its author cannot see, and an agent API that reached Publish directly
+	// would have been a way around it — PRD §3.12, "an agent cannot read what its person cannot",
+	// read across to what an agent may point at. See [PublishWithReferences].
+	return PublishWithReferences(s, p)
 }
 
 // SetVisibilityThrough changes who can see a note, through a grant.
