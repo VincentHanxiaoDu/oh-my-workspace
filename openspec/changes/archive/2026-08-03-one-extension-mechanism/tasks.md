@@ -220,3 +220,21 @@
 
 - [x] `make ci` green
 - [x] `./.workflow/bin/run-gates.sh` green
+
+## Round 7 — merging #85 (Issue #68), and the control API half that had no guard
+
+- [x] Resolve `internal/daemon/model_report.go` keeping BOTH: #85's three arms of `store.Open` stay
+      three, and the adapter fact is still answered from the extension mechanism. `modelConfigFor`
+      returns the store it opened so `store.Open` is still called ONCE — a second open is a second
+      chance for the two halves of one answer to disagree
+- [x] Prove #85's rule is live through the resolution, not merely compiled: with the unreadable arm
+      collapsed back to `model.Read(getenv, nil)`, THEIR tests go red — "a store that could not be
+      read renders byte for byte as a store with no model in it"
+- [x] Re-drive all three of round 6's mutations on the MERGED tree, each confirmed by `git diff`
+- [x] Add `daemon.ModelRegistry`, the seam `channels.LoopRegistry` already is, so the control API's
+      extension state can be driven without mutating `extension.Default`
+- [x] Guard the control API half of the second finding. `modelViewFor` could have been put back to
+      `.View()` with every test in the repository still green — the unguarded shape criterion 9 was
+      refused for three times. Reverting it now goes red: "this build has no adapter for acme"
+- [x] Pin that the two rules do not fight: an unreadable store gains NO adapter sentence, because
+      `ViewOn` returns before consulting any registry unless a provider is chosen

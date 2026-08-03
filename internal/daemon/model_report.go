@@ -29,6 +29,7 @@ import (
 	"errors"
 	"os"
 
+	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/extension"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/model"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/store"
 	"github.com/VincentHanxiaoDu/oh-my-workspace/internal/tri"
@@ -40,6 +41,15 @@ import (
 // disk. The agreement test between the CLI and the control API deliberately does NOT stub it: a
 // stub proves two renderers agree about a value, and only the real resolution proves they agree
 // about the person's machine.
+// ModelRegistry is the registry the control API resolves model-extension state from. Nil means
+// [extension.Default], which is what the product uses.
+//
+// It exists for the reason `channels.LoopRegistry` does: a test that must control exactly what this
+// machine offers cannot mutate [extension.Default] without making "what does this machine offer" a
+// statement about whichever test ran last, which is why [extension.Registry] is a value and not a
+// global. Nothing in the product sets it.
+var ModelRegistry *extension.Registry
+
 var modelViewFor = func(storeRoot string) model.View {
 	cfg, s := modelConfigFor(storeRoot, os.Getenv)
 	// ViewOn AND NOT View: the adapter fact is about THIS MACHINE's registered extensions, not about
@@ -52,7 +62,7 @@ var modelViewFor = func(storeRoot string) model.View {
 	// unreadable-store arm below reports the provider as undetermined precisely because it must not
 	// claim one — so an unreadable store never acquires an adapter sentence, and #68's three
 	// outcomes stay three.
-	return model.ViewOn(s, nil, cfg)
+	return model.ViewOn(s, ModelRegistry, cfg)
 }
 
 // modelConfigFor keeps the THREE outcomes of [store.Open] as three (Issue #68).
