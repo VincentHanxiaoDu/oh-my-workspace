@@ -2,6 +2,7 @@ package agentapi
 
 import (
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strings"
 
@@ -145,22 +146,57 @@ type TicketView struct {
 
 // DraftView is one unpublished draft.
 //
-// State IS ALWAYS "drafted" AND IS ALWAYS PRESENT (criterion 2). PRD §3.11 names four states —
-// drafted, in flight, published, refused — and the outbox holds exactly the first: a note is in the
-// outbox or published, never both and never neither. Serving a draft with no state field would
-// leave the reader to infer which, and inference is how "drafted" becomes "published" in somebody's
-// summary.
+// State IS ALWAYS PRESENT (criterion 2). PRD §3.11 names four states — drafted, in flight,
+// published, refused — and the outbox holds exactly the first: a note is in the outbox or
+// published, never both and never neither. Serving a draft with no state field would leave the
+// reader to infer which, and inference is how "drafted" becomes "published" in somebody's summary.
+//
+// STATE IS NOT ALWAYS "drafted", AND THAT IS ISSUE #101's BLOCKER 2(a). It was, unconditionally,
+// and so a draft whose `.state` record was unreadable was served as `drafted` with exit 0 while
+// `omw outbox list` exited 3 on the same draft and said where it stood could not be read. A draft
+// nobody could read is [UndeterminedState] here, in the same wording every other surface uses.
 type DraftView struct {
 	ID        string `json:"id"`
 	State     string `json:"state"`
 	Published bool   `json:"published"`
-	Revisions int    `json:"revisions"`
+	// Revisions is a POINTER, and the reason is UndeterminedNotes' reason on [Response]: a plain
+	// int is 0 for a revision nobody could read, and `"revisions":0` reads as "I counted them and
+	// there are none" — a determined claim about work that was not done. That was Issue #101's
+	// blocker 2(b), and it is #67's exact shape in the surface an AI consumes.
+	//
+	// nil means the count could not be established. Absent from the JSON for the same reason:
+	// there is no number to serve, and serving one is the defect.
+	Revisions *int   `json:"revisions,omitempty"`
 	Latest    string `json:"latest,omitempty"`
+	// Why is why something about this draft could not be established. Empty when everything was.
+	Why string `json:"why,omitempty"`
 }
 
-// DraftedState is the one spelling of a draft's state, so criterion 2's assertion has one string to
-// look for.
+// DraftedState is the one spelling of a draft's resting state, so criterion 2's assertion has one
+// string to look for.
 const DraftedState = "drafted"
+
+// UndeterminedState is the one spelling of a draft state that could not be read. It is tri's
+// wording rather than a fourth vocabulary invented on this surface — a person and their AI meet
+// the same phrase here, in `omw outbox list`, and in every other three-valued answer.
+var UndeterminedState = tri.Undetermined.String()
+
+// Determined reports whether everything this view claims about the draft was established.
+//
+// IT IS THE ONE PLACE THAT QUESTION IS ANSWERED, so that the outcome, the exit code and the
+// rendering cannot come to three different opinions about the same draft.
+func (d DraftView) Determined() bool {
+	return d.State != UndeterminedState && d.Revisions != nil
+}
+
+// RenderRevisions is the revision count as it may be shown. It NEVER renders an unestablished
+// count as a number, which is criterion 4.
+func (d DraftView) RenderRevisions() string {
+	if d.Revisions == nil {
+		return "revisions: " + tri.Undetermined.String()
+	}
+	return fmt.Sprintf("%d revision(s)", *d.Revisions)
+}
 
 // NoteView is one hub note, as this person is permitted to see it.
 //

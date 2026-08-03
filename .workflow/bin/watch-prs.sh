@@ -10,7 +10,8 @@
 #
 #   FAILING   #12  <title>  —  <which check>     a gate went red
 #   CHANGES   #12  <title>                       a reviewer asked for changes
-#   READY     #12  <title>                       green and mergeable
+#   READY     #12  <title>                       green and mergeable, on POSITIVE evidence
+#   NO-ANSWER #12  <title>                       nothing has reported yet — NOT a pass
 #   MERGED    #12  <title>                       it landed
 #   ISSUE-MOVED #12 <title>                     the Issue changed after this head was written
 #   NEEDS-REVIEW #12 <title>                    somebody else built it and it is waiting on a verdict
@@ -19,6 +20,13 @@
 # **Every terminal state emits, not only the good one.** A watch that reported only READY would be
 # silent through a red gate, and silence is indistinguishable from "still running" — which is how an
 # agent waits forever on something that already failed.
+#
+# **AND `READY` IS POSITIVE EVIDENCE, NEVER THE ABSENCE OF NEGATIVE EVIDENCE (Issue #89).** It is the
+# signal a verifier acts on to MERGE, so "no gate has spoken" must never reach it: a head with no
+# check runs at all has nothing pending, nothing failing and no review to refuse, and every one of
+# those tests passes vacuously. `NO-ANSWER` is that state, said out loud — because suppressing the
+# line would make silence mean both "nothing to report" and "no answer yet", which is the same
+# collapse one level up.
 #
 #   WATCHING  <role>  <n> open  —  poll #k        the watch is ALIVE and was answered
 #
@@ -66,6 +74,17 @@ case "${1:-}" in
         echo "::error::unknown option '$1'. This is a typo, not an argument — refusing." >&2; exit 2; } ;;
 esac
 
+# THE REASON A LOOKUP FAILED IS AT THE END OF ITS OUTPUT, NEVER AT THE START — see the long note in
+# watch-queue.sh, where the same `cut -c1-N` threw away a `dial tcp … operation timed out` and kept
+# the headings that preceded it (Issue #64). A SHORT REASON IS STILL SHOWN WHOLE, byte for byte as
+# before: a fix that always printed a tail would mangle the common case.
+reason() { # reason <text> <budget>
+  local flat budget=$2
+  flat=$(printf '%s' "$1" | tr '\n' ' ')
+  if [ "${#flat}" -le "$budget" ]; then printf '%s' "$flat"; return 0; fi
+  printf '…%s' "${flat: -$((budget - 1))}"
+}
+
 resolve_repo() {
   [ -n "${REPO:-}" ] && return 0
   local url; url=$(git config --get remote.origin.url 2>/dev/null || echo "")
@@ -96,7 +115,7 @@ self_test() {
   # documentation exists.
   local s code
   code=$(grep -v '^[[:space:]]*#' "${BASH_SOURCE[0]}")
-  for s in FAILING CHANGES READY MERGED NEEDS-REVIEW ISSUE-MOVED; do
+  for s in FAILING CHANGES READY MERGED NEEDS-REVIEW ISSUE-MOVED NO-ANSWER; do
     printf '%s' "$code" | grep -q "emit $s " \
       || { echo "SELF-TEST FAIL: state '$s' is never emitted — an agent would not learn about it" >&2; rc=1; }
   done
@@ -134,6 +153,37 @@ self_test() {
 {"workflow_runs":[{"status":"in_progress","conclusion":null,"head_sha":"abcdef1234"}]}|still running
 {"workflow_runs":[]}|MAIN STATE UNKNOWN
 CASES
+  # A RED MAIN NAMES THE CHECK, AND DOES NOT NAME A CULPRIT IT DID NOT MEASURE (Issue #64).
+  # The stub is the observed event: a red push run whose failing job is the naming gate, on a
+  # DIRECT PUSH sha that no merge here produced.
+  cat > "$tmp/gh" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *"/jobs"*) echo '{"jobs":[{"name":"Build and tests","conclusion":"success"},{"name":"Branch name and commit convention","conclusion":"failure"}]}' ;;
+  *)         echo '{"workflow_runs":[{"id":77,"status":"completed","conclusion":"failure","head_sha":"19f05904aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}' ;;
+esac
+STUB
+  chmod +x "$tmp/gh"
+  got=$(PATH="$tmp:$PATH" REPO=x/y bash "$tmp/watch-prs.sh" --main-state 2>/dev/null || echo "")
+  case "$got" in
+    *"Branch name and commit convention"*) : ;;
+    *) echo "SELF-TEST FAIL: a red main did not name the failing check — the reader is sent to the Actions tab for what the watch was already told (got: $got)" >&2; rc=1 ;;
+  esac
+  case "$got" in
+    *"yours to fix"*) echo "SELF-TEST FAIL: a red main nobody here merged into was still called the reader's to fix — this is the wrong attribution, on the one thing the reader acts on (got: $got)" >&2; rc=1 ;;
+    *) : ;;
+  esac
+  case "$got" in
+    *"NOT DETERMINED"*) : ;;
+    *) echo "SELF-TEST FAIL: an underived cause was not said to be undetermined (got: $got)" >&2; rc=1 ;;
+  esac
+  # AND WHEN IT *IS* DERIVABLE IT MAY STILL SAY SO — derived from the sha, not from who merged last.
+  got=$(PATH="$tmp:$PATH" REPO=x/y bash "$tmp/watch-prs.sh" --main-state 19f05904aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 2>/dev/null || echo "")
+  case "$got" in
+    *"yours to fix"*) : ;;
+    *) echo "SELF-TEST FAIL: main's red IS the caller's own merge commit and the watch did not say so — refusing to attribute what it did measure is the opposite error (got: $got)" >&2; rc=1 ;;
+  esac
+
   # AND WHEN THE LOOKUP ITSELF FAILS. An outage must not be spelled the same way as a green main.
   printf '#!/usr/bin/env bash\necho boom >&2\nexit 1\n' > "$tmp/gh"; chmod +x "$tmp/gh"
   got=$(PATH="$tmp:$PATH" REPO=x/y bash "$tmp/watch-prs.sh" --main-state 2>/dev/null || echo "")
@@ -191,6 +241,96 @@ STUB
   kill "$wpid" 2>/dev/null || true
   rm -rf "$tmp"
 
+  # READY MUST NOT FIRE ON A HEAD WHERE NOTHING HAS REPORTED (Issue #89). **This is the arm whose
+  # absence let a 50% false-positive rate onto the merge signal.** The stub is the measured event:
+  # one open pull request belonging to this role, an EMPTY `check_runs` array, no statuses and no
+  # reviews — so there is nothing pending, nothing failing and nothing refusing, and every existing
+  # test passes vacuously.
+  #
+  # DRIVEN THROUGH BOTH ENTRY POINTS, because they share this branch: `--sweep` is the same loop
+  # with an `exit 0` at the end of one pass. Asserting only the sweep would leave the monitor —
+  # the path that actually runs all day — untested for the defect.
+  tmp=$(mktemp -d)
+  cat > "$tmp/gh" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *rate_limit*)        echo "4896 $(( $(date +%s) + 1500 ))" ;;
+  *"check-runs"*)      echo '{"check_runs":[]}' ;;
+  *"/status"*)         echo '{"statuses":[]}' ;;
+  *"/reviews"*)        echo '[]' ;;
+  *"state=closed"*)    echo '[]' ;;
+  *"pulls?state=open"*) echo '[{"number":46,"title":"t","head":{"ref":"dev/feat/46-x","sha":"4e9ca30c"}}]' ;;
+  *"pulls/46"*)        echo '{"body":""}' ;;
+  *)                   echo '[]' ;;
+esac
+STUB
+  chmod +x "$tmp/gh"
+  cp "${BASH_SOURCE[0]}" "$tmp/watch-prs.sh"
+  cp "$(dirname "${BASH_SOURCE[0]}")/pr-authors.sh" "$tmp/pr-authors.sh"
+  local nout ep
+  for ep in sweep monitor; do
+    if [ "$ep" = sweep ]; then
+      nout=$(PATH="$tmp:$PATH" REPO=x/y bash "$tmp/watch-prs.sh" dev --sweep 2>&1 || true)
+    else
+      ( PATH="$tmp:$PATH" REPO=x/y bash "$tmp/watch-prs.sh" dev 2 >"$tmp/mout" 2>&1 & echo $! > "$tmp/mpid" )
+      sleep 3
+      kill "$(cat "$tmp/mpid")" 2>/dev/null || true
+      nout=$(cat "$tmp/mout" 2>/dev/null || echo "")
+    fi
+    case "$nout" in
+      *"READY #46"*) echo "SELF-TEST FAIL ($ep): a head with NO check runs was announced READY. Nothing is pending because nothing exists, and READY is the signal a verifier acts on to MERGE (got: $nout)" >&2; rc=1 ;;
+      *) : ;;
+    esac
+    case "$nout" in
+      *NO-ANSWER*) : ;;
+      *) echo "SELF-TEST FAIL ($ep): a head with nothing reported emitted no NO-ANSWER. Suppressing the line makes silence mean both 'nothing to report' and 'no answer yet' (got: $nout)" >&2; rc=1 ;;
+    esac
+  done
+
+  # AND READY MUST STILL FIRE WHEN THE EVIDENCE IS ACTUALLY THERE. A fix that never says READY has
+  # replaced a false positive with a signal nobody can act on at all.
+  cat > "$tmp/gh" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *rate_limit*)        echo "4896 $(( $(date +%s) + 1500 ))" ;;
+  *"check-runs"*)      echo '{"check_runs":[{"name":"Build and tests","status":"completed","conclusion":"success"}]}' ;;
+  *"/status"*)         echo '{"statuses":[{"context":"Reviewed by an agent","state":"success","description":"ok"}]}' ;;
+  *"/reviews"*)        echo '[]' ;;
+  *"state=closed"*)    echo '[]' ;;
+  *"pulls?state=open"*) echo '[{"number":46,"title":"t","head":{"ref":"dev/feat/46-x","sha":"4e9ca30c"}}]' ;;
+  *"pulls/46"*)        echo '{"body":""}' ;;
+  *)                   echo '[]' ;;
+esac
+STUB
+  chmod +x "$tmp/gh"
+  nout=$(PATH="$tmp:$PATH" REPO=x/y bash "$tmp/watch-prs.sh" dev --sweep 2>&1 || true)
+  case "$nout" in
+    *"READY #46"*) : ;;
+    *) echo "SELF-TEST FAIL: a completed, passing check run with a success verdict did not produce READY — the signal has been replaced by one nobody can act on (got: $nout)" >&2; rc=1 ;;
+  esac
+  # A COMPLETED GREEN BUILD WITH NO VERDICT IS STILL NOT READY. The absence of a refusal is not the
+  # presence of an approval, and the verdict is the thing that actually blocks the merge.
+  cat > "$tmp/gh" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *rate_limit*)        echo "4896 $(( $(date +%s) + 1500 ))" ;;
+  *"check-runs"*)      echo '{"check_runs":[{"name":"Build and tests","status":"completed","conclusion":"success"}]}' ;;
+  *"/status"*)         echo '{"statuses":[]}' ;;
+  *"/reviews"*)        echo '[]' ;;
+  *"state=closed"*)    echo '[]' ;;
+  *"pulls?state=open"*) echo '[{"number":46,"title":"t","head":{"ref":"dev/feat/46-x","sha":"4e9ca30c"}}]' ;;
+  *"pulls/46"*)        echo '{"body":""}' ;;
+  *)                   echo '[]' ;;
+esac
+STUB
+  chmod +x "$tmp/gh"
+  nout=$(PATH="$tmp:$PATH" REPO=x/y bash "$tmp/watch-prs.sh" dev --sweep 2>&1 || true)
+  case "$nout" in
+    *"READY #46"*) echo "SELF-TEST FAIL: a green build with NO review verdict was announced READY — the absence of a refusal is not the presence of an approval (got: $nout)" >&2; rc=1 ;;
+    *) : ;;
+  esac
+  rm -rf "$tmp"
+
   # A DEATH MUST ANNOUNCE ITSELF. Driven by making the very first lookup fail in a mode the loop
   # does not catch, so the process really does exit non-zero.
   #
@@ -226,7 +366,7 @@ STUB
     && { echo "SELF-TEST FAIL: a sweep whose lookup failed exited 0 — an outage would read as an empty board" >&2; rc=1; }
   rm -rf "$tmp"
 
-  [ "$rc" -eq 0 ] && echo "self-test passed: every outcome emits including the failing ones, main's colour has three answers plus an outage, unknown roles refuse, a failed poll does not end the watch, an unfetched branch does not end it either, the heartbeat arrives, a death announces itself, and --sweep terminates and refuses to call an outage an empty board"
+  [ "$rc" -eq 0 ] && echo "self-test passed: READY requires positive evidence and a head with nothing reported says NO-ANSWER instead (both entry points), every outcome emits including the failing ones, main's colour has three answers plus an outage, unknown roles refuse, a failed poll does not end the watch, an unfetched branch does not end it either, the heartbeat arrives, a death announces itself, and --sweep terminates and refuses to call an outage an empty board"
   return $rc
 }
 
@@ -276,35 +416,113 @@ emit() { # emit <state> <number> <title> [detail]
 #
 # THREE ANSWERS, NEVER TWO. A run still going is not a pass, and a lookup that failed is not a pass
 # either; both would otherwise be spelled the same way as green and a red main would go unmentioned.
+#
+# AND A RED MAIN NAMES THE CHECK THAT IS RED, AND DOES NOT NAME A CULPRIT IT DID NOT MEASURE
+# (Issue #64). This previously read:
+#
+#   MERGED #51 … — you merged this — MAIN IS RED at 19f05904 (failure) — YOU merged into it, so
+#   this is yours to fix before merging anything else
+#
+# **`main` was red and the alarm was right to fire.** The merges did not cause it:
+#
+#   Build and tests                        success
+#   Generated files not hand-authored      success
+#   Tasks complete                         success
+#   Branch name and commit convention      failure   ← 19f0590's subject is 113 characters, limit 72
+#
+# `19f05904` is a DIRECT PUSH to main by the framework, one parent, so the merge-commit exemption in
+# `check-naming.sh` does not apply to it. It is not any merge's doing. Inferring the cause from who
+# merged last is a proxy for authorship that stops measuring it the moment anything else can redden
+# main — and something else can, BY DESIGN, because the framework pushes to main.
+#
+# Sending the merger to fix a commit they did not write is the same error `pr-authors.sh` exists to
+# end: an attribution that does not match the diff. So the attribution is DERIVED — main's failing
+# commit is compared with the merge commit the caller actually made — and where it cannot be
+# derived it says CAUSE NOT DETERMINED rather than guessing. An undetermined answer must not wear
+# the face of a determined one (PRD §4.3), and this one was acted on twice.
+#
+# The lookups are cached in these globals: one poll asks about main once, however many merged pull
+# requests it has to describe.
+MAIN_LINE=""
+MAIN_RED_SHA=""
+
+# WHICH CHECK IS RED, by name. A bare `(failure)` sends the reader to the Actions tab to find out
+# what the watch had already been told, and half of `Branch name and commit convention` was a red
+# herring for the rule that actually fired.
+failing_checks() { # $1 = run id
+  local raw names
+  [ -n "$1" ] || { printf 'failing check NOT DETERMINED — the run carried no id'; return 0; }
+  # PARSED HERE, NOT WITH `gh --jq`, for the same reason `main_state` parses here: the self-test
+  # drives this through a stub `gh`, and a stub cannot implement `--jq`. A branch that only runs
+  # against the real binary is a branch nothing tests.
+  raw=$(gh api "repos/$REPO/actions/runs/$1/jobs" 2>/dev/null) \
+    || { printf 'failing check NOT DETERMINED — the run'\''s jobs could not be read'; return 0; }
+  names=$(printf '%s' "$raw" \
+    | jq -r '[.jobs[]? | select(.conclusion=="failure" or .conclusion=="timed_out" or .conclusion=="cancelled") | .name] | join(", ")' 2>/dev/null) \
+    || { printf 'failing check NOT DETERMINED — the run'\''s jobs could not be parsed'; return 0; }
+  # AN UNREADABLE ANSWER IS NOT AN EMPTY ONE. A run that is red must have a red job in it; if none
+  # came back, the query did not answer and must not be rendered as "nothing was failing".
+  [ -n "$names" ] || { printf 'failing check NOT DETERMINED — the run is red but no failing job was returned'; return 0; }
+  printf '%s' "$names"
+}
+
 main_state() {
-  local run concl st sha
+  local run concl st sha runid
+  [ -n "$MAIN_LINE" ] && { printf '%s' "$MAIN_LINE"; return 0; }
   run=$(gh api "repos/$REPO/actions/runs?branch=main&event=push&per_page=1" 2>/dev/null) || {
-    echo "MAIN STATE UNKNOWN (could not read the push run — check main yourself before merging more)"
-    return 0
+    MAIN_LINE="MAIN STATE UNKNOWN (could not read the push run — check main yourself before merging more)"
+    printf '%s' "$MAIN_LINE"; return 0
   }
   st=$(printf '%s' "$run" | jq -r '.workflow_runs[0].status // ""' 2>/dev/null || echo "")
   concl=$(printf '%s' "$run" | jq -r '.workflow_runs[0].conclusion // ""' 2>/dev/null || echo "")
   sha=$(printf '%s' "$run" | jq -r '.workflow_runs[0].head_sha // "" | .[0:8]' 2>/dev/null || echo "")
+  runid=$(printf '%s' "$run" | jq -r '.workflow_runs[0].id // ""' 2>/dev/null || echo "")
   case "$st|$concl" in
-    "|"|"")        echo "MAIN STATE UNKNOWN (no push run found on main — check main yourself)" ;;
-    *"|success")   echo "main is GREEN at ${sha:-?}" ;;
-    completed"|"*) echo "MAIN IS RED at ${sha:-?} (${concl:-no conclusion}) — YOU merged into it, so this is yours to fix before merging anything else" ;;
-    *)             echo "main's build is still running at ${sha:-?} — not green yet, watch it out" ;;
+    "|"|"")        MAIN_LINE="MAIN STATE UNKNOWN (no push run found on main — check main yourself)" ;;
+    *"|success")   MAIN_LINE="main is GREEN at ${sha:-?}" ;;
+    completed"|"*)
+      MAIN_RED_SHA=$(printf '%s' "$run" | jq -r '.workflow_runs[0].head_sha // ""' 2>/dev/null || echo "")
+      MAIN_LINE="MAIN IS RED at ${sha:-?} — the failing check is: $(failing_checks "$runid")" ;;
+    *)             MAIN_LINE="main's build is still running at ${sha:-?} — not green yet, watch it out" ;;
   esac
+  printf '%s' "$MAIN_LINE"
+}
+
+# WHOSE IT IS, DERIVED OR NOT CLAIMED. `$1` is the commit the caller's own merge produced. If main's
+# failing commit IS that commit, the red is attributable and saying so is useful. Anything else —
+# a different sha, an unreadable merge sha, a red main nobody here merged into — is NOT derivable
+# from what was measured, and gets said as such.
+attributed_main_state() { # $1 = the merge commit sha this caller produced, may be empty
+  # CALLED WITHOUT A COMMAND SUBSTITUTION, DELIBERATELY. `main_state` records what it found in
+  # globals, and a `$(...)` runs it in a subshell where those assignments die with the subshell —
+  # so the attribution below silently saw an empty `MAIN_RED_SHA` and never fired. The self-test
+  # arm caught it; reading the code did not.
+  local line
+  main_state >/dev/null
+  line=$MAIN_LINE
+  [ -n "$MAIN_RED_SHA" ] || { printf '%s' "$line"; return 0; }
+  if [ -n "${1:-}" ] && [ "${1:-}" = "$MAIN_RED_SHA" ]; then
+    printf '%s — this red IS the merge commit you just made, so it is yours to fix before merging anything else' "$line"
+    return 0
+  fi
+  printf '%s — CAUSE NOT DETERMINED: main'\''s failing commit is not the merge you made, and this watch does not infer the author from who merged last. The framework pushes to main directly, so read that commit before assuming the red is yours' "$line"
 }
 
 # The self-test drives main's colour through this, so what it asserts is what the watch runs.
-[ "$role" = "--main-state" ] && { main_state; exit 0; }
+# `--main-state [merge-sha]`: with no sha the attribution cannot be derived and is not claimed,
+# which is also the honest default for a person asking "what does main look like?".
+[ "$role" = "--main-state" ] && { attributed_main_state "${2:-}"; echo; exit 0; }
 
 here_bin=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-# Sleep until the limit resets, but never less than one interval and never more than ten minutes —
-# an unreadable reset must not park the watch indefinitely.
-HOLD_SLEEP() {
-  local s; s=$("$here_bin/gh-budget.sh" reset-in 2>/dev/null || echo "$interval")
-  [ "$s" -lt "$interval" ] && s=$interval
-  [ "$s" -gt 600 ] && s=600
-  echo "$s"
-}
+# Sleep until the throttle that is actually holding this watch is expected to lift, but never less
+# than one interval and never more than ten minutes — an unreadable reset must not park the watch
+# indefinitely.
+#
+# `hold-for`, NOT `reset-in`: the two causes clear on different clocks. A PRIMARY exhaustion clears
+# when the hourly quota resets. A SECONDARY (burst) limit clears with QUIET and has nothing to do
+# with that reset — waiting on `reset-in` there is waiting on a signal that never described the
+# problem (Issue #81).
+HOLD_SLEEP() { "$here_bin/gh-budget.sh" hold-for "$interval" 2>/dev/null || echo "$interval"; }
 
 while true; do
   # REST, not GraphQL: `gh pr list` is a GraphQL call and that quota runs out on its own schedule,
@@ -318,12 +536,28 @@ while true; do
   # deliberately idle, and when it resumes. Reading the limit is free and does not spend it.
   bmsg=$("$here_bin/gh-budget.sh" check 2>&1) && bok=0 || bok=$?
   if [ "${bok:-0}" -eq 1 ]; then
-    echo "HOLDING — $bmsg. Not polling: the remaining budget is reserved for this role's own work."
+    echo "HOLDING — $bmsg"
+    # A SWEEP THAT HOLDS MUST STILL END. Found while building #89's fixture: a `--sweep` under a
+    # budget hold slept and continued forever, so the ONE-PASS fallback for a dead watch hung
+    # exactly like the watch it replaces — the failure this file's own self-test says it exists to
+    # prevent. Exit non-zero, because a hold is not an answer to a question asked once.
+    [ "$sweep" = no ] || exit 1
     sleep "$(HOLD_SLEEP)"
     continue
   fi
   if ! prs=$(gh api "repos/$REPO/pulls?state=open&per_page=100" 2>&1); then
-    echo "LOOKUP FAILED: $(printf '%s' "$prs" | tr '\n' ' ' | cut -c1-160)"
+    # THE REFUSAL IS THE ONLY PLACE A SECONDARY LIMIT IS VISIBLE (Issue #81) — see the long note in
+    # watch-queue.sh. The guard above reads the PRIMARY quota, which sat at 4896/5000 while every
+    # one of these calls was returning 403, so it waved the watch through the entire outage. Handing
+    # it the 403 is what lets the next check hold; polling on regardless is what renews the burst.
+    if hold=$("$here_bin/gh-budget.sh" note-failure "$prs" 2>/dev/null); then
+      echo "HOLDING — GitHub refused this poll with a SECONDARY (burst/concurrency) rate limit, which does NOT appear in the primary quota. Standing down for about ${hold}s; a secondary limit clears with quiet, not on the reset clock, so retrying now extends it."
+      # A SWEEP STILL FAILS. It answers a question asked once, and `HOLDING` is not an answer to it —
+      # exit 0 here would tell a caller its board is quiet in the middle of a refusal.
+      [ "$sweep" = no ] || exit 1
+      sleep "$(HOLD_SLEEP)"; continue
+    fi
+    echo "LOOKUP FAILED: $(reason "$prs" 160)"
     # A SWEEP THAT COULD NOT READ THE BOARD MUST EXIT NON-ZERO. It is answering a question asked
     # once, and a caller that sees exit 0 and no events concludes there is nothing waiting on it —
     # which is this whole file's subject, arriving through its own front door.
@@ -384,11 +618,16 @@ while true; do
 
     # Check runs on the head sha. A failure here is itself a lookup failure, not a green.
     if ! runs=$(gh api "repos/$REPO/commits/$sha/check-runs" 2>&1); then
-      echo "LOOKUP FAILED: check runs for #$num: $(printf '%s' "$runs" | tr '\n' ' ' | cut -c1-120)"
+      echo "LOOKUP FAILED: check runs for #$num: $(reason "$runs" 120)"
       continue
     fi
     failing=$(printf '%s' "$runs" | jq -r '[.check_runs[]? | select(.conclusion=="failure" or .conclusion=="timed_out" or .conclusion=="cancelled") | .name] | join(", ")' 2>/dev/null || echo "")
     pending=$(printf '%s' "$runs" | jq -r '[.check_runs[]? | select(.status!="completed")] | length' 2>/dev/null || echo 0)
+    # HOW MANY GATES HAVE ACTUALLY SPOKEN (Issue #89). `pending` counts what is NOT finished, and on
+    # a head where NOTHING has reported that count is zero — the array is empty, its length is 0,
+    # and every test of the form "nothing is pending" is VACUOUSLY TRUE. This is the number that
+    # says something was there to be pending in the first place.
+    completed=$(printf '%s' "$runs" | jq -r '[.check_runs[]? | select(.status=="completed")] | length' 2>/dev/null || echo 0)
 
     # THE ISSUE MOVED UNDER AN OPEN PULL REQUEST. A ruling changes what an Issue asks for, and
     # nothing told the work already in flight: one pull request was cut three minutes before a
@@ -433,10 +672,18 @@ while true; do
     # job can stay green and auto-merge can arm. Watching check runs alone reported a pull request
     # as needing one fix when it had two, and the invisible one was the one blocking the merge.
     # Measured: a dev agent fixed what the event named, then found the blocker by hand.
-    if st=$(gh api "repos/$REPO/commits/$sha/status" 2>/dev/null); then
-      badst=$(printf '%s' "$st" | jq -r '[.statuses[]? | select(.state=="failure" or .state=="error") | "\(.context): \(.description)"] | join("; ")' 2>/dev/null || echo "")
-      [ -n "$badst" ] && { emit FAILING "$num" "$title" "[$branch] $badst"; continue; }
+    # READ ONCE, ANSWERING TWO QUESTIONS: is any status red, and did the review verdict pass. And a
+    # status lookup that FAILED is neither — it used to be `if st=$(...); then ... fi`, where a
+    # failed call fell straight through to the permissive answer below with nothing said.
+    if ! st=$(gh api "repos/$REPO/commits/$sha/status" 2>&1); then
+      echo "LOOKUP FAILED: commit statuses for #$num: $(reason "$st" 120)"
+      continue
     fi
+    badst=$(printf '%s' "$st" | jq -r '[.statuses[]? | select(.state=="failure" or .state=="error") | "\(.context): \(.description)"] | join("; ")' 2>/dev/null || echo "")
+    [ -n "$badst" ] && { emit FAILING "$num" "$title" "[$branch] $badst"; continue; }
+    # THE VERDICT, POSITIVELY. It lives only in the commit status, and `READY` is not entitled to
+    # assume it: the absence of a `changes-requested` is not the presence of an approval.
+    verdict=$(printf '%s' "$st" | jq -r '[.statuses[]? | select(.context|test("Reviewed by an agent"))][0].state // ""' 2>/dev/null || echo "")
 
     # A review asking for changes is a state the author must hear about — it is not visible in any
     # check run, and a PR sitting on it looks identical to one waiting for a reviewer.
@@ -445,7 +692,44 @@ while true; do
       [ "${cr:-0}" -gt 0 ] && { emit CHANGES "$num" "$title"; continue; }
     fi
 
-    [ "${pending:-0}" -eq 0 ] && emit READY "$num" "$title"
+    # READY IS POSITIVE EVIDENCE, NOT THE ABSENCE OF NEGATIVE EVIDENCE (Issue #89).
+    #
+    # This was `[ "${pending:-0}" -eq 0 ] && emit READY`, and `pending` counts check runs that are
+    # NOT YET COMPLETED. **With no check runs at all the array is empty, its length is 0, and READY
+    # fired.** The two reds above cannot save it, because both are existence-dependent in the same
+    # way: `FAILING` needs a `failure`/`error` to EXIST and `CHANGES` needs a review to EXIST. On a
+    # head where nothing has reported, all three fall through to the permissive answer.
+    #
+    # MEASURED, on one board in one sweep: six READY lines, three genuine and three for heads with
+    # NOTHING reported on them — a 50% false-positive rate on the signal a verifier acts on to
+    # MERGE. Two of the false ones were the release's blocking branches, one of them carrying an
+    # unaddressed `changes-requested` and a scope ruling. Reproduced deterministically on #46 head
+    # `4e9ca30c`, twice seconds apart, while `pr.sh state 46` said — correctly — "NOTHING HAS
+    # REPORTED on this head yet. That is not a pass — it is no answer."
+    #
+    # It fires most readily exactly when a branch is most in flux: in the seconds after a push,
+    # which is when a fix agent hands off and a verifier looks.
+    #
+    # So READY now requires a gate to have SPOKEN (`completed` ≥ 1) and the verdict to have PASSED.
+    #
+    # AND THE NO-ANSWER CASE GETS ITS OWN EVENT, NOT SILENCE. Suppressing the line would make
+    # silence mean both "nothing to report" and "no answer yet" — the same collapse one level up,
+    # and the state this whole file exists to remove. The wording is `pr.sh state`'s, carried
+    # across rather than reinvented, because the two derivations disagreeing is what made this
+    # findable at all.
+    if [ "${completed:-0}" -eq 0 ]; then
+      emit NO-ANSWER "$num" "$title" "[$branch] NOTHING HAS REPORTED on this head yet — no check run has completed. That is NOT a pass, it is no answer. Do not merge on this."
+      continue
+    fi
+    if [ "${pending:-0}" -gt 0 ]; then
+      emit NO-ANSWER "$num" "$title" "[$branch] $pending check run(s) still running on this head — not a pass, no answer yet. Do not merge on this."
+      continue
+    fi
+    if [ "$verdict" != success ]; then
+      emit NO-ANSWER "$num" "$title" "[$branch] the gates have reported and passed, but the review verdict has not: '${verdict:-none published}'. That is NOT a pass, it is no answer. Do not merge on this."
+      continue
+    fi
+    emit READY "$num" "$title"
   done < <(printf '%s' "$prs" | jq -r '.[] | [.number, .title, .head.ref, .head.sha] | @tsv' 2>/dev/null || true)
 
   # Recently merged ones, so an agent learns its work landed rather than polling for it.
@@ -461,16 +745,17 @@ while true; do
   # place — `queue.sh` routes `feat`/`spec` to product and everything else to qa. Same rule here, so
   # the role told to merge it is the role told how it went.
   if merged=$(gh api "repos/$REPO/pulls?state=closed&per_page=20&sort=updated&direction=desc" 2>/dev/null); then
-    mainstate=""
-    while IFS=$'\t' read -r num title branch; do
+    while IFS=$'\t' read -r num title branch msha; do
       [ -n "$num" ] || continue
       case "$branch" in "$role"/*) emit MERGED "$num" "$title" ;; esac
 
       case "$branch" in */feat/*|*/spec/*) merger=product ;; *) merger=qa ;; esac
       [ "$merger" = "$role" ] || continue
-      [ -n "$mainstate" ] || mainstate=$(main_state)
-      emit MERGED "$num" "$title" "you merged this — $mainstate"
-    done < <(printf '%s' "$merged" | jq -r '.[] | select(.merged_at != null) | [.number, .title, .head.ref] | @tsv' 2>/dev/null || true)
+      # THE MERGE COMMIT COMES FROM THE PULL REQUEST ITSELF, and it is what makes the attribution a
+      # derivation rather than a guess: main's failing commit either IS this merge or it is not.
+      # `main_state` caches its own lookups, so this stays one question about main per poll.
+      emit MERGED "$num" "$title" "you merged this — $(attributed_main_state "$msha")"
+    done < <(printf '%s' "$merged" | jq -r '.[] | select(.merged_at != null) | [.number, .title, .head.ref, (.merge_commit_sha // "")] | @tsv' 2>/dev/null || true)
   fi
 
   # A SWEEP IS ONE PASS AND THEN IT IS OVER.
