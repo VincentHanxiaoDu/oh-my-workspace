@@ -23,7 +23,12 @@ running the product SHALL NOT observe any watched directory between commands.
 #### Scenario: A change while the daemon is running
 - **WHEN** a file changes inside a watched directory while the daemon is running, and more than the
   poll interval passes with no command run
-- **THEN** the state the product holds for that project reflects the change
+- **THEN** the state the product holds for that project reflects the change, and a listing run
+  afterwards attributes that state to the daemon rather than to its own examination
+
+#### Scenario: A daemon started the way a person starts it
+- **WHEN** a person starts the daemon and adds a file to a watched directory, running nothing else
+- **THEN** the polled state recorded for that project advances without any command being run
 
 #### Scenario: A change while nothing is running
 - **WHEN** the daemon is stopped, a file changes inside a watched directory, and well beyond the poll
@@ -142,6 +147,12 @@ repository the prune list and the dot rule SHALL be the entire exclusion policy.
 When part of a project cannot be read, the product SHALL still list the project, SHALL report the
 unreadable portion as unreadable, SHALL continue the walk, SHALL leave the other projects unaffected,
 and SHALL render the result distinguishably from a walk that read everything.
+
+#### Scenario: An unreadable subdirectory inside a git repository
+- **WHEN** a watched directory is a git repository containing a subdirectory that refuses to be read,
+  and the tool the product asks for the file set reports the problem without failing
+- **THEN** the project is reported as partially read and names the unreadable path — the tool's
+  success status is not taken as evidence that everything was read
 
 #### Scenario: An unreadable subdirectory mid-walk
 - **WHEN** a watched directory contains a subdirectory that refuses to be read

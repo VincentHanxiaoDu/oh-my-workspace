@@ -28,26 +28,74 @@ type Machine string
 
 // CheckIn is a device's check-in state: the three-valued answer of PRD §4.3, applied to §3.8's
 // "a device that has not checked in".
+//
+// # ITS FIELDS ARE UNEXPORTED, AND THAT IS THE WHOLE DESIGN
+//
+// A CheckIn is built only by the three constructors below, so an invalid one cannot be written —
+// not by this package, not by a caller, not by a future consumer. That is a stronger statement than
+// "the constructors are careful", and it was bought with a real defect:
+//
+// A check-in recorded at the ZERO INSTANT used to render as "could not be determined" while
+// State reported tri.Yes. The rendering function knew something the value did not, so every OTHER
+// consumer disagreed with it: the control API's machine-readable field said `checked_in`, the exit
+// code said determined, and a person read "could not be determined" off the same device at the same
+// moment. The two surfaces contradicted each other (PRD §4.3), and the person's script and the
+// person were told different things.
+//
+// THE LESSON, WHICH IS WHY THE FIX IS NOT A SECOND GUARD. Patching the machine-readable field and
+// the exit-code predicate would have left the fourth consumer to be found later — the defect was
+// never in any one consumer, it was that the undetermined-ness lived in a RENDERING instead of in
+// the VALUE. So the value carries it: a check-in with no instant is not a valid "yes", and
+// [CheckedInAt] returns the third answer rather than an invalid one. Every consumer, present and
+// future, now agrees by construction because there is nothing to disagree with.
+//
+// It is reachable from disk, which is why it is not a theoretical worry: Go's zero time.Time is
+// year 0001 and RFC3339 encodes it happily, so `{"state":"at","at":"0001-01-01T00:00:00Z"}` is a
+// record a real inventory can hold.
 type CheckIn struct {
-	// State is the answer. Yes: it checked in, At says when. No: it was registered and has never
-	// checked in. Undetermined: this could not be worked out, and Why says what stopped it.
-	State tri.Value
-	// At is when it checked in. Meaningful only when State is Yes.
-	At time.Time
-	// Why carries the reason when State is Undetermined.
-	Why string
+	// state is the answer. Yes: it checked in, and at says when — an invariant, not a hope.
+	// No: it was registered and has never checked in. Undetermined: this could not be worked out.
+	state tri.Value
+	at    time.Time
+	why   string
 }
+
+// State is the three-valued answer. It is the ONE place any consumer asks what this check-in is,
+// and it can never report Yes for a check-in with no instant.
+func (c CheckIn) State() tri.Value { return c.state }
+
+// At is when the device checked in. It is the zero time unless State is Yes, and it is never the
+// zero time when State is Yes.
+func (c CheckIn) At() time.Time { return c.at }
+
+// Why is what stopped the determination. Empty unless State is Undetermined.
+func (c CheckIn) Why() string { return c.why }
+
+// Determined reports whether this check-in is a real answer either way. Derived from State, so it
+// cannot drift from it.
+func (c CheckIn) Determined() bool { return c.state.Determined() }
 
 // NeverCheckedIn is the state of a machine that was registered and never started. It is a VALUE,
 // constructed on purpose, not the zero CheckIn — the zero CheckIn is Undetermined, because a
 // struct nobody filled in has not determined anything.
-func NeverCheckedIn() CheckIn { return CheckIn{State: tri.No} }
+func NeverCheckedIn() CheckIn { return CheckIn{state: tri.No} }
 
 // CheckedInAt is the state of a machine that reported in at t.
-func CheckedInAt(t time.Time) CheckIn { return CheckIn{State: tri.Yes, At: t.UTC()} }
+//
+// IT REFUSES TO BUILD A CHECK-IN WITH NO INSTANT. "It checked in, and I cannot say when" is not a
+// check-in a person can act on and not a fact this product has established; it is the third answer,
+// so that is what comes back. Returning the undetermined value here rather than rendering it later
+// is what keeps every consumer in agreement — see the type's comment.
+func CheckedInAt(t time.Time) CheckIn {
+	if t.IsZero() {
+		return UndeterminedCheckIn("this device is recorded as having checked in, but not when — " +
+			"a check-in with no instant is not something this product has established")
+	}
+	return CheckIn{state: tri.Yes, at: t.UTC()}
+}
 
 // UndeterminedCheckIn is the third answer, carrying what stopped the determination.
-func UndeterminedCheckIn(why string) CheckIn { return CheckIn{State: tri.Undetermined, Why: why} }
+func UndeterminedCheckIn(why string) CheckIn { return CheckIn{state: tri.Undetermined, why: why} }
 
 // checkInTimeFormat is the one rendering of a check-in instant. RFC3339 in UTC, so two listings of
 // the same device taken on two machines produce the same bytes.
@@ -63,20 +111,20 @@ const checkInTimeFormat = time.RFC3339
 // No branch returns the empty string, and no branch returns a value that could be read as blank:
 // silence is not one of the three answers (§4.3).
 func (c CheckIn) Describe() string {
-	switch c.State {
+	switch c.state {
 	case tri.Yes:
-		if c.At.IsZero() {
-			// A "yes" with no instant is not a check-in anyone can point at. Reported as the third
-			// answer rather than as a checked-in device with a blank time.
-			return tri.Undetermined.String() + ": this device is recorded as checked in, but not when"
-		}
-		return "checked in at " + c.At.UTC().Format(checkInTimeFormat)
+		// NO ZERO-INSTANT GUARD HERE, ON PURPOSE. There used to be one, and it was the defect: it
+		// made this function disagree with State, CheckInWord, the exit codes and every future
+		// consumer. CheckedInAt will not build a Yes without an instant, so this branch always has
+		// one, and a guard here would be a second opinion about a question the value already
+		// settles.
+		return "checked in at " + c.at.UTC().Format(checkInTimeFormat)
 	case tri.No:
 		// THE SENTENCE PRD §3.8 IS ABOUT. It states two things a reader needs and neither is an
 		// absence: the machine IS registered, and it has never reported in.
 		return "registered, and has never checked in"
 	default:
-		why := strings.TrimSpace(c.Why)
+		why := strings.TrimSpace(c.why)
 		if why == "" {
 			why = "no reason was recorded"
 		}
@@ -96,10 +144,20 @@ type Device struct {
 	Source string
 }
 
-// Sources.
+// Sources: WHERE THIS ENTRY WAS LEARNT FROM, WHICH IS NOT WHICH MACHINE IT IS.
+//
+// THE WORDING IS THE FIX FOR A REAL MISREADING. These used to render as "this machine" and "the
+// hub", and "this machine" reads at a glance as a statement about the device's IDENTITY — so a box
+// registered with --machine <another store's id>, which is precisely NOT this machine, carried the
+// label "[this machine]". A person scanning the listing for the laptop they are typing on would
+// have found it against every entry.
+//
+// Provenance is still worth showing: a device this machine has a registration for and a device only
+// the hub knows about are different facts, and §4.4's "what is missing" is easier to read when you
+// can see which entries came from where. So the fact stays and the wording says what it is.
 const (
-	SourceLocal = "this machine"
-	SourceHub   = "the hub"
+	SourceLocal = "from this machine's inventory"
+	SourceHub   = "from the hub"
 )
 
 // Render is one device, as one line, for a person.

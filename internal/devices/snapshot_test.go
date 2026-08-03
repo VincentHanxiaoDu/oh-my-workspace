@@ -117,6 +117,19 @@ func TestAnEmptyInventoryDoesNotRenderLikeAListingThatFailed(t *testing.T) {
 		}
 		seen[got] = name
 	}
+	// THE HEADLINE SENTENCE ITSELF, NOT ONLY THE LINES UNDER IT. Review found that making the two
+	// headlines identical left this test green, because the distinctness survived on the
+	// "listing complete:" and "missing:" lines below. A person's eye lands on the first line, and
+	// "you have registered no machines" where the truth is "this listing could not be completed"
+	// is the false reassurance §4.4 exists to prevent — so the first line is asserted on its own.
+	headline := func(s string) string { return strings.SplitN(s, "\n", 2)[0] }
+	if headline(renders["complete"]) == headline(renders["no hub"]) {
+		t.Errorf("the genuinely-empty listing and the no-hub one open with the same sentence: %q", headline(renders["complete"]))
+	}
+	if headline(renders["complete"]) == headline(renders["unreachable"]) {
+		t.Errorf("the genuinely-empty listing and the unreachable-hub one open with the same sentence: %q", headline(renders["complete"]))
+	}
+
 	if emptyAndComplete.Complete != tri.Yes {
 		t.Errorf("a genuinely empty inventory is reported as %v, want Yes", emptyAndComplete.Complete)
 	}
@@ -160,11 +173,11 @@ func TestTheHubHalfNeverCollapsesTwoLabels(t *testing.T) {
 	}
 	// The never-started machine the hub knows about survives the merge with its state intact.
 	for _, d := range s.Devices {
-		if d.Label == "the-box" && d.CheckIn.State != tri.No {
-			t.Errorf("a never-started device came through the merge as %v", d.CheckIn.State)
+		if d.Label == "the-box" && d.CheckIn.State() != tri.No {
+			t.Errorf("a never-started device came through the merge as %v", d.CheckIn.State())
 		}
-		if d.Label == "laptop" && d.CheckIn.State != tri.Yes {
-			t.Errorf("the hub saw laptop check in and the merged entry says %v", d.CheckIn.State)
+		if d.Label == "laptop" && d.CheckIn.State() != tri.Yes {
+			t.Errorf("the hub saw laptop check in and the merged entry says %v", d.CheckIn.State())
 		}
 	}
 }

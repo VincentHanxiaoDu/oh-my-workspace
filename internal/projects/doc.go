@@ -8,7 +8,7 @@
 // criterion 10 must agree between the two surfaces. Two surfaces agree reliably when they are two
 // renderings of ONE value, and disagree eventually when they are two computations of the same
 // question. So [Snapshot] is the single determination. The CLI renders it with [Render]; the
-// control API — Issue #2's, which does not exist on this branch — must serve this same struct.
+// control API — Issue #2's — must serve this same struct.
 // See "THE BOUNDARY WITH ISSUE #2" below for exactly what is and is not guaranteed here.
 //
 // # THE PROVENANCE RULE IS THE HEART OF THE ISSUE (criterion 6)
@@ -74,8 +74,10 @@
 //
 // # THE BOUNDARY WITH ISSUE #2 (criterion 14)
 //
-// Issue #2 owns the daemon and the control API. It is under review on another branch and cannot be
-// imported from here, so criterion 14 is NOT fully driven on this branch. What is done here:
+// Issue #2's daemon IS in this tree now, and [Run] is wired into it: `omw daemon run` starts the
+// polling for as long as the run lasts, so criterion 4 — a change reflected with no command run — is
+// driven end to end against a real daemon in internal/commands. What is NOT here is the control API
+// as a SECOND SURFACE to compare against:
 //
 //   - [Snapshot] is the single determination, and [MarshalSnapshot] is its wire form. A control API
 //     that serves [MarshalSnapshot] and a CLI that calls [Render] cannot disagree about provenance,
@@ -84,10 +86,13 @@
 //     three markings, which is the half of criterion 14 that lives on this side.
 //   - The liveness the control API reports and the liveness a listing reports are the same value by
 //     construction, because neither surface establishes it — both are handed it.
-//   - What is NOT done: no control API is contacted, because inventing one here would guarantee
-//     agreement with a surface Issue #2 is not building. The remaining half is a test that runs both
-//     real surfaces, and it belongs on the branch where both exist.
+//   - What is NOT done: no control API is contacted. The daemon's control API does not serve
+//     projects yet — nothing on either side has been written to make it — so there is no second
+//     surface to compare against, and inventing a client for an endpoint that does not exist would
+//     prove agreement with nothing. The remaining half is a test that runs both real surfaces, and
+//     it belongs with whichever Issue adds projects to the control API.
 //
-// The daemon side of the contract is one call: a daemon that watches projects runs [Poll] on a
-// [PollInterval] ticker against the device's store. It needs nothing else from this package.
+// The daemon side of the contract is a registration, not a call: [PollPass] is registered as daemon
+// background work from this package's own init, so the daemon runs it every [PollInterval] and
+// imports nothing of this package. See loop.go.
 package projects

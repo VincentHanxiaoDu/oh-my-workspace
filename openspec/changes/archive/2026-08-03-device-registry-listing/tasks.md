@@ -8,6 +8,9 @@
       `UndeterminedCheckIn` as the only ways to build a check-in state
 - [x] Make `CheckIn.Describe` the single rendering of a check-in, with no branch returning a blank
       and no determined branch carrying the undetermined wording
+- [x] Unexport `CheckIn`'s fields so an invalid check-in cannot be built by anyone — a check-in
+      whose state is Yes with no instant is refused by `CheckedInAt`, not corrected by a renderer,
+      so every consumer agrees by construction rather than by a guard each one has to remember
 - [x] Define the distinct, `errors.Is`-able failures: duplicate label, machine already registered,
       no such device, label refused, inventory unreadable, machine undetermined
 - [x] Write `CheckLabel` refusing exactly the three labels that would break something already
@@ -74,3 +77,10 @@
       collapsed; the control form dropping a device; an unregistered label answered as a device;
       an unestablishable daemon ignored; the command guessing instead of asking `daemonLiveness`;
       the deleted socket constant reinstated
+- [x] Guard the two `decodeCheckIn` branches review found unguarded — an unrecognised state word and
+      a record with no check-in state — driven from a real inventory file, against a genuinely
+      never-started device in the same listing
+- [x] Assert the empty-listing HEADLINE sentence, not only the lines beneath it
+- [x] Re-drive review's surviving mutations (M2, M3, M11, M12) and confirm each now goes red
+- [x] Word the provenance label so it cannot be read as a machine identity — UAT found every entry
+      carrying "[this machine]", including a box registered under another machine's store id

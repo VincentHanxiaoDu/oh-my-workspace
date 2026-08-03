@@ -1,0 +1,21 @@
+# Framework-owned files in this repository that carry a LOCAL commit.
+#
+# `.workflow/bin/` and `.github/` are installed by agent-dev-flow and are REPLACED WHOLESALE on
+# every refresh. A commit of ours that is the most recent thing to touch one of those files is a
+# fix with a half-life of one install (Issue #58). `frameworkpaths_test.go` finds them and fails
+# unless the file is declared here with a reason it is not a loss waiting to happen.
+#
+# THIS FILE IS NOT A SILENCER. An entry is a claim that the local edit has been reconciled with
+# upstream — upstreamed and reinstalled, or deliberately accepted as disposable. Adding a line
+# without doing that is how the next fix gets lost quietly.
+#
+# One entry per line:  <commit-sha> <path> <reason>
+#
+# Blank lines and lines beginning with `#` are ignored.
+
+# There are no entries today, and that is the healthy state.
+#
+# There was one: 17c8f9c over `.workflow/bin/check-review.sh`, the #52 fix. It was upstreamed as
+# agent-dev-flow aa8c730, and the refresh 1889abd has since landed over that file — so the framework
+# has spoken for it and the declaration became unnecessary while this branch was open. The check
+# said so, in as many words, and the line was removed. That is the loop working.

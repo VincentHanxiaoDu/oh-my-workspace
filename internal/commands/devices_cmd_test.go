@@ -637,3 +637,91 @@ func TestTheDevicesListingUsesTheProductsRealLivenessAnswer(t *testing.T) {
 			"the KNOWN-partial code, not the undetermined one:\n%s", code, cli.ExitFailure, out)
 	}
 }
+
+// THE ZERO INSTANT, DRIVEN FROM DISK, ACROSS ALL THREE SURFACES.
+//
+// Go's zero time.Time is year 0001 and RFC3339 encodes it happily, so
+// `"check_in": {"state":"at","at":"0001-01-01T00:00:00Z"}` is a record the inventory can really
+// hold. A check-in with no instant is not a check-in anyone can point at — it is a fact that could
+// not be determined, and §4.3 says so in EVERY surface, not just the prose one.
+//
+// WHY THIS ASSERTS THREE THINGS AND NOT ONE. The defect it was written for rendered the undetermined
+// WORDING while the exit code and the agent-facing field both said determined — the person and their
+// script were told different things about the same device at the same moment. A test that checked
+// only the sentence would have gone green against exactly that.
+func TestACheckInWithNoInstantIsUndeterminedInEverySurface(t *testing.T) {
+	env := devicesEnv(t, map[string]string{"OMW_HUB": "https://hub.example"})
+	registerVia(t, env, "no-instant", "store-A")
+	writeCheckInInstant(t, env, "no-instant", "0001-01-01T00:00:00Z")
+	withHub(t, nil) // a hub that answers, so nothing else can make the listing undetermined
+
+	// (a) the control API's machine-readable field
+	listCode, listOut, _ := runDevices2(t, env, "list", "--json")
+	var got struct {
+		Devices []struct {
+			Label   string `json:"label"`
+			State   string `json:"check_in_state"`
+			CheckIn string `json:"check_in"`
+		} `json:"devices"`
+	}
+	if err := json.Unmarshal([]byte(listOut), &got); err != nil {
+		t.Fatalf("%v\n%s", err, listOut)
+	}
+	if len(got.Devices) != 1 {
+		t.Fatalf("want the one device to be listed, got %d:\n%s", len(got.Devices), listOut)
+	}
+	d := got.Devices[0]
+	if d.State != "undetermined" {
+		t.Errorf("the control API says check_in_state=%q for a check-in with no instant, want undetermined", d.State)
+	}
+	// (b) the prose
+	if !strings.Contains(d.CheckIn, tri.Undetermined.String()) {
+		t.Errorf("the prose for a check-in with no instant is %q, which does not say it could not be determined", d.CheckIn)
+	}
+	// The two must AGREE — that is the whole defect.
+	if (d.State == "undetermined") != strings.Contains(d.CheckIn, tri.Undetermined.String()) {
+		t.Errorf("the prose and the machine-readable field disagree about the same device at the same moment: %q vs %q", d.CheckIn, d.State)
+	}
+	// (c) the exit codes
+	if listCode != cli.ExitUndetermined {
+		t.Errorf("list exited %d with an undetermined check-in and a hub that answered, want ExitUndetermined (%d):\n%s",
+			listCode, cli.ExitUndetermined, listOut)
+	}
+	showCode, showOut, showErr := runDevices2(t, env, "show", "no-instant")
+	if showCode != cli.ExitUndetermined {
+		t.Errorf("show exited %d for a check-in with no instant, want ExitUndetermined (%d):\n%s%s",
+			showCode, cli.ExitUndetermined, showOut, showErr)
+	}
+}
+
+// writeCheckInInstant rewrites one device's recorded check-in to a literal instant, so a state the
+// product would not itself write can still be driven from the disk a person's inventory really is.
+func writeCheckInInstant(t *testing.T, env map[string]string, label, instant string) {
+	t.Helper()
+	rewriteCheckIn(t, env, label, `"state": "at",
+        "at": "`+instant+`"`)
+}
+
+// rewriteCheckIn replaces one device's whole check-in object body, leaving every other entry intact.
+func rewriteCheckIn(t *testing.T, env map[string]string, label, body string) {
+	t.Helper()
+	path, err := devices.RegistryPath(func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head := strings.Index(string(raw), `"label": "`+label+`"`)
+	if head < 0 {
+		t.Fatalf("no entry for %q to rewrite:\n%s", label, raw)
+	}
+	tail := strings.Replace(string(raw)[head:], `"state": "never"`, body, 1)
+	if tail == string(raw)[head:] {
+		t.Fatalf("the entry for %q was not rewritten; the test would prove nothing:\n%s", label, raw)
+	}
+	if err := os.WriteFile(path, []byte(string(raw)[:head]+tail), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}

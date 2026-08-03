@@ -554,3 +554,129 @@ func TestTheProjectsTestsSpawnNoProcesses(t *testing.T) {
 	}
 	t.Log("no process spawns in this file; every command runs in process")
 }
+
+// CRITERION 4, END TO END, THROUGH THE REAL DAEMON. This is the one the reviewer drove and this
+// branch failed: the daemon ran, the listing correctly said "watching: yes", and every row said
+// "examined during this command" — because nothing was polling.
+//
+// THE ASSERTION MUST NOT BE ABLE TO CAUSE THE THING IT OBSERVES. Criterion 4: "reflecting a change
+// only when a listing command is run is a failure of this criterion." So the file changes, NOTHING
+// is run, and the polled state record is read straight out of the store. A version of this test
+// that waited by calling `omw projects list` would have passed on the branch the reviewer refused.
+func TestARunningDaemonPollsProjectsWithNoCommandRun(t *testing.T) {
+	bin := buildOMW(t)
+	storePath, getenv := projectsSandbox(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "one.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, e := runProjectsCmd(t, getenv, "add", dir); code != cli.Success {
+		t.Fatalf("add: %s", e)
+	}
+
+	if start := runBinary(t, bin, storePath, "daemon", "start"); start.code != 0 {
+		t.Fatalf("`omw daemon start` exited %d\n%s%s", start.code, start.stdout, start.stderr)
+	}
+	t.Cleanup(func() { runBinary(t, bin, storePath, "daemon", "stop") })
+	if got := statusClaim(t, getenv); got != tri.Yes {
+		t.Fatalf("`omw daemon start` returned but `omw daemon status` says %v", got)
+	}
+
+	// The daemon must record a poll of its own accord. Nothing below runs a project command.
+	polled := func() int { return polledFileCount(t, storePath, dir) }
+	waitUntil(t, 10*time.Second, func() bool { return polled() == 1 },
+		"the daemon's first poll of the project (nothing has been run)")
+
+	// NOW THE CRITERION ITSELF: change a file, run nothing, wait past the interval.
+	if err := os.WriteFile(filepath.Join(dir, "two.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, 10*time.Second, func() bool { return polled() == 2 },
+		"the daemon to reflect a change with NO command run — criterion 4")
+
+	// And the listing then serves the polled state, stamped as the daemon's. This is criterion 6's
+	// other branch, which could not be reached at all while nothing polled.
+	code, out, errOut := runProjectsCmd(t, getenv, "list")
+	if code != cli.Success {
+		t.Fatalf("list exited %d: %s", code, errOut)
+	}
+	if !strings.Contains(out, "watched by the daemon") {
+		t.Errorf("with a daemon that has polled, the listing does not attribute the state to it:\n%s", out)
+	}
+	if strings.Contains(out, "examined during this command") {
+		t.Errorf("the listing examined the directory itself although the daemon had polled it:\n%s", out)
+	}
+	assertNoStaleBecauseNothingIsWatchingClaim(t, "omw projects list", out+errOut)
+}
+
+// polledFileCount reads the file count a DAEMON POLL recorded, straight out of the store, and
+// returns -1 when no poll has recorded anything yet.
+//
+// Deliberately not via `omw projects list`: with nothing polled that command scans the directory
+// itself and would report the new count on a build where the daemon never polls at all — which is
+// exactly the build that was refused.
+func polledFileCount(t *testing.T, storePath, projectPath string) int {
+	t.Helper()
+	s, err := store.Open(storePath)
+	if err != nil {
+		t.Fatalf("opening the store: %v", err)
+	}
+	var ss struct {
+		State struct {
+			Files int `json:"files"`
+		} `json:"state"`
+	}
+	if err := s.GetJSON(projects.KindState, projects.ProjectID(projectPath), &ss); err != nil {
+		return -1
+	}
+	return ss.State.Files
+}
+
+// waitUntil polls a condition until it holds, and fails naming what it waited for.
+//
+// A fixed sleep tuned to one machine is either slow everywhere or flaky on a loaded box. The
+// DIRECTION carries the meaning: this waits for something to APPEAR, and the criterion-5 test
+// sleeps a fixed span and requires that nothing appeared — only the second can honestly be a sleep.
+func waitUntil(t *testing.T, limit time.Duration, cond func() bool, what string) {
+	t.Helper()
+	deadline := time.Now().Add(limit)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("timed out after %v waiting for %s", limit, what)
+}
+
+// CRITERION 4's OTHER HALF: the polling is REGISTERED as daemon background work, so it happens
+// because the daemon is running rather than because a command was typed.
+//
+// It replaces a structural test that asserted only `daemonRun` called an interim helper in this
+// package. That helper is gone: Issue #6's registry landed and the registration moved into
+// internal/projects' own init, where the daemon imports nothing of it. The property worth asserting
+// is now the registration itself, and that nothing else can trigger a pass.
+func TestProjectPollingIsRegisteredAsDaemonBackgroundWork(t *testing.T) {
+	var found *daemon.Background
+	for _, b := range daemon.Backgrounds() {
+		if b.Name == projects.BackgroundName {
+			bb := b
+			found = &bb
+		}
+	}
+	if found == nil {
+		var names []string
+		for _, b := range daemon.Backgrounds() {
+			names = append(names, b.Name)
+		}
+		t.Fatalf("projects are not registered as daemon background work, so a running daemon does "+
+			"not watch them (criterion 4). Registered: %v", names)
+	}
+	if found.Interval != projects.PollInterval {
+		t.Errorf("registered interval is %v, want %v — PRD §3.6's every couple of seconds",
+			found.Interval, projects.PollInterval)
+	}
+	if found.Run == nil {
+		t.Error("the registration has nothing to run")
+	}
+}

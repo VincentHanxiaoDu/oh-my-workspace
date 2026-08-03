@@ -210,7 +210,7 @@ func merge(local, remote []Device) []Device {
 			index[r.Label] = len(out) - 1
 			continue
 		}
-		if r.CheckIn.State == tri.Yes && out[i].CheckIn.State != tri.Yes {
+		if r.CheckIn.State() == tri.Yes && out[i].CheckIn.State() != tri.Yes {
 			out[i].CheckIn = r.CheckIn
 		}
 	}
@@ -224,7 +224,7 @@ func (s Snapshot) Determined() bool {
 		return false
 	}
 	for _, d := range s.Devices {
-		if !d.CheckIn.State.Determined() {
+		if !d.CheckIn.Determined() {
 			return false
 		}
 	}
@@ -238,7 +238,7 @@ func (s Snapshot) AnyUndetermined() bool {
 		return true
 	}
 	for _, d := range s.Devices {
-		if !d.CheckIn.State.Determined() {
+		if !d.CheckIn.Determined() {
 			return true
 		}
 	}
@@ -305,7 +305,7 @@ type controlSnapshot struct {
 // CheckInWord is the three-valued check-in state as a single machine-readable word. The three are
 // distinct constants and none of them is empty.
 func CheckInWord(c CheckIn) string {
-	switch c.State {
+	switch c.State() {
 	case tri.Yes:
 		return "checked_in"
 	case tri.No:

@@ -1,6 +1,7 @@
 package projects
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -166,12 +167,21 @@ func Scan(path string, depth int) State {
 	// in no .gitignore are all cases a naive reader gets wrong, and git is the only thing that gets
 	// them all right. If git is unavailable or fails, we fall through to the walk rather than
 	// reporting nothing.
-	if files, ok := gitFiles(path, depth); ok {
+	if files, unreadable, ok := gitFiles(path, depth); ok {
 		st.IgnoreSource = "git"
 		st.Files = len(files)
 		st.DepthLimitReached = gitReachedDepth(path, depth)
-		st.Readable = tri.Yes
 		st.DirsVisited = 1
+		st.UnreadablePaths = unreadable
+		// THE SAME RULE AS THE HAND-WRITTEN WALK, AND DELIBERATELY THE SAME THREE LINES. A partial
+		// read leaves Readable undetermined; only a clean read is tri.Yes. This branch used to set
+		// tri.Yes unconditionally, so inside a git repository — which is what most watched
+		// directories ARE — a partially-read project rendered as a complete scan.
+		if len(st.UnreadablePaths) > 0 {
+			sort.Strings(st.UnreadablePaths)
+			return st
+		}
+		st.Readable = tri.Yes
 		return st
 	}
 
@@ -250,41 +260,67 @@ func walkTree(root, dir string, level, limit int, st *State) bool {
 	return true
 }
 
-// gitFiles asks git for the file set inside a repository. Criterion 19.
+// gitFiles asks git for the file set inside a repository, and for what git could NOT read.
+// Criteria 19 and 21.
 //
 // `git ls-files --cached --others --exclude-standard` is git's own answer to "what is here that you
 // are not ignoring": tracked files plus untracked-and-not-ignored ones, with nested ignore files,
 // negation patterns, $GIT_DIR/info/exclude and the user's global excludesFile all already applied.
 // This package parses no ignore file, here or anywhere.
 //
-// The prune list and the dot rule are applied ON TOP, because criterion 18 is not scoped to outside
-// a repository — a checked-in `vendor/` directory is still pruned.
+// THE EXIT CODE IS NOT EVIDENCE OF A COMPLETE READ, and this function used to treat it as though it
+// were. `git ls-files` WARNS on stderr about a directory it cannot open and still exits 0:
+//
+//	$ git ls-files --cached --others --exclude-standard   # exit 0
+//	warning: could not open directory 'locked/': Permission denied
+//	top.txt
+//
+// The previous version used cmd.Output(), which discards stderr, and inspected only the error. Git
+// told us it could not read part of the tree and we threw the message away — then reported a
+// complete scan. A zero exit from a tool that warns on stderr is evidence of no FATAL error, which
+// is not the same claim.
+//
+// ANY STDERR OUTPUT MEANS THE READ WAS NOT CLEAN. The named paths are extracted for the person's
+// benefit, but the decision does not depend on parsing succeeding: a warning this code does not
+// recognise — a future git, a message this parser does not match — still leaves the project marked
+// partially read rather than complete. Recognising the message is a nicety; noticing that there WAS
+// one is the correctness.
+//
+// The prune list and the dot rule are applied ON TOP of git's answer, because criterion 18 is not
+// scoped to outside a repository — a checked-in `vendor/` directory is still pruned.
 //
 // ok is false when this is not a repository, when git is not installed, or when git failed. The
 // caller then walks. A false here is never reported to a person as an empty project.
-func gitFiles(root string, limit int) ([]string, bool) {
+func gitFiles(root string, limit int) (files []string, unreadable []string, ok bool) {
 	git, err := exec.LookPath("git")
 	if err != nil {
-		return nil, false
+		return nil, nil, false
 	}
-	cmd := exec.Command(git, "-C", root, "rev-parse", "--is-inside-work-tree")
 	// A fully-constructed environment: git must not read the developer's own config while deciding
 	// what a test's temporary repository contains, and it must not be handed the ambient GIT_DIR of
-	// whatever process invoked omw.
-	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + root, "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null"}
-	if out, err := cmd.Output(); err != nil || strings.TrimSpace(string(out)) != "true" {
-		return nil, false
+	// whatever process invoked omw. LC_ALL is pinned so the warnings this parses do not change
+	// language with the person's locale — though see above: an unparsed warning still counts.
+	gitEnv := []string{
+		"PATH=" + os.Getenv("PATH"), "HOME=" + root,
+		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+		"LC_ALL=C",
+	}
+
+	probe := exec.Command(git, "-C", root, "rev-parse", "--is-inside-work-tree")
+	probe.Env = gitEnv
+	if out, err := probe.Output(); err != nil || strings.TrimSpace(string(out)) != "true" {
+		return nil, nil, false
 	}
 
 	ls := exec.Command(git, "-C", root, "ls-files", "--cached", "--others", "--exclude-standard", "-z")
-	ls.Env = cmd.Env
-	out, err := ls.Output()
-	if err != nil {
-		return nil, false
+	ls.Env = gitEnv
+	var stdout, stderr bytes.Buffer
+	ls.Stdout, ls.Stderr = &stdout, &stderr
+	if err := ls.Run(); err != nil {
+		return nil, nil, false
 	}
 
-	var files []string
-	for _, rel := range strings.Split(string(out), "\x00") {
+	for _, rel := range strings.Split(stdout.String(), "\x00") {
 		if rel == "" {
 			continue
 		}
@@ -296,7 +332,53 @@ func gitFiles(root string, limit int) ([]string, bool) {
 		}
 		files = append(files, rel)
 	}
-	return files, true
+	return files, unreadableFromGitWarnings(stderr.String()), true
+}
+
+// unreadableFromGitWarnings turns git's stderr into the paths it could not read.
+//
+// A line it recognises yields the path. A line it does NOT recognise yields the line itself, so an
+// unrecognised warning is still recorded as something git could not do — the entry is marked
+// partially read either way, and the person sees git's own words rather than nothing.
+// Exported for a test that drives the wordings directly — including ones this parser does not
+// recognise, which is the case that must still be counted.
+func UnreadableFromGitWarnings(stderr string) []string { return unreadableFromGitWarnings(stderr) }
+
+func unreadableFromGitWarnings(stderr string) []string {
+	var out []string
+	for _, line := range strings.Split(stderr, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if p, ok := pathInGitWarning(line); ok {
+			out = append(out, p)
+			continue
+		}
+		out = append(out, "git said: "+line)
+	}
+	return out
+}
+
+// pathInGitWarning pulls the quoted path out of a message like
+//
+//	warning: could not open directory 'locked/': Permission denied
+func pathInGitWarning(line string) (string, bool) {
+	i := strings.IndexByte(line, '\'')
+	if i < 0 {
+		return "", false
+	}
+	j := strings.IndexByte(line[i+1:], '\'')
+	if j < 0 {
+		return "", false
+	}
+	p := line[i+1 : i+1+j]
+	if p == "" {
+		return "", false
+	}
+	// Trimmed so it matches the form the hand-written walk records, and so the same directory does
+	// not render two ways depending on which path produced the entry.
+	return strings.TrimSuffix(p, "/"), true
 }
 
 // gitExcluded applies the prune list and the dot rule to a git-reported path. Criterion 18 on top of
@@ -315,7 +397,7 @@ func gitExcluded(rel string) bool {
 // gitReachedDepth reports whether git listed anything below the limit, which is criterion 16 for the
 // repository path: something exists down there and this listing is not reporting it.
 func gitReachedDepth(root string, limit int) bool {
-	all, ok := gitFiles(root, 1<<30)
+	all, _, ok := gitFiles(root, 1<<30)
 	if !ok {
 		return false
 	}

@@ -115,8 +115,8 @@ func TestTheThreeCheckInRenderingsArePairwiseDistinct(t *testing.T) {
 // never assigned must not read as a device the product is confident never started.
 func TestZeroCheckInIsUndeterminedNotNever(t *testing.T) {
 	var c CheckIn
-	if c.State != tri.Undetermined {
-		t.Fatalf("the zero CheckIn is %v, want Undetermined", c.State)
+	if c.State() != tri.Undetermined {
+		t.Fatalf("the zero CheckIn is %v, want Undetermined", c.State())
 	}
 	if c.Describe() == NeverCheckedIn().Describe() {
 		t.Fatal("an unset check-in renders as 'never checked in' — an answer nobody gave became a determined fact")
@@ -194,8 +194,8 @@ func TestListingsBeforeAndAfterAFirstCheckInDifferOnlyInThatDevicesState(t *test
 	if box.Label == "" {
 		t.Fatal("the never-started machine is NOT in the listing — PRD §3.8's exact prohibition")
 	}
-	if box.CheckIn.State != tri.No {
-		t.Fatalf("the never-started machine's check-in state is %v, want a determined 'never'", box.CheckIn.State)
+	if box.CheckIn.State() != tri.No {
+		t.Fatalf("the never-started machine's check-in state is %v, want a determined 'never'", box.CheckIn.State())
 	}
 	if strings.TrimSpace(box.CheckIn.Describe()) == "" {
 		t.Fatal("the never-started machine's check-in renders blank — the entry is present but silent")
@@ -224,8 +224,8 @@ func TestListingsBeforeAndAfterAFirstCheckInDifferOnlyInThatDevicesState(t *test
 			if same {
 				t.Errorf("the device checked in and its listing did not change: %q", after[i].CheckIn.Describe())
 			}
-			if after[i].CheckIn.State != tri.Yes {
-				t.Errorf("after checking in the state is %v, want Yes", after[i].CheckIn.State)
+			if after[i].CheckIn.State() != tri.Yes {
+				t.Errorf("after checking in the state is %v, want Yes", after[i].CheckIn.State())
 			}
 		} else if !same {
 			t.Errorf("a check-in on one device changed another device's state: %q -> %q",
@@ -352,7 +352,7 @@ func TestAnUnreadableCheckInIsUndeterminedAndTheDeviceIsStillListed(t *testing.T
 	for _, d := range list {
 		byLabel[d.Label] = d
 	}
-	if got := byLabel["damaged"].CheckIn.State; got != tri.Undetermined {
+	if got := byLabel["damaged"].CheckIn.State(); got != tri.Undetermined {
 		t.Errorf("an unreadable check-in reads as %v, want Undetermined — 'could not determine' became a determined answer", got)
 	}
 	// Three-way distinct, in one real listing, for three real entries.
@@ -426,5 +426,212 @@ func TestTheInventoryIsNotInTheStore(t *testing.T) {
 	}
 	if !strings.HasPrefix(p, filepath.Join(dir, "omw")+string(filepath.Separator)) {
 		t.Errorf("the inventory is at %s, outside the product directory under %s", p, dir)
+	}
+}
+
+// THE TWO "CANNOT BE READ" BRANCHES OF decodeCheckIn, WHICH THE PACKAGE'S OWN DOC COMMENT CALLS THE
+// POINT OF THE DESIGN AND WHICH NOTHING DROVE.
+//
+// Review found both surviving mutation: turning either into NeverCheckedIn() left every test green,
+// so an unrecognised state word on disk — or a record with no check-in state at all — could have
+// silently become "has never checked in". That is the §4.3 collapse this package exists to prevent,
+// arriving through the one door nobody was watching.
+//
+// Each case is driven from a real inventory file, and each asserts the state, the prose and the
+// machine-readable word together, so no single surface can carry the pass alone.
+func TestARecordThisBuildCannotReadIsUndeterminedAndNeverNever(t *testing.T) {
+	cases := map[string]string{
+		"an unrecognised state word":      `"state": "wat"`,
+		"a state word from a later build": `"state": "checked-in-via-hub"`,
+		"no check-in state at all":        `"nothing": "here"`,
+		"a null check-in object":          `"state": ""`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			getenv, _ := sandbox(t, nil)
+			r := mustRegistry(t, getenv)
+			mustRegister(t, r, "subject", "store-A")
+			mustRegister(t, r, "control-never", "store-B")
+			replaceCheckInBody(t, r, "subject", body)
+
+			list, err := r.List()
+			if err != nil {
+				t.Fatalf("a record this build cannot read made the whole inventory unreadable: %v", err)
+			}
+			var subject, control Device
+			for _, d := range list {
+				switch d.Label {
+				case "subject":
+					subject = d
+				case "control-never":
+					control = d
+				}
+			}
+			if subject.Label == "" {
+				t.Fatalf("the device was dropped from the listing entirely: %+v", list)
+			}
+			if subject.CheckIn.State() == tri.No {
+				t.Fatalf("a check-in this build cannot read became a determined 'has never checked in' — "+
+					"'could not determine' turned into 'determined to be nothing' (%q)", subject.CheckIn.Describe())
+			}
+			if subject.CheckIn.State() != tri.Undetermined {
+				t.Fatalf("a check-in this build cannot read reads as %v, want Undetermined", subject.CheckIn.State())
+			}
+			// The control is a genuine never-checked-in device in the SAME listing, so the two
+			// cannot be telling the same story.
+			if subject.CheckIn.Describe() == control.CheckIn.Describe() {
+				t.Errorf("the unreadable record and a genuinely never-started machine render identically: %q",
+					subject.CheckIn.Describe())
+			}
+			if CheckInWord(subject.CheckIn) == CheckInWord(control.CheckIn) {
+				t.Errorf("the unreadable record and a never-started machine share the machine-readable word %q",
+					CheckInWord(subject.CheckIn))
+			}
+			if strings.TrimSpace(subject.CheckIn.Why()) == "" {
+				t.Error("an undetermined check-in carries no reason at all")
+			}
+		})
+	}
+}
+
+// replaceCheckInBody swaps one device's whole check-in object for arbitrary JSON, so states this
+// build would never itself write can still be driven from the disk an inventory really is.
+func replaceCheckInBody(t *testing.T, r *Registry, label, body string) {
+	t.Helper()
+	raw := readInventory(t, r)
+	head := strings.Index(raw, `"label": "`+label+`"`)
+	if head < 0 {
+		t.Fatalf("no entry for %q:\n%s", label, raw)
+	}
+	tail := strings.Replace(raw[head:], `"state": "never"`, body, 1)
+	if tail == raw[head:] {
+		t.Fatalf("the entry for %q was not rewritten; the test would prove nothing:\n%s", label, raw)
+	}
+	if err := os.WriteFile(r.Path(), []byte(raw[:head]+tail), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A CHECK-IN WITH NO INSTANT IS THE THIRD ANSWER, AT EVERY DOOR IT CAN COME IN THROUGH.
+//
+// This is the defect review found, guarded at the value rather than at a renderer. It used to be
+// that Describe alone knew a zero-instant "yes" was really undetermined, so State, CheckInWord, the
+// exit-code predicates and every future consumer disagreed with it — a person read "could not be
+// determined" while their script read "checked in", about one device at one moment.
+//
+// The fix is that the VALUE carries it, so the test asserts the value, not the wording, and asserts
+// it at all three ingresses. A test that only checked the sentence would have gone green against
+// the original defect: the sentence was the one thing that was already right.
+func TestACheckInWithNoInstantIsNeverAValidYes(t *testing.T) {
+	// Ingress 1: the constructor. Nothing else in the package builds a CheckIn.
+	got := CheckedInAt(time.Time{})
+	if got.State() == tri.Yes {
+		t.Fatalf("CheckedInAt(zero) built a 'yes' with no instant: %+v", got)
+	}
+	if got.State() != tri.Undetermined {
+		t.Fatalf("CheckedInAt(zero) is %v, want Undetermined", got.State())
+	}
+	if got.Determined() {
+		t.Error("a check-in with no instant reports itself as determined")
+	}
+	if CheckInWord(got) != CheckInWord(UndeterminedCheckIn("x")) {
+		t.Errorf("the machine-readable word for a check-in with no instant is %q, and does not match the third answer's", CheckInWord(got))
+	}
+	// EVERY SURFACE AGREES. This is the property, stated once: whatever State says, the prose and
+	// the machine-readable word say the same thing about the same value.
+	for _, c := range []CheckIn{got, NeverCheckedIn(), CheckedInAt(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)), UndeterminedCheckIn("y")} {
+		saysUndetermined := strings.Contains(c.Describe(), tri.Undetermined.String())
+		if saysUndetermined != (c.State() == tri.Undetermined) {
+			t.Errorf("the prose and the state disagree: Describe()=%q, State()=%v", c.Describe(), c.State())
+		}
+		if (CheckInWord(c) == "undetermined") != (c.State() == tri.Undetermined) {
+			t.Errorf("the machine-readable word and the state disagree: %q, State()=%v", CheckInWord(c), c.State())
+		}
+		if c.State() == tri.Yes && c.At().IsZero() {
+			t.Errorf("a Yes with no instant exists: %q", c.Describe())
+		}
+	}
+
+	// Ingress 2: the disk. Go's zero time is a real RFC3339 value an inventory can hold.
+	getenv, _ := sandbox(t, nil)
+	r := mustRegistry(t, getenv)
+	mustRegister(t, r, "from-disk", "store-A")
+	replaceCheckInBody(t, r, "from-disk", `"state": "at",
+        "at": "0001-01-01T00:00:00Z"`)
+	list, err := r.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("want one device, got %+v", list)
+	}
+	if list[0].CheckIn.State() == tri.Yes {
+		t.Errorf("a zero instant on disk came back as a checked-in device: %q", list[0].CheckIn.Describe())
+	}
+	if list[0].CheckIn.State() != tri.Undetermined {
+		t.Errorf("a zero instant on disk reads as %v, want Undetermined", list[0].CheckIn.State())
+	}
+
+	// Ingress 3: the hub. A Source is outside this package and its Devices are not this package's
+	// to trust, so a hub reporting a check-in with no instant must not seed one either.
+	hubbed, _ := sandbox(t, map[string]string{EnvHub: "h"})
+	s := loadOrFail(t, hubbed, dialing(fakeHub{devices: []Device{
+		{Label: "from-hub", CheckIn: CheckedInAt(time.Time{})},
+	}}, nil))
+	for _, d := range s.Devices {
+		if d.CheckIn.State() == tri.Yes && d.CheckIn.At().IsZero() {
+			t.Errorf("a hub seeded a checked-in device with no instant: %q", d.CheckIn.Describe())
+		}
+	}
+	if !s.AnyUndetermined() {
+		t.Error("a listing holding a check-in with no instant reports everything as determined")
+	}
+}
+
+// THE PROVENANCE LABEL MUST NOT READ AS A MACHINE IDENTITY.
+//
+// Product's UAT stopped at this field: every entry carried "[this machine]", including a box
+// registered under ANOTHER machine's store id — a device that is definitively not this machine.
+// The field means "this entry came from this machine's inventory", and it now says so.
+//
+// The test is about what a reader can conclude, so it asserts the label does not claim identity for
+// a device known not to be this machine, and that the two provenances stay distinguishable.
+func TestTheSourceLabelDescribesProvenanceNotIdentity(t *testing.T) {
+	getenv, _ := sandbox(t, map[string]string{EnvHub: "h"})
+	r := mustRegistry(t, getenv)
+	// A machine that is NOT this one: registered by naming another store's id outright.
+	mustRegister(t, r, "the-box-elsewhere", "store-SOMEWHERE-ELSE")
+
+	s := loadOrFail(t, getenv, dialing(fakeHub{devices: []Device{
+		{Label: "only-the-hub-knows", CheckIn: NeverCheckedIn()},
+	}}, nil))
+
+	var local, remote Device
+	for _, d := range s.Devices {
+		switch d.Label {
+		case "the-box-elsewhere":
+			local = d
+		case "only-the-hub-knows":
+			remote = d
+		}
+	}
+	if local.Label == "" || remote.Label == "" {
+		t.Fatalf("this test needs both entries to be listed, got %+v", s.Devices)
+	}
+	// A device registered under another machine's id must not be labelled as being this machine.
+	line := local.Render()
+	if strings.Contains(line, "[this machine]") {
+		t.Errorf("a device registered as machine %q renders as %q — the provenance label is being "+
+			"read as a claim about which machine this is", local.Machine, line)
+	}
+	if !strings.Contains(line, "inventory") {
+		t.Errorf("the provenance label does not say it is about a record's origin: %q", line)
+	}
+	// The two provenances are still different facts and still render differently.
+	if local.Source == remote.Source {
+		t.Errorf("a locally-registered device and a hub-only device share the provenance %q", local.Source)
+	}
+	if strings.TrimSpace(local.Source) == "" || strings.TrimSpace(remote.Source) == "" {
+		t.Error("a provenance rendered blank")
 	}
 }
