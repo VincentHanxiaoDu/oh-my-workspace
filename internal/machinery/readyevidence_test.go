@@ -207,13 +207,29 @@ func TestAGreenBuildWithNoVerdictIsNotReady(t *testing.T) {
 
 // TestAStillRunningBuildIsNotReadyAndIsNotSilence. A run in progress was already excluded from
 // READY, and was excluded by SILENCE — which is the same defect wearing the other face.
+//
+// ONE COMPLETED RUN *AND* ONE IN PROGRESS, deliberately. The first version of this arm used a lone
+// in-progress run, which means ZERO completed — so it was answered by the nothing-has-reported
+// branch and never reached the still-running one at all. **It passed for the wrong reason, and a
+// mutation that disabled the still-running branch left it green.** A fixture that cannot reach the
+// code it names is asserting something else.
 func TestAStillRunningBuildIsNotReadyAndIsNotSilence(t *testing.T) {
-	out := readyFixture{checkRuns: onePendingCheckRun, statuses: approvedVerdict}.sweep(t)
+	out := readyFixture{
+		checkRuns: oneGreenCheckRun + "," + onePendingCheckRun,
+		statuses:  approvedVerdict,
+	}.sweep(t)
 	if emitted(out, "READY") {
 		t.Errorf("a check run still in progress was announced READY\n%s", out)
 	}
 	if !emitted(out, "NO-ANSWER") {
 		t.Errorf("a check run still in progress produced no event at all\n%s", out)
+	}
+	// AND IT MUST BE ANSWERED BY THE RIGHT BRANCH. Without this the arm passes whenever ANY
+	// no-answer fires, including the nothing-has-reported one, which is how it went green under a
+	// mutation that disabled the branch it is named for.
+	if !strings.Contains(out, "still running") {
+		t.Errorf("the event does not say a check run is still running, so this arm was answered by a "+
+			"different branch and is not measuring the pending one\n%s", out)
 	}
 }
 
