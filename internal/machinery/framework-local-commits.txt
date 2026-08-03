@@ -14,28 +14,79 @@
 # Blank lines and lines beginning with `#` are ignored.
 
 
-36f0f72 .workflow/bin/queue.sh Issue #79: `reviews_waiting` converted a FAILED author lookup into an empty author set — `2>/dev/null || echo ""` — and an empty set matches no role, so a pull request was offered to every role including the one that wrote it. Both call sites now exit non-zero and say what failed. NOT YET UPSTREAMED — it belongs in agent-dev-flow and the next refresh will delete it. IT ALREADY DID: the refresh 5f8bd0d replaced this file wholesale and removed the fix, the four `internal/machinery` tests went red, `main` blocked the board, and 36f0f72 re-applied the declared hunks by hand. The sha above moved for that reason ALONE — this is the same fix, STILL local and STILL NOT UPSTREAMED, restored a second time. This entry is a debt, not a dismissal. What survives the refresh is `internal/machinery/authorlookup_test.go`, which executes the installed script against a stub `gh` that fails only the author lookup and goes red the moment the fix is gone; `queue.sh --self-test` carries a matching arm so the upstream patch arrives with its own proof. This entry is a debt, not a dismissal.
+# ============================================================================================
+# EVERY DEBT THIS FILE CARRIED IS DISCHARGED, AND #117 IS WHERE IT HAPPENED.
 #
-# IT CARRIES #59's DEBT TOO, and that is why the older line for this file is gone rather than
-# forgotten. `283715b .workflow/bin/queue.sh` declared the #59 fix — `reviews_waiting` re-offering a
-# head to the role that had already refused it, because a `changes-requested` verdict publishes
-# `failure` and only `success` suppressed. That fix is STILL local and STILL not upstreamed — it did survive the 5f8bd0d refresh, unlike #79's, so `reviewed_by` needed no restoring; 283715b
-# simply stopped being the most recent commit on the file, so the check reported the line as inert
-# and it would have gone quiet either way. Both fixes leave with the same refresh, and
-# `internal/machinery/reviewassignment_test.go` is what survives it for #59, exactly as
-# `authorlookup_test.go` is for #79.
-
-36f0f72 .workflow/bin/pr-authors.sh Issue #79: `--pr` printed nothing and exited 0 when the API could not be reached, so `could not determine who built this` and `determined that nobody did` shared a value. It now exits 3 — for the commit list and for the per-commit file list, where an unreadable diff was being read as a commit that touched nothing outside `openspec/`. `--range` is untouched, so `check-review.sh`, its only caller, needs no change; that was checked by driving `check-review.sh --self-test`. NOT YET UPSTREAMED — same debt, same reason, and `pr-authors.sh --self-test` carries the matching arms. Deleted by the refresh 5f8bd0d alongside its partner and restored by hand in 36f0f72; the sha moved, the debt did not.
-
-43c63c4 .workflow/bin/check-review.sh Issue #84: a verdict whose `Reviewed-sha:` named no git object was discarded in SILENCE — on #38 a UAT refusal named a sha sharing eight hex characters with the head and naming nothing, and the gate published `success` 28 seconds later while a role believed it had blocked the pull request. A sha this repository knows is still a silent stale review; a sha naming no object is now reported with the sha, the head and the remedy, and exits 4. The scan probes for a shallow checkout and says the question could not be determined rather than accusing on an object that was merely never fetched. NOT YET UPSTREAMED — it belongs in agent-dev-flow and the next refresh will delete it. What survives is `internal/machinery/reviewgate_test.go`'s `TestAVerdictNamingAnUnknownShaIsReported`, which executes the installed script and reproduces the eight-character prefix collision rather than using two obviously different shas; `check-review.sh --self-test` carries matching arms with both of the Issue's controls. 43c63c4 also carries the #98 review's blocker: a STALE verdict — a real ancestor that is not the head — was byte-identical to no verdict at all, both `no review found` at exit 1, which are opposite instructions. It is now a ::notice:: naming the poster, the sha and the head; no exit code moved and nothing that was mergeable stopped being mergeable.
-
-24ffb05 .github/workflows/gates.yml Issue #84: exit code 4 needed its own published sentence, or the fact the checker went to the trouble of splitting would reach nobody — which is #52 exactly, where a landed refusal and an absent review shared a description. NOT YET UPSTREAMED, same debt and same refresh as check-review.sh. `internal/machinery/reviewgate_test.go`'s `TestPublishDistinguishesTheUnplaceableVerdict` lifts the real publish step out of this file and goes red if rc=4 ever renders as `No current review` again.
+# Eight declarations across seven files, every one of them ending "NOT YET UPSTREAMED — the next
+# refresh will delete it". agent-dev-flow a9d81c2 — "carry every downstream fix upstream before it
+# is refreshed away", 1,179 insertions over seven files — and 2b94c41 for the archive gate took all
+# of them. The #117 refresh then installed them back here.
 #
-# IT CARRIES #82's AND #65's DEBTS TOO. `aaf0e68` declared the #82 fix (one verdict block selected with `| last`, so an author erased an independent refusal by self-approving after it) and `bbd0606` before it declared #65 (the reviewer's identity taken from the comment TEXT). BOTH ARE STILL LOCAL AND STILL NOT UPSTREAMED; each simply stopped being the most recent commit on the file, so the check would have reported the line as inert and it would have gone quiet either way. All three leave with the same refresh, and `TestQuotedVerdictIsNotAVerdict`, `TestASelfApproveDoesNotEraseARefusal` and `TestAVerdictNamingAnUnknownShaIsReported` are what survive it. THREE DEBTS, NOT THREE DISMISSALS — and #65 is only half fixed in any case: the roles share one GitHub account, so the `[role]` marker is a convention and not an authenticated fact.
+# **THE NUMBER THAT EXPLAINS THE WHOLE THING IS 1,179.** That is how far behind the framework's own
+# copies had fallen from the repository running them. Every fail-open fixed here existed only here.
 #
-# IT CARRIES #65's DEBT TOO, and that is why the older line for this file is gone rather than forgotten. `bbd0606 .workflow/bin/check-review.sh` declared the #65 fix — the reviewer's identity taken from the comment TEXT, so any role could mint any other role's approval and a merely QUOTED verdict counted as one. That fix is STILL local and STILL not upstreamed; bbd0606 simply stopped being the most recent commit on the file, so the check would have reported the line as inert and it would have gone quiet either way. Both fixes leave with the same refresh, and `TestQuotedVerdictIsNotAVerdict` is what survives it for #65 exactly as `TestASelfApproveDoesNotEraseARefusal` is for #82. BOTH ARE DEBTS, NOT DISMISSALS — and #65 is only half fixed in any case: the roles share one GitHub account, so the `[role]` marker is a convention and not an authenticated fact.
+# THE PROOF IS NOT THAT UPSTREAM SAYS SO. For five of the seven files the refresh's copy is
+# BYTE-IDENTICAL to ours — `cmp` says so, and the installer wrote nothing over them, which is why
+# `git diff` for this refresh names five files and not eight. For the two watches the only bytes
+# that changed are self-test timing; the #64 tail-reason code and the #89 READY-evidence code are
+# byte-identical. And the whole `internal/machinery` suite, which EXECUTES these scripts, is green.
+#
+# WHY FIVE LINES REMAIN BELOW ANYWAY, and it is a git fact rather than a debt. A declaration is
+# needed while OUR commit is the most recent one to touch the file. For the five files the refresh
+# returned unchanged, the installer copied identical bytes, so no new commit touches them and our
+# commit is still the last one — even though upstream has now spoken for every line in them. The
+# precedent is 17c8f9c, recorded below: there a refresh landed OVER the file and the line became
+# removable. Here it landed IDENTICALLY, and it did not.
+#
+# **These five are no longer debts. They are bookkeeping, and the next refresh that changes any of
+# these files for any reason retires the line for it.**
+# ============================================================================================
 
-d1fd981 .workflow/bin/check-generated.sh Issue #77, carried into #108: the gate read the relationship between a change and the specification it generates in ONE direction only — it refused a spec edited WITHOUT an archive and said nothing about a spec regenerated with the archive half done. Eleven occurrences of a shipped change left in `openspec/changes/` in one day, eleven caught by a person happening to look, zero by a mechanism; occurrence eleven landed inside the 171-second window in which the repair for eight-to-ten was open, and all three roles have done it. `archive_gate` now refuses that state, naming the change directory and the `openspec archive <slug>` command, scoped to the capabilities the pull request regenerates so in-flight work on the release critical path stays green. NOT YET UPSTREAMED — it belongs in agent-dev-flow and the next refresh will delete it. What survives is `internal/machinery/archivegate_test.go`, which EXECUTES this script — driven with the real `outbox-drafts-and-modes` delta and all ten of its requirements — and goes red on five assertions the moment the arm is gone; `check-generated.sh --self-test` carries five matching arms so the upstream patch arrives with its own proof. THE SHA MOVED FOR ONE REASON: #109's review found the arm rendering a `0 of N` result as `so its work has not landed` — a determination, and FALSE about `unplaceable-verdict-reported`, which shipped in #98. d1fd981 makes a partial or absent match report UNDETERMINED with the count measured, blocking on neither. Same fix, same debt, STILL local and STILL not upstreamed. This entry is a debt, not a dismissal.
+36f0f72 .workflow/bin/pr-authors.sh Issue #79: `--pr` printed nothing and exited 0 when the API could not be reached, so `could not determine who built this` and `determined that nobody did` shared a value. It exits 3 now — for the commit list and for the per-commit file list, where an unreadable diff was being read as a commit that touched nothing outside `openspec/`. UPSTREAMED as agent-dev-flow a9d81c2 and RETURNED BYTE-IDENTICAL by the #117 refresh, verified with `cmp` against the installed framework tree: the installer listed nothing to replace here. The debt is discharged; this line remains only because copying identical bytes writes no commit, so 36f0f72 is still the most recent thing to touch the file. `prauthors_test.go` and `pr-authors.sh --self-test` are what keep it honest.
+
+43c63c4 .workflow/bin/check-review.sh Issue #84: a verdict whose `Reviewed-sha:` named no git object was discarded in SILENCE — on #38 a UAT refusal named a sha sharing eight hex characters with the head and naming nothing, and the gate published `success` 28 seconds later while a role believed it had blocked the pull request. Reported now with the sha, the head and the remedy, at exit 4; a shallow checkout says the question could not be determined rather than accusing. It also carries #98's blocker (a STALE verdict was byte-identical to no verdict at all), #82's (one verdict block selected with `| last`, so an author erased an independent refusal by self-approving after it) and #65's (the reviewer's identity taken from the comment TEXT, so a merely QUOTED verdict counted as one). UPSTREAMED as agent-dev-flow a9d81c2 and RETURNED BYTE-IDENTICAL by the #117 refresh. All four debts discharged together; the line remains for the git reason above. `reviewgate_test.go` — `TestAVerdictNamingAnUnknownShaIsReported`, `TestASelfApproveDoesNotEraseARefusal`, `TestQuotedVerdictIsNotAVerdict`, `TestAStaleVerdictIsNotAnAbsentOne` — is what keeps it honest, and #65 is still only half fixed in any case: the roles share one GitHub account, so the `[role]` marker is a convention and not an authenticated fact.
+
+24ffb05 .github/workflows/gates.yml Issue #84: exit code 4 needed its own published sentence, or the fact the checker went to the trouble of splitting would reach nobody — which is #52 exactly, where a landed refusal and an absent review shared a description. UPSTREAMED as agent-dev-flow a9d81c2 and RETURNED BYTE-IDENTICAL by the #117 refresh. `reviewgate_test.go`'s `TestPublishDistinguishesTheUnplaceableVerdict` lifts the real publish step out of this file and goes red if rc=4 ever renders as `No current review` again.
+
+d1fd981 .workflow/bin/check-generated.sh Issue #77, carried into #108: the archive gate read the relationship between a change and the specification it generates in ONE direction only — it refused a spec edited WITHOUT an archive and said nothing about a spec regenerated with the archive half done. Eleven occurrences in one day, eleven caught by a person happening to look, zero by a mechanism. UPSTREAMED as agent-dev-flow 2b94c41 and RETURNED BYTE-IDENTICAL by the #117 refresh. THIS ONE IS THE INSTALLER'S REFUSAL PAYING FOR ITSELF: it landed here while the upstream branch was being written, and the new `install.sh` stopped and NAMED this file instead of replacing it, which is how it got carried up rather than deleted. `archivegate_test.go` and five matching `--self-test` arms are what keep it honest.
+
+32af7b8 .workflow/bin/gh-budget.sh Issue #81: the guard read `.resources.core.remaining`, the PRIMARY hourly quota, while every 403 in the outage was a SECONDARY (burst) limit that `GET /rate_limit` does not report — measured at core 4896/5000 and graphql 4964/5000 while every call was being refused, so the reserve was never reached and `HOLDING` never fired. It takes the 403 itself as the signal now, waits it out on the secondary's own cooldown, and says of a healthy primary quota that the secondary limit could NOT be determined. UPSTREAMED as agent-dev-flow a9d81c2 and RETURNED BYTE-IDENTICAL by the #117 refresh. `budgetguard_test.go` is what keeps it honest.
+
+
+# ============================================================================================
+# THREE LINES WERE REMOVED HERE BECAUSE THE REFRESH LANDED OVER THEIR FILES. Recorded rather than
+# silently dropped, because "the line is gone" and "the fix is gone" look identical afterwards:
+#
+#   36f0f72 .workflow/bin/queue.sh      #79, and #59's debt with it
+#   5d0bf82 .workflow/bin/watch-queue.sh #64
+#   ec2bcde .workflow/bin/watch-prs.sh   #89
+#
+# `watch-queue.sh` (#64, the `LOOKUP FAILED` reason cut from the HEAD of an output whose failure is
+# its LAST line) and `watch-prs.sh` (#89, `READY` firing on the ABSENCE of negative evidence, at a
+# measured 50% false-positive rate) came back with their fix code BYTE-IDENTICAL — the only changed
+# bytes in either file are self-test arms that slept a fixed three seconds and now wait for the
+# outcome. `watchreason_test.go` and `readyevidence_test.go` pass unchanged.
+#
+# `queue.sh` IS THE ONE THAT NEEDS READING. #79's queue-side fix and #59's are both gone, and NOT
+# because they were dropped: the region they lived in no longer exists. `reviews_waiting` is gone
+# with it. The queue no longer asks who authored anything — ownership comes from the branch name,
+# the author dispatches one reviewer, and a refusal goes back to THAT reviewer by name. So there is
+# no longer a queue for a refusing role to be re-offered the work from, and no author lookup to
+# collapse to an empty set.
+#
+# THE FAIL-OPEN CLASS BOTH FIXES CLOSED IS STILL CLOSED, and it is asserted rather than assumed:
+# the `could not determine` half moved intact onto the review-history query, which exits non-zero
+# with an `::error::` and never renders as `NO REVIEW HAS HAPPENED`. `authorlookup_test.go` and
+# `reviewassignment_test.go` were re-aimed at the new contract and every new assertion was confirmed
+# by a mutation that removed the behaviour and turned it red.
+#
+# ONE PROPERTY WAS TRADED AWAY ON PURPOSE AND IS NOT REPLACED: #59's deliberate REDUNDANCY, two
+# independent roles offered the same head so that one unavailable reviewer could not stall the
+# board. There is one reviewer per pull request now. **#32 is the outage that redundancy was chosen
+# to prevent and it is still open.** The header of `reviewassignment_test.go` carries this at
+# length; it is not a solved problem, it is a live trade.
+# ============================================================================================
+
 
 # The healthy state is no entries at all.
 #
@@ -43,18 +94,3 @@ d1fd981 .workflow/bin/check-generated.sh Issue #77, carried into #108: the gate 
 # agent-dev-flow aa8c730, and the refresh 1889abd has since landed over that file — so the framework
 # has spoken for it and the declaration became unnecessary while this branch was open. The check
 # said so, in as many words, and the line was removed. That is the loop working.
-
-32af7b8 .workflow/bin/gh-budget.sh Issue #81: the guard read `.resources.core.remaining`, the PRIMARY hourly quota, while every 403 in the outage was a SECONDARY (burst) limit that `GET /rate_limit` does not report — measured at core 4896/5000 and graphql 4964/5000 while every call was being refused, so the reserve was never reached and `HOLDING` never fired. It now takes the 403 itself as the signal (`note-failure`), holds on it, waits it out on the secondary's own cooldown rather than the reset clock, and says of a healthy primary quota that the secondary limit could NOT be determined. NOT YET UPSTREAMED — it belongs in agent-dev-flow and the next refresh will delete it. What survives is `internal/machinery/budgetguard_test.go`, which executes this script against a stub where the primary quota reads healthy while the calls are refused; the `--self-test` carries matching arms so the upstream patch arrives with its own proof. This entry is a debt, not a dismissal.
-
-
-
-5d0bf82 .workflow/bin/watch-queue.sh Issue #64: the `LOOKUP FAILED` reason was `cut -c1-200` — the HEAD of an output captured with `2>&1`, whose failure is its LAST line, so a `dial tcp … operation timed out` was cut off and the emission was read as a misfire. It now shows the tail, marks the elision, and still renders a short reason byte-identically. NOT YET UPSTREAMED — it belongs in agent-dev-flow and the next refresh will delete it. What survives is `internal/machinery/watchreason_test.go`, which drives this watch with a stub queue that prints past the budget and THEN fails — the case the shipped self-test could not observe, because its stub failed with short output. This entry is a debt, not a dismissal. IT CARRIES #81'S DEBT TOO, and that is why the older line for this file is gone rather than forgotten: 32af7b8 simply stopped being the most recent commit here, so the check would have reported it as inert either way. Both fixes leave with the same refresh.
-
-
-ec2bcde .workflow/bin/watch-prs.sh Issue #89: `READY` — the signal a verifier acts on to MERGE — fired on the ABSENCE of negative evidence. `[ "${pending:-0}" -eq 0 ]` counts check runs that are not completed, so a head with NO check runs at all had nothing pending, nothing failing and no review to refuse, and every test passed vacuously. Measured at a 50% false-positive rate in one sweep, twice reproduced on #46 head 4e9ca30c. READY now requires a COMPLETED check run, nothing pending, and a `success` verdict read positively; the no-answer case gets its own `NO-ANSWER` event rather than silence; a failed commit-status lookup is reported instead of falling through; and a `--sweep` that holds now exits rather than looping forever. NOT YET UPSTREAMED — it belongs in agent-dev-flow and the next refresh will delete it. What survives is `internal/machinery/readyevidence_test.go`, which executes this script against a stub `gh` returning an empty `check_runs` array and drives BOTH the sweep and the monitor. This entry is a debt, not a dismissal.
-
-# IT CARRIES #64's AND #81's DEBT FOR THIS FILE TOO, which is why their lines for it are gone rather
-# than forgotten: 5d0bf82 and 32af7b8 each stopped being the most recent commit here, so the check
-# would have reported them as inert either way. All three fixes leave with the same refresh, and
-# `internal/machinery/watchreason_test.go` and `budgetguard_test.go` are what survive it for #64 and
-# #81 respectively.
