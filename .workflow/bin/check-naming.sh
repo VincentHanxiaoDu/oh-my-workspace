@@ -5,6 +5,15 @@
 #        check-naming.sh --self-test
 set -euo pipefail
 
+# ONE LIST OF ROLES, and it lives in ../adf/roles.py now. This gate is the only bash left that
+# needs it, so it ASKS rather than keeping a second copy — a second copy is Issue #126, where this
+# file accepted `flow/` and the queue routed nothing to it, so a branch was green here and in
+# nobody's queue.
+ADF_ROLE_ALT=$(python3 "$(dirname "${BASH_SOURCE[0]}")/../adf/roles.py" --alt) || {
+  echo "::error::could not read the role list. This is a LOOKUP FAILURE and NOT a statement that this branch is misnamed." >&2
+  exit 2; }
+adf_build_roles_alt() { printf '%s' "$ADF_ROLE_ALT"; }
+
 case "${1:-}" in
   -*) [ "$1" = "--self-test" ] || {
         echo "::error::unknown option '$1'. This is a typo, not an argument — refusing." >&2; exit 2; } ;;
@@ -73,7 +82,10 @@ run_gate() {
   fi
 
   # <role>/<type>/<issue>-<slug>
-  if ! printf '%s' "$branch" | grep -qE "^(dev|qa|product|ops|flow)/($TYPES)/[0-9]+-[a-z0-9-]+$"; then
+  # THE ROLE LIST COMES FROM roles.sh, NOT FROM A LITERAL HERE. A literal is how this gate came to
+  # accept `flow/` while `queue.sh` routed nothing to it, so a branch could be green here and in
+  # nobody's queue (Issue #126).
+  if ! printf '%s' "$branch" | grep -qE "^($(adf_build_roles_alt))/($TYPES)/[0-9]+-[a-z0-9-]+$"; then
     echo "::error::branch '$branch' is not <role>/<type>/<issue>-<slug>" >&2
     echo "  e.g. dev/fix/42-unwritable-store" >&2
     rc=1

@@ -154,6 +154,20 @@ run_check() {
     grep -q '@\.workflow/PROJECT\.md' "$f"       || { echo "::error::$role.md does not load .workflow/PROJECT.md, so the role does not know how this project is built, tested or accepted" >&2; rc=1; }
     grep -q '@\.workflow/.*/MEMORY\.md' "$f"       || { echo "::error::$role.md loads no memory, so everything the role learns dies with the session and the next round pays for it again" >&2; rc=1; }
     grep -qi 'MEMORY\.md. is yours\|Your memory' "$f"       || { echo "::error::$role.md loads a memory file but never tells the role to write to it — a memory nothing writes to stays empty forever" >&2; rc=1; }
+    # AND IT MUST BE TOLD TO CORRECT IT, WHICH IS THE HALF THAT MAKES IT SAFE TO BELIEVE.
+    #
+    # A memory file is loaded at the top of every round so the role does NOT re-derive what is in
+    # it. That is the point, and it is why a false entry is worse than an empty file: it is acted on
+    # confidently, no gate reads prose, and the role is the only check on it.
+    #
+    # Measured within hours of these files existing: a role wrote an entry explaining an event flood
+    # as "a first-poll burst, then near-silence". It was wrong. The correction was wrong too — its
+    # own pull request was titled "correct a memory entry that was wrong twice". Nothing had asked
+    # for either correction; the role did it because it noticed, which is not a mechanism.
+    grep -qi 'false, fix it or delete it' "$f" \
+      || { echo "::error::$role.md never tells the role to correct a memory entry the moment it finds it false. An entry pruned 'eventually' is believed in the meantime, by every role that loads it" >&2; rc=1; }
+    grep -qi 'load-bearing' "$f" \
+      || { echo "::error::$role.md does not say which memory entries must be confirmed before being acted on. 'Verify everything' is ignored, and 'verify nothing' is how a stale entry decides a command" >&2; rc=1; }
   done
 
   # R4 — CLOSURE AUTHORITY LIVES IN THE PROMPT OF THE ROLE THAT CLOSES, and nowhere else.
@@ -272,7 +286,7 @@ run_check() {
       || { echo "::error::$role.md has no @.workflow/<role>/AGENT.md injection point — a project could only extend it by editing a file the installer overwrites" >&2; rc=1; }
   done
 
-  [ "$rc" -eq 0 ] && echo "prompts ok: every role pulls its own queue and fans out uncapped, closure authority is stated where it is exercised, criteria cannot be softened, every working role watches its queue and its own PRs and can sweep the board when that watch dies, every role that comments is told to sign it so the queue can see what it has done, and every command has its project injection point"
+  [ "$rc" -eq 0 ] && echo "prompts ok: every role pulls its own queue and fans out uncapped, closure authority is stated where it is exercised, criteria cannot be softened, every working role watches its queue and its own PRs and can sweep the board when that watch dies, every role that comments is told to sign it so the queue can see what it has done, every command has its project injection point, and every role is told to correct its memory rather than only to write it"
   return "$rc"
 }
 

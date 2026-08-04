@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -49,7 +50,24 @@ var frameworkOwned = []string{".workflow/bin/", ".github/"}
 // What it misses, stated so it is not discovered later: a local machinery fix committed BY pm reads
 // as a refresh. Absence of a trailer is treated as local, not as a refresh, so an untrailered
 // commit is reported rather than waved through.
-const installingRole = "pm"
+// THE ROLES THAT PERFORM A REFRESH. `pm` routes and has always run installs here; `flow` maintains
+// agent-dev-flow itself and refreshes this repository when it lands a framework change — which is
+// how the Python machinery arrived.
+//
+// ADDED RATHER THAN WORKED AROUND. The alternative was to author a refresh commit as `Agent: pm`
+// while `flow` made it, and a trailer that misnames its author to satisfy a gate is the forgery
+// every other rule in this repository exists to prevent. The gate's model was too narrow; the
+// commit was honest.
+var installingRoles = map[string]bool{"pm": true, "flow": true}
+
+func refreshingRoleNames() string {
+	names := make([]string, 0, len(installingRoles))
+	for r := range installingRoles {
+		names = append(names, r)
+	}
+	sort.Strings(names)
+	return strings.Join(names, " or ")
+}
 
 var agentTrailer = regexp.MustCompile(`(?m)^Agent:[ \t]*(\S+)[ \t]*$`)
 
@@ -59,13 +77,13 @@ type fwCommit struct {
 	files []string
 }
 
-func (c fwCommit) local() bool { return c.role != installingRole }
+func (c fwCommit) local() bool { return !installingRoles[c.role] }
 
 func (c fwCommit) why() string {
 	if c.role == "" {
 		return "no Agent: trailer, so it is not demonstrably a refresh"
 	}
-	return "Agent: " + c.role + ", which is not the installing role"
+	return "Agent: " + c.role + ", which is not a role that performs refreshes"
 }
 
 // shallowReason PROBES whether the repository's history is truncated, and returns a stated reason
@@ -240,7 +258,7 @@ func TestNoUndeclaredLocalCommitsOnFrameworkOwnedPaths(t *testing.T) {
 		t.Fatalf("none of the %d commits over %v is by the installing role %q, so the install "+
 			"itself is not in view. This history is truncated or the trailer convention has "+
 			"changed; either way the classification below would be wrong, so this is red.",
-			len(commits), frameworkOwned, installingRole)
+			len(commits), frameworkOwned, refreshingRoleNames())
 	}
 
 	tracked := map[string]bool{}
