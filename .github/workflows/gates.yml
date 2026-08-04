@@ -80,6 +80,19 @@ jobs:
       # A GATE THAT CANNOT BE SHOWN TO FAIL IS NOT A GATE, so the self-tests run first and their
       # failure is the job's failure. Everything after this point is judged by a checker that has
       # just demonstrated it can go red.
+      # uv, FOR THE SELF-TESTS ONLY, AND THE DISTINCTION MATTERS.
+      #
+      # The machinery itself imports nothing but the standard library and runs under a bare
+      # `python3` — a consumer needs no virtualenv, no pip and no uv to USE it, and a test asserts
+      # that by parsing the imports. But `--self-test` RUNS THE SUITE, and the suite uses pytest.
+      #
+      # SAID PLAINLY RATHER THAN QUIETLY DEGRADED. The alternative was a fallback that skips the
+      # suite when uv is absent, and a gate that reports success having examined nothing is the one
+      # thing this framework may not do. So the gate installs it, and where it cannot, the
+      # self-test says "could not run the test suite — this is NOT a pass" and fails.
+      - name: uv (for --self-test)
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh && echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
       - name: Self-test every gate
         run: |
           set -euo pipefail
@@ -128,6 +141,12 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with: { ref: "${{ github.event.pull_request.head.sha || github.sha }}" }
+      # uv, IN CASE THIS PROJECT'S OWN `make ci` RUNS THE FRAMEWORK'S SUITE — which is true of
+      # agent-dev-flow itself and of nothing else. Harmless where it is unused: one curl, and a
+      # consumer's own `make ci` never asks for it.
+      - name: uv (for a project whose ci runs the framework suite)
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh && echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
       # THE PROJECT'S OWN BUILD, IF IT HAS ONE. An absent Makefile target is not a failure — this
       # framework installs into projects that have not been built yet — but it is SAID, so a green
       # here is never mistaken for "the tests passed".
@@ -189,6 +208,13 @@ jobs:
         with:
           ref: ${{ steps.pr.outputs.head_sha }}
           fetch-depth: 0
+
+      # uv, FOR THE SAME REASON AS THE OTHER JOBS: `--self-test` runs the suite, and the suite uses
+      # pytest. Three jobs invoke a self-test and each needs it; adding it to two of them is how
+      # this gate came back red saying "the review checker failed its own self-test", which is a
+      # true sentence about a missing tool and reads as a broken checker.
+      - name: uv (for --self-test)
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh && echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Self-test the checker
         id: selftest
