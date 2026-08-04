@@ -1,0 +1,26 @@
+# THE RUNTIME HAS NO DEPENDENCIES, AND THAT IS DELIBERATE.
+#
+# This framework installs into somebody else's repository. Anything a role needs at runtime is
+# something every consumer must install, on every machine and on CI, before the process can run at
+# all — and a process that cannot start is worse than one that is a little more verbose to write.
+#
+# So the scripts import nothing but the standard library, and `bin/*.sh` invokes them with plain
+# `python3`. No virtualenv, no uv, no pip, in any consumer.
+#
+# `uv` appears ONLY here, for the test suite, which runs in THIS repository and nowhere else.
+# Pinning it is the same rule the Makefile states for linters: a tool whose verdict depends on its
+# version goes green locally and red on CI against one identical tree.
+[project]
+name = "adf"
+version = "0.1.0"
+description = "agent-dev-flow machinery — the half that talks to GitHub"
+requires-python = ">=3.10"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8.0,<9"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# `-p no:cacheprovider`: the consumer's tree is not ours to litter with .pytest_cache.
+addopts = "-p no:cacheprovider"
